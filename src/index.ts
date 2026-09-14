@@ -4,6 +4,7 @@ import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-
 
 const STATE_TYPE = "pi-context/state";
 const NOTE_TYPE = "pi-context/note";
+const HINT_TYPE = "pi-context/hint";
 const RESET_MARKER_TYPE = "pi-context/reset-marker";
 const CONTINUATION_TYPE = "pi-context/continuation";
 const MAX_NOTE_BYTES = 1_000_000;
@@ -239,11 +240,6 @@ function tokenBudgetGuidance(remaining: number): string {
 	return `${GUIDANCE_OPEN_TAG}\nYou have ${remaining} tokens left in this context window. Write durable state with notes_write_file and call new_context before the window closes.\n${GUIDANCE_CLOSE_TAG}`;
 }
 
-function currentWindowId(ctx: ExtensionContext): string | undefined {
-	const windows = historyFromSession(ctx);
-	return windows[windows.length - 1]?.windowId;
-}
-
 function lineRange(text: string, startValue: unknown, stopValue: unknown) {
 	const lines = text.split("\n");
 	const resolve = (value: unknown, fallback: number) => {
@@ -264,8 +260,17 @@ const role = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.L
 
 export default function piContext(pi: ExtensionAPI) {
 	let rollover: "idle" | "requested" | "compacting" | "continued" = "idle";
-	let reminderClaimedInWindow: string | undefined;
 	let enabled = true;
+
+	/** Persist the context_window hint as a visible message (lands in history and the TUI), Codex-style. */
+	const persistHint = (ctx: ExtensionContext) => {
+		pi.sendMessage({ customType: HINT_TYPE, content: contextWindowHint(ctx), display: true }, { triggerTurn: false });
+	};
+
+	pi.on("session_start", (_event, ctx) => {
+		if (!enabled) return;
+		persistHint(ctx);
+	});
 	const saveNote = (op: NoteOperation) => {
 		// pi.appendEntry writes a custom SessionManager entry. Custom entries are persistent but excluded from LLM context.
 		// ExtensionContext deliberately exposes only a readonly SessionManager, so this is the public extension write path.
@@ -409,27 +414,18 @@ export default function piContext(pi: ExtensionAPI) {
 
 	pi.on("context", (event, ctx) => {
 		if (!enabled) return undefined;
-		// Rebuilt per request, so no state diffing is needed; identical to Codex's
-		// context_window developer fragment rendered into each model call.
-		const userText = (text: string) => ({
-			role: "user" as const,
-			content: [{ type: "text" as const, text }],
-			timestamp: Date.now(),
-		});
-		const injected = [userText(contextWindowHint(ctx))];
-
-		// Codex token_budget.maybe_record parity: below the threshold, claim the
-		// reminder once per context window; a new window makes it eligible again.
+		// Transient per-request while below the threshold. Codex's reminder persists in
+		// history and therefore stays visible; re-injecting while low is the effective parity.
 		const usage = ctx.getContextUsage();
-		if (usage && usage.tokens !== null) {
-			const remaining = Math.max(0, usage.contextWindow - usage.tokens);
-			const windowId = currentWindowId(ctx);
-			if (remaining <= REMINDER_THRESHOLD_TOKENS && reminderClaimedInWindow !== windowId) {
-				reminderClaimedInWindow = windowId;
-				injected.push(userText(tokenBudgetGuidance(remaining)));
-			}
-		}
-		return { messages: [...injected, ...event.messages] };
+		if (!usage || usage.tokens === null) return undefined;
+		const remaining = Math.max(0, usage.contextWindow - usage.tokens);
+		if (remaining > REMINDER_THRESHOLD_TOKENS) return undefined;
+		const guidance = {
+			role: "user" as const,
+			content: [{ type: "text" as const, text: tokenBudgetGuidance(remaining) }],
+			timestamp: Date.now(),
+		};
+		return { messages: [guidance, ...event.messages] };
 	});
 
 	pi.registerTool(defineTool({
@@ -480,13 +476,14 @@ export default function piContext(pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("session_compact", (event) => {
+	pi.on("session_compact", (event, ctx) => {
 		if (!enabled) return;
 		// Overflow retry is already continued once by Pi core. Sending another turn would duplicate it.
 		if (event.willRetry) return;
 		if (rollover !== "compacting") return;
 		rollover = "continued";
 		pi.appendEntry(STATE_TYPE, { version: 1, lastResetEntryId: event.compactionEntry.id });
+		persistHint(ctx);
 		pi.sendMessage({ customType: CONTINUATION_TYPE, content: CONTINUATION, display: false }, { triggerTurn: true });
 	});
 
@@ -495,4 +492,4 @@ export default function piContext(pi: ExtensionAPI) {
 	});
 }
 
-export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, GUIDANCE_OPEN_TAG, REMINDER_THRESHOLD_TOKENS, lineRange, assertVirtualPath };
+export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, HINT_TYPE, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, GUIDANCE_OPEN_TAG, REMINDER_THRESHOLD_TOKENS, lineRange, assertVirtualPath };
