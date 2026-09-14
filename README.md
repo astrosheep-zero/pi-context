@@ -46,7 +46,7 @@ The nine Codex History/Notes actions are flattened because Pi tools have one glo
 
 `notes_*` stores operation entries in the same append-only Pi session under `pi-context/note`. They are session-scoped, survive JSONL reload, never enter provider context, and use safe relative virtual paths only (no absolute paths, `..`, `.`, empty components, or backslashes). Searches are literal and case-sensitive. `notes_read_file` accepts inclusive 1-based line ranges; negative line numbers count from the last line. Writes are capped at 1,000,000 UTF-8 bytes.
 
-Pi has no public cross-agent session router. Passing `agent_name` to a history tool returns an explicit unsupported error; it is never silently redirected to the current session.
+Unlike Codex, the history tools do not advertise `agent_name`: Pi has no cross-agent session routing, so the parameter is omitted from the schemas entirely (strict `additionalProperties: false` still rejects it) instead of costing schema tokens on every request.
 
 Two extra controls compose Pi public APIs:
 

@@ -42,7 +42,6 @@ type HistoryItem = {
 type HistoryWindow = { windowId: string; createdAt?: string; items: HistoryItem[] };
 
 type HistoryFilter = {
-	agent_name?: string | null;
 	window_id?: string | null;
 	role?: HistoryItem["role"] | null;
 	tool_namespace?: string | null;
@@ -56,12 +55,6 @@ function json(value: unknown): string {
 
 function output(value: unknown, details: unknown = value, terminate = false) {
 	return { content: [{ type: "text" as const, text: json(value) }], details, terminate };
-}
-
-function unsupportedAgent(agentName: string | null | undefined) {
-	return agentName !== undefined && agentName !== null
-		? { error: "Pi 0.85.1 exposes no cross-agent session routing; agent_name is unsupported and was not aliased to this session." }
-		: undefined;
 }
 
 function isTextContent(part: unknown): part is TextContent {
@@ -160,9 +153,7 @@ function allItems(ctx: ExtensionContext) {
 	return historyFromSession(ctx).flatMap((window) => window.items);
 }
 
-function filteredItems(ctx: ExtensionContext, params: HistoryFilter): HistoryItem[] | { error: string } {
-	const agentError = unsupportedAgent(params.agent_name);
-	if (agentError) return agentError;
+function filteredItems(ctx: ExtensionContext, params: HistoryFilter): HistoryItem[] {
 	let items = allItems(ctx);
 	if (typeof params.window_id === "string") items = items.filter((item) => item.windowId === params.window_id);
 	if (typeof params.role === "string") items = items.filter((item) => item.role === params.role);
@@ -319,11 +310,9 @@ export default function piContext(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "history_list_windows",
 		label: "History list windows",
-		description: "List durable Pi session-history windows. agent_name is explicitly unsupported because Pi has no cross-agent session routing.",
-		parameters: Type.Object({ limit: positiveInteger(), agent_name: nullableString(), recent_first: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+		description: "List durable Pi session-history windows.",
+		parameters: Type.Object({ limit: positiveInteger(), recent_first: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
-			const agentError = unsupportedAgent(params.agent_name);
-			if (agentError) return output(agentError);
 			let windows = historyFromSession(ctx);
 			if (params.recent_first) windows = [...windows].reverse();
 			const limit = params.limit ?? windows.length;
@@ -335,10 +324,9 @@ export default function piContext(pi: ExtensionAPI) {
 		name: "history_list_items",
 		label: "History list items",
 		description: "List durable session items, including items before compaction, using opaque item and window IDs.",
-		parameters: Type.Object({ limit: positiveInteger(), recent_first: Type.Optional(Type.Boolean()), tool_namespace: nullableString(), role: Type.Optional(role), agent_name: nullableString(), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
+		parameters: Type.Object({ limit: positiveInteger(), recent_first: Type.Optional(Type.Boolean()), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const items = filteredItems(ctx, params);
-			if ("error" in items) return output(items);
 			return output({ items: items.slice(0, params.limit ?? items.length).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200)) });
 		},
 	}));
@@ -347,10 +335,8 @@ export default function piContext(pi: ExtensionAPI) {
 		name: "history_read_item",
 		label: "History read item",
 		description: "Read a bounded character range from one durable session item.",
-		parameters: Type.Object({ agent_name: nullableString(), item_id: Type.String(), offset_chars: Type.Optional(Type.Integer({ minimum: 0 })), limit_chars: positiveInteger(), window_id: Type.String() }, { additionalProperties: false }),
+		parameters: Type.Object({ item_id: Type.String(), offset_chars: Type.Optional(Type.Integer({ minimum: 0 })), limit_chars: positiveInteger(), window_id: Type.String() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
-			const agentError = unsupportedAgent(params.agent_name);
-			if (agentError) return output(agentError);
 			const item = allItems(ctx).find((candidate) => candidate.windowId === params.window_id && candidate.itemId === params.item_id);
 			if (!item) return output({ error: "unknown item_id or window_id" });
 			const chars = Array.from(item.content);
@@ -364,10 +350,9 @@ export default function piContext(pi: ExtensionAPI) {
 		name: "history_search_contents",
 		label: "History search",
 		description: "Case-sensitive literal substring search over durable Pi session history; no semantic search.",
-		parameters: Type.Object({ limit: positiveInteger(), query: Type.String(), recent_first: Type.Optional(Type.Boolean()), tool_namespace: nullableString(), role: Type.Optional(role), agent_name: nullableString(), tool_name: nullableString(), window_id: nullableString() }, { additionalProperties: false }),
+		parameters: Type.Object({ limit: positiveInteger(), query: Type.String(), recent_first: Type.Optional(Type.Boolean()), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const items = filteredItems(ctx, params);
-			if ("error" in items) return output(items);
 			const matching = items.filter((item) => item.content.includes(params.query));
 			return output({ items: matching.slice(0, params.limit ?? matching.length).map((item) => visibleItem(item)) });
 		},

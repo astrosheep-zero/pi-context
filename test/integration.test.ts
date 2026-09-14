@@ -175,6 +175,12 @@ test("schemas cover the nine History/Notes actions plus reset controls", () => {
 	}
 	assert.equal(objectSchema(captured.tools.get("history_read_item"))?.required?.includes("item_id"), true);
 	assert.equal(objectSchema(captured.tools.get("notes_write_file"))?.required?.includes("text"), true);
+	// No agent_name anywhere: Pi has no cross-agent session routing, and an unusable
+	// parameter should not cost schema tokens on every request.
+	for (const tool of captured.tools.values()) {
+		const properties = (tool.parameters as { properties?: Record<string, unknown> }).properties ?? {};
+		assert.equal("agent_name" in properties, false, `${tool.name} must not advertise agent_name`);
+	}
 });
 
 test("persisted note operations restore, are Unicode byte-limited, and use safe virtual paths", async () => {
@@ -247,8 +253,6 @@ test("custom reset boundary removes old provider context but history remains sea
 	);
 	assert.equal(found.items.length, 1);
 	assert.equal(found.items[0]?.item_id, oldUserId);
-	const crossAgent = resultJson<{ error: string }>(await call(captured, "history_list_windows", { agent_name: "other" }, ctx));
-	assert.match(crossAgent.error, /cross-agent/);
 	assert.ok(sessionManager.getEntry(compactionId));
 });
 
