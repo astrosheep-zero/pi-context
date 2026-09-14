@@ -235,9 +235,13 @@ export function contextWindowHint(ctx: ExtensionContext): string {
 	return `${CONTEXT_WINDOW_OPEN_TAG}\n${lines.join("\n")}\n${CONTEXT_WINDOW_CLOSE_TAG}`;
 }
 
-/** Codex-equivalent low-budget reminder: threshold-gated, claimed once per context window. */
-function tokenBudgetGuidance(remaining: number): string {
-	return `${GUIDANCE_OPEN_TAG}\nYou have ${remaining} tokens left in this context window. Write durable state with notes_write_file and call new_context before the window closes.\n${GUIDANCE_CLOSE_TAG}`;
+/**
+ * Codex-equivalent low-budget reminder. Static by design: this text is injected on
+ * every request while below the threshold, so a varying token count would invalidate
+ * the provider's prefix cache on each call. The exact figure is one tool call away.
+ */
+function tokenBudgetGuidance(): string {
+	return `${GUIDANCE_OPEN_TAG}\nContext budget is at or below ${REMINDER_THRESHOLD_TOKENS} tokens remaining. Persist durable state with notes_write_file, then call new_context before the window closes. get_context_remaining reports the exact figure.\n${GUIDANCE_CLOSE_TAG}`;
 }
 
 function lineRange(text: string, startValue: unknown, stopValue: unknown) {
@@ -414,18 +418,20 @@ export default function piContext(pi: ExtensionAPI) {
 
 	pi.on("context", (event, ctx) => {
 		if (!enabled) return undefined;
-		// Transient per-request while below the threshold. Codex's reminder persists in
-		// history and therefore stays visible; re-injecting while low is the effective parity.
+		// Transient while below the threshold: Codex's reminder persists in history and
+		// stays visible, so continuous low-budget visibility is the effective parity.
+		// Appended (not prepended) with static text: the cached prefix stays untouched,
+		// crossing the threshold only adds one stable suffix segment.
 		const usage = ctx.getContextUsage();
 		if (!usage || usage.tokens === null) return undefined;
 		const remaining = Math.max(0, usage.contextWindow - usage.tokens);
 		if (remaining > REMINDER_THRESHOLD_TOKENS) return undefined;
 		const guidance = {
 			role: "user" as const,
-			content: [{ type: "text" as const, text: tokenBudgetGuidance(remaining) }],
+			content: [{ type: "text" as const, text: tokenBudgetGuidance() }],
 			timestamp: Date.now(),
 		};
-		return { messages: [guidance, ...event.messages] };
+		return { messages: [...event.messages, guidance] };
 	});
 
 	pi.registerTool(defineTool({

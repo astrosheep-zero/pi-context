@@ -302,16 +302,21 @@ test("low-budget guidance is injected on every request while below the threshold
 	const unknown = context(sessionManager, undefined, { tokens: null, percent: null, contextWindow: 200_000 });
 	assert.equal(await runContextHook(captured, unknown), undefined);
 
-	// Below threshold: guidance on every request, because a transient single-shot
-	// would vanish from the next request (Codex's persisted reminder stays visible).
+	// Below threshold: guidance appended after the request messages on every call.
+	// Static text at a stable suffix position keeps the provider's prefix cache intact.
 	const low = context(sessionManager, undefined, { tokens: 190_000, percent: 95, contextWindow: 200_000 });
-	let transformed = (await runContextHook(captured, low)) as TransformResult;
-	assert.equal(transformed.messages.length, 1);
-	const guidance = transformed.messages[0]?.content[0]?.text ?? "";
+	const userMessage = { role: "user", content: [{ type: "text" as const, text: "next" }], timestamp: Date.now() };
+	const contextHandler = captured.handlers.get("context")?.[0];
+	assert.ok(contextHandler);
+	let transformed = (await contextHandler({ messages: [userMessage] } as never, low)) as TransformResult;
+	assert.equal(transformed.messages.length, 2);
+	assert.equal(transformed.messages[0], userMessage, "existing prefix untouched, guidance appended");
+	const guidance = transformed.messages[1]?.content[0]?.text ?? "";
 	assert.ok(guidance.startsWith(internal.GUIDANCE_OPEN_TAG));
-	assert.match(guidance, /You have 10000 tokens left/);
+	assert.match(guidance, /at or below 16000 tokens remaining/);
 	transformed = (await runContextHook(captured, low)) as TransformResult;
 	assert.equal(transformed.messages.length, 1, "re-injected while still below threshold");
+	assert.equal(transformed.messages[0]?.content[0]?.text, guidance, "byte-identical across requests: no cache churn");
 });
 
 test("new_context continues exactly once and cancellation/failure does not fall back or loop", async () => {
