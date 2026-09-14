@@ -20,6 +20,7 @@ The extension composes Pi's public `session_before_compact` / `session_compact` 
 
 - **`new_context` tool** — the model requests a fresh context window. The extension waits for the current tool turn to end, compacts with a short deterministic reset message (old conversation is excluded from the new provider context but stays in the session), then sends exactly one hidden continuation turn.
 - **`<context_window>` hint** — every model request carries a Codex-equivalent fragment with the agent name, first/current/previous window IDs, and the 5 most recently updated notes. The model gets recovery entry points, not a bare "go search" message.
+- **Low-budget guidance** — when remaining context drops to 16,000 tokens or below, a `<context_window_guidance>` reminder is injected exactly once per window (re-armed after each reset), matching Codex's `token_budget` reminder semantics: it tells the model to persist state with `notes_write_file` and call `new_context` before the window closes.
 - **History tools** — the model searches pre-reset conversation with case-sensitive literal substring search, exactly like Codex's `history.*` namespace.
 - **Notes tools** — persistent, session-scoped virtual files that survive window resets.
 
@@ -47,7 +48,7 @@ Pi has no public cross-agent session router. Passing `agent_name` to a history t
 
 Two extra controls compose Pi public APIs:
 
-- `get_context_remaining` returns `{ "remaining_tokens": number | null }`. `null` means Pi itself cannot make a reliable estimate (notably immediately after compaction).
+- `get_context_remaining` returns `{ "remaining_tokens": number | null }`. `null` means Pi itself cannot make a reliable estimate (notably immediately after compaction). The low-budget guidance uses the same source and stays silent when the estimate is unknown.
 - `new_context` returns terminal tool output, then waits for Pi's `agent_end`, triggers public `ctx.compact()`, installs a short deterministic reset compaction, and sends exactly one hidden continuation turn after compaction succeeds. Call it by itself in a tool batch. Pi only ends a tool turn when every parallel tool result is terminal, so Pi 0.85.1 cannot force an atomic rollover from the middle of a mixed parallel tool batch.
 
 ## Reset behavior and limits

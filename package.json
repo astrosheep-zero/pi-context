@@ -1,16 +1,22 @@
 {
   "name": "@astrosheep/pi-context",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Codex-style context windows for Pi: reset-style compaction, durable session history tools, and persistent notes.",
   "license": "MIT",
-  "keywords": ["pi-package", "pi-extension", "context-management"],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "context-management"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/astrosheep-zero/pi-context.git"
   },
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "files": [
     "src",
@@ -24,10 +30,12 @@
     "prepublishOnly": "npm run typecheck"
   },
   "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-agent-core": "^0.85.1",
     "@earendil-works/pi-ai": "^0.85.1",
     "@earendil-works/pi-coding-agent": "^0.85.1",
     "@types/node": "^22.19.19",

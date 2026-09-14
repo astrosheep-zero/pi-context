@@ -1,4 +1,5 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type, type TextContent } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const STATE_TYPE = "pi-context/state";
@@ -8,10 +9,12 @@ const CONTINUATION_TYPE = "pi-context/continuation";
 const MAX_NOTE_BYTES = 1_000_000;
 const CONTEXT_WINDOW_OPEN_TAG = "<context_window>";
 const CONTEXT_WINDOW_CLOSE_TAG = "</context_window>";
+const GUIDANCE_OPEN_TAG = "<context_window_guidance>";
+const GUIDANCE_CLOSE_TAG = "</context_window_guidance>";
+const REMINDER_THRESHOLD_TOKENS = 16_000;
 const RESET_SUMMARY = "Context window reset. Prior session entries remain available only through the pi-context history tools.";
 const CONTINUATION = "This is a fresh context window. Recover only the details needed to continue with history_* and notes_*; then continue the task.";
 
-type Json = Record<string, unknown>;
 type NoteFile = { text: string; createdAt: number; updatedAt: number };
 type NoteOperation = {
 	op: "write" | "append";
@@ -31,6 +34,15 @@ type HistoryItem = {
 };
 type HistoryWindow = { windowId: string; createdAt?: string; items: HistoryItem[] };
 
+type HistoryFilter = {
+	agent_name?: string | null;
+	window_id?: string | null;
+	role?: HistoryItem["role"] | null;
+	tool_namespace?: string | null;
+	tool_name?: string | null;
+	recent_first?: boolean;
+};
+
 function json(value: unknown): string {
 	return JSON.stringify(value, null, 2);
 }
@@ -39,37 +51,46 @@ function output(value: unknown, details: unknown = value, terminate = false) {
 	return { content: [{ type: "text" as const, text: json(value) }], details, terminate };
 }
 
-function unsupportedAgent(agentName: unknown) {
+function unsupportedAgent(agentName: string | null | undefined) {
 	return agentName !== undefined && agentName !== null
 		? { error: "Pi 0.85.1 exposes no cross-agent session routing; agent_name is unsupported and was not aliased to this session." }
 		: undefined;
 }
 
-function toText(value: unknown): string {
-	if (typeof value === "string") return value;
-	if (Array.isArray(value)) {
-		return value
-			.map((part) => {
-				if (typeof part === "string") return part;
-				if (part && typeof part === "object" && typeof (part as Json).text === "string") return (part as Json).text as string;
-				return JSON.stringify(part);
-			})
-			.join("\n");
-	}
-	return value === undefined || value === null ? "" : JSON.stringify(value);
+function isTextContent(part: unknown): part is TextContent {
+	return typeof part === "object" && part !== null && (part as TextContent).type === "text" && typeof (part as TextContent).text === "string";
 }
 
-function mapRole(role: unknown): HistoryItem["role"] | undefined {
-	if (role === "user" || role === "assistant" || role === "system" || role === "developer") return role;
-	if (role === "toolResult" || role === "tool") return "tool";
+function contentText(content: string | unknown[]): string {
+	if (typeof content === "string") return content;
+	return content.filter(isTextContent).map((part) => part.text).join("\n");
+}
+
+function mapRole(role: AgentMessage["role"]): HistoryItem["role"] | undefined {
+	if (role === "user" || role === "assistant") return role;
+	if (role === "toolResult" || role === "bashExecution") return "tool";
+	if (role === "custom") return "user";
+	if (role === "compactionSummary" || role === "branchSummary") return "system";
 	return undefined;
 }
 
-function toolInfo(message: Json): Pick<HistoryItem, "toolName" | "toolNamespace"> {
-	const name = typeof message.toolName === "string" ? message.toolName : undefined;
-	if (!name) return {};
-	const underscore = name.indexOf("_");
-	return { toolName: name, toolNamespace: underscore > 0 ? name.slice(0, underscore) : undefined };
+function messageContent(message: AgentMessage): string {
+	switch (message.role) {
+		case "bashExecution":
+			return message.output;
+		case "branchSummary":
+		case "compactionSummary":
+			return message.summary;
+		default:
+			return contentText(message.content);
+	}
+}
+
+function toolInfo(message: AgentMessage): Pick<HistoryItem, "toolName" | "toolNamespace"> {
+	if (message.role === "bashExecution") return { toolName: "bash", toolNamespace: undefined };
+	if (message.role !== "toolResult") return {};
+	const underscore = message.toolName.indexOf("_");
+	return { toolName: message.toolName, toolNamespace: underscore > 0 ? message.toolName.slice(0, underscore) : undefined };
 }
 
 /** Build durable, on-demand history directly from every entry on the current session branch. */
@@ -77,40 +98,39 @@ export function historyFromSession(ctx: ExtensionContext): HistoryWindow[] {
 	const sessionId = ctx.sessionManager.getSessionId();
 	let window: HistoryWindow = { windowId: `pcw:${sessionId}:root`, items: [] };
 	const windows = [window];
-	for (const entry of ctx.sessionManager.getBranch() as unknown as Array<Json>) {
+	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type === "compaction") {
-			window = { windowId: `pcw:${sessionId}:${String(entry.id)}`, createdAt: typeof entry.timestamp === "string" ? entry.timestamp : undefined, items: [] };
+			window = { windowId: `pcw:${sessionId}:${entry.id}`, createdAt: entry.timestamp, items: [] };
 			windows.push(window);
 			window.items.push({
 				windowId: window.windowId,
-				itemId: String(entry.id),
+				itemId: entry.id,
 				role: "system",
-				content: typeof entry.summary === "string" ? entry.summary : "",
-				createdAt: typeof entry.timestamp === "string" ? entry.timestamp : undefined,
+				content: entry.summary,
+				createdAt: entry.timestamp,
 			});
 			continue;
 		}
 		if (entry.type === "message") {
-			const message = entry.message as Json;
-			const role = mapRole(message.role);
+			const role = mapRole(entry.message.role);
 			if (!role) continue;
 			window.items.push({
 				windowId: window.windowId,
-				itemId: String(entry.id),
+				itemId: entry.id,
 				role,
-				content: toText(message.content),
-				createdAt: typeof entry.timestamp === "string" ? entry.timestamp : undefined,
-				...toolInfo(message),
+				content: messageContent(entry.message),
+				createdAt: entry.timestamp,
+				...toolInfo(entry.message),
 			});
 			continue;
 		}
 		if (entry.type === "custom_message") {
 			window.items.push({
 				windowId: window.windowId,
-				itemId: String(entry.id),
+				itemId: entry.id,
 				role: "user",
-				content: toText(entry.content),
-				createdAt: typeof entry.timestamp === "string" ? entry.timestamp : undefined,
+				content: contentText(entry.content),
+				createdAt: entry.timestamp,
 			});
 		}
 	}
@@ -133,7 +153,7 @@ function allItems(ctx: ExtensionContext) {
 	return historyFromSession(ctx).flatMap((window) => window.items);
 }
 
-function filteredItems(ctx: ExtensionContext, params: Json): HistoryItem[] | { error: string } {
+function filteredItems(ctx: ExtensionContext, params: HistoryFilter): HistoryItem[] | { error: string } {
 	const agentError = unsupportedAgent(params.agent_name);
 	if (agentError) return agentError;
 	let items = allItems(ctx);
@@ -158,22 +178,34 @@ function assertVirtualPrefix(value: unknown): string | undefined {
 	return assertVirtualPath(value);
 }
 
+/** Replays only pi-context note operations from session custom entries. */
+function isNoteOperation(data: unknown): data is NoteOperation {
+	if (typeof data !== "object" || data === null) return false;
+	const op = data as Partial<NoteOperation>;
+	return (
+		(op.op === "write" || op.op === "append") &&
+		typeof op.path === "string" &&
+		typeof op.text === "string" &&
+		typeof op.createdAt === "number" &&
+		typeof op.updatedAt === "number"
+	);
+}
+
 export function notesFromSession(ctx: ExtensionContext): Map<string, NoteFile> {
 	const files = new Map<string, NoteFile>();
-	for (const entry of ctx.sessionManager.getBranch() as unknown as Array<Json>) {
-		if (entry.type !== "custom" || entry.customType !== NOTE_TYPE || !entry.data || typeof entry.data !== "object") continue;
-		const op = entry.data as Partial<NoteOperation>;
-		if ((op.op !== "write" && op.op !== "append") || typeof op.path !== "string" || typeof op.text !== "string") continue;
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type !== "custom" || entry.customType !== NOTE_TYPE || !isNoteOperation(entry.data)) continue;
+		const op = entry.data;
 		try {
 			assertVirtualPath(op.path);
 		} catch {
 			continue;
 		}
 		const previous = files.get(op.path);
-		const createdAt = typeof op.createdAt === "number" ? op.createdAt : previous?.createdAt ?? 0;
-		const updatedAt = typeof op.updatedAt === "number" ? op.updatedAt : createdAt;
 		const text = op.op === "append" ? `${previous?.text ?? ""}${op.text}` : op.text;
-		if (Buffer.byteLength(text, "utf8") <= MAX_NOTE_BYTES) files.set(op.path, { text, createdAt, updatedAt });
+		if (Buffer.byteLength(text, "utf8") <= MAX_NOTE_BYTES) {
+			files.set(op.path, { text, createdAt: previous?.createdAt ?? op.createdAt, updatedAt: op.updatedAt });
+		}
 	}
 	return files;
 }
@@ -202,6 +234,16 @@ export function contextWindowHint(ctx: ExtensionContext): string {
 	return `${CONTEXT_WINDOW_OPEN_TAG}\n${lines.join("\n")}\n${CONTEXT_WINDOW_CLOSE_TAG}`;
 }
 
+/** Codex-equivalent low-budget reminder: threshold-gated, claimed once per context window. */
+function tokenBudgetGuidance(remaining: number): string {
+	return `${GUIDANCE_OPEN_TAG}\nYou have ${remaining} tokens left in this context window. Write durable state with notes_write_file and call new_context before the window closes.\n${GUIDANCE_CLOSE_TAG}`;
+}
+
+function currentWindowId(ctx: ExtensionContext): string | undefined {
+	const windows = historyFromSession(ctx);
+	return windows[windows.length - 1]?.windowId;
+}
+
 function lineRange(text: string, startValue: unknown, stopValue: unknown) {
 	const lines = text.split("\n");
 	const resolve = (value: unknown, fallback: number) => {
@@ -222,6 +264,7 @@ const role = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.L
 
 export default function piContext(pi: ExtensionAPI) {
 	let rollover: "idle" | "requested" | "compacting" | "continued" = "idle";
+	let reminderClaimedInWindow: string | undefined;
 	const saveNote = (op: NoteOperation) => {
 		// pi.appendEntry writes a custom SessionManager entry. Custom entries are persistent but excluded from LLM context.
 		// ExtensionContext deliberately exposes only a readonly SessionManager, so this is the public extension write path.
@@ -350,12 +393,25 @@ export default function piContext(pi: ExtensionAPI) {
 	pi.on("context", (event, ctx) => {
 		// Rebuilt per request, so no state diffing is needed; identical to Codex's
 		// context_window developer fragment rendered into each model call.
-		const hint = {
+		const userText = (text: string) => ({
 			role: "user" as const,
-			content: [{ type: "text" as const, text: contextWindowHint(ctx) }],
+			content: [{ type: "text" as const, text }],
 			timestamp: Date.now(),
-		};
-		return { messages: [hint, ...event.messages] };
+		});
+		const injected = [userText(contextWindowHint(ctx))];
+
+		// Codex token_budget.maybe_record parity: below the threshold, claim the
+		// reminder once per context window; a new window makes it eligible again.
+		const usage = ctx.getContextUsage();
+		if (usage && usage.tokens !== null) {
+			const remaining = Math.max(0, usage.contextWindow - usage.tokens);
+			const windowId = currentWindowId(ctx);
+			if (remaining <= REMINDER_THRESHOLD_TOKENS && reminderClaimedInWindow !== windowId) {
+				reminderClaimedInWindow = windowId;
+				injected.push(userText(tokenBudgetGuidance(remaining)));
+			}
+		}
+		return { messages: [...injected, ...event.messages] };
 	});
 
 	pi.registerTool(defineTool({
@@ -414,4 +470,4 @@ export default function piContext(pi: ExtensionAPI) {
 	});
 }
 
-export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, lineRange, assertVirtualPath };
+export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, GUIDANCE_OPEN_TAG, REMINDER_THRESHOLD_TOKENS, lineRange, assertVirtualPath };
