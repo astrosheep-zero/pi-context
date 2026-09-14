@@ -235,11 +235,12 @@ export function contextWindowHint(ctx: ExtensionContext): string {
 }
 
 /**
- * Codex-equivalent low-budget reminder. Static by design: a stale token count in a
- * persisted message would mislead later turns; the exact figure is one tool call away.
+ * Codex-equivalent low-budget reminder. The measured remaining count is frozen into
+ * the text at the crossing that fires it, so each persisted copy is a snapshot true
+ * at write time; get_context_remaining remains the live source for the current figure.
  */
-function tokenBudgetGuidance(): string {
-	return `${GUIDANCE_OPEN_TAG}\nContext budget is running low. Persist task state, decisions, open issues, and next steps with notes_write_file; call new_context when ready to continue in a fresh window. Automatic reset does not guarantee another note-taking turn. get_context_remaining reports the estimated remaining tokens.\n${GUIDANCE_CLOSE_TAG}`;
+function tokenBudgetGuidance(remaining: number): string {
+	return `${GUIDANCE_OPEN_TAG}\nContext budget is running low: only ${remaining} tokens remained when this reminder was recorded. Persist task state, decisions, open issues, and next steps with notes_write_file, including the window ID and item ID of relevant user requests for history_* lookups; call new_context when ready to continue in a fresh window. Automatic reset does not guarantee another note-taking turn. get_context_remaining reports the current remaining tokens.\n${GUIDANCE_CLOSE_TAG}`;
 }
 
 /** Cheap current-window lookup: scan the branch tail for the latest compaction entry. */
@@ -479,7 +480,7 @@ export default function piContext(pi: ExtensionAPI) {
 				// call/result pair), so from the next turn on the guidance lives in history
 				// and the TUI. A transient tail copy covers the in-flight request; it is
 				// appended, static, and one-shot, so the cached prefix survives.
-				guidance = tokenBudgetGuidance();
+				guidance = tokenBudgetGuidance(remaining);
 				pi.sendMessage({ customType: GUIDANCE_TYPE, content: guidance, display: true }, { triggerTurn: false });
 			}
 		}

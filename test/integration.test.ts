@@ -343,25 +343,32 @@ test("low-budget guidance persists once per window and covers the in-flight requ
 	const text = transformed.messages[0]?.content[0]?.text ?? "";
 	assert.ok(text.startsWith(internal.GUIDANCE_OPEN_TAG));
 	assert.match(text, /Context budget is running low/);
+	assert.match(text, /only 10000 tokens remained when this reminder was recorded/);
 	assert.match(text, /does not guarantee another note-taking turn/);
 	assert.equal(captured.sent.length, 1, "persisted exactly once");
 	assert.equal(captured.sent[0]?.message.customType, internal.GUIDANCE_TYPE);
 	assert.equal(captured.sent[0]?.message.display, true, "guidance lands in the TUI");
 	assert.equal(captured.sent[0]?.options?.triggerTurn, false, "never triggers an extra turn");
+	assert.equal(captured.sent[0]?.message.content, text, "persisted and transient copies are the same render");
 
 	// Same window: the persisted message carries it, no more transient injection.
 	assert.equal(await runContextHook(captured, low), undefined);
-	assert.equal(captured.sent.length, 1, "no duplicate persist");
+	assert.equal(captured.sent.length, 1, "no duplicate persist, so no re-render");
 
-	// A reset boundary creates a new window: eligible again, hint before guidance.
+	// A reset boundary creates a new window: eligible again, hint before guidance,
+	// with its own measured count frozen into a fresh render.
 	const before = await runBeforeCompact(captured, low, 190_000);
 	assert.ok(before && "compaction" in before);
 	sessionManager.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 190_000, before.compaction.details, true);
-	transformed = (await runContextHook(captured, low)) as TransformResult;
+	const newWindow = context(sessionManager, undefined, { tokens: 196_000, percent: 98, contextWindow: 200_000 });
+	transformed = (await runContextHook(captured, newWindow)) as TransformResult;
 	assert.equal(transformed.messages.length, 2, "new window re-arms the transient hint and the guidance");
 	assert.match(transformed.messages[0]?.content[0]?.text ?? "", new RegExp(`^${internal.CONTEXT_WINDOW_OPEN_TAG}`));
 	assert.match(transformed.messages[1]?.content[0]?.text ?? "", new RegExp(`^${internal.GUIDANCE_OPEN_TAG}`));
 	assert.equal(captured.sent.length, 2);
+	const newWindowText = transformed.messages[1]?.content[0]?.text ?? "";
+	assert.match(newWindowText, /only 4000 tokens remained when this reminder was recorded/);
+	assert.equal(captured.sent[1]?.message.content, newWindowText, "fresh window carries its own measured count");
 });
 
 test("new_context continues exactly once and cancellation/failure does not fall back or loop", async () => {
@@ -492,6 +499,8 @@ test("reminder defaults precede a 32768-token reserve and are configurable", asy
 	assert.equal(captured.sent.length, 0, "no guidance above the reminder threshold");
 	assert.ok(await runContextHook(captured, atRemaining(65_536)));
 	assert.equal(captured.sent.length, 1, "reminds well before Pi's 32768 reserve");
+	const boundaryText = typeof captured.sent[0]?.message.content === "string" ? captured.sent[0].message.content : "";
+	assert.match(boundaryText, /only 65536 tokens remained when this reminder was recorded/);
 	const marker = captured.sent[0];
 	assert.ok(marker);
 	assert.deepEqual(resultJson(await call(captured, "get_context_remaining", {}, atRemaining(65_536))), { remaining_tokens: 65_536 });
