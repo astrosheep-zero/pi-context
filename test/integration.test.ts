@@ -82,13 +82,15 @@ function context(
 	sessionManager: SessionManager,
 	compact?: ExtensionContext["compact"],
 	usage?: ContextUsage,
+	idle = true,
 ): ExtensionContext {
-	const fake: Pick<ExtensionContext, "sessionManager" | "getContextUsage" | "compact"> = {
+	const fake: Pick<ExtensionContext, "sessionManager" | "getContextUsage" | "compact" | "isIdle"> = {
 		sessionManager,
 		getContextUsage: () => usage,
 		compact: compact ?? (() => {}),
+		isIdle: () => idle,
 	};
-	// Only the three members the extension reads; ui/modelRegistry/events are unused.
+	// Only the members the extension reads; ui/modelRegistry/events are unused.
 	return fake as unknown as ExtensionContext;
 }
 
@@ -109,10 +111,15 @@ function resultJson<T>(result: AgentToolResult<unknown>): T {
 	return JSON.parse(text.text) as T;
 }
 
-async function runBeforeCompact(captured: Captured, ctx: ExtensionContext, tokensBefore: number): Promise<CompactionHookResult> {
+async function runBeforeCompact(
+	captured: Captured,
+	ctx: ExtensionContext,
+	tokensBefore: number,
+	reason: "manual" | "threshold" | "overflow" = "manual",
+): Promise<CompactionHookResult> {
 	const handler = captured.handlers.get("session_before_compact")?.[0];
 	assert.ok(handler, "session_before_compact handler registered");
-	const event = { reason: "manual", willRetry: false, signal: new AbortController().signal, preparation: { tokensBefore } };
+	const event = { reason, willRetry: reason === "overflow", signal: new AbortController().signal, preparation: { tokensBefore } };
 	return (await handler(event as never, ctx)) as CompactionHookResult;
 }
 
@@ -412,4 +419,53 @@ test("pi-context command toggles hint injection, guidance, and reset compaction 
 	// Bare command reports current state without changing it.
 	notices = await runCommand(captured, "pi-context", "", low);
 	assert.match(notices[0]?.message ?? "", /on/);
+});
+
+test("threshold compaction gets one Codex-style fallback turn before reset; idle and overflow paths reset immediately", async () => {
+	const sessionManager = manager();
+	appendText(sessionManager, "user", "long task history");
+	const captured = makeExtension(sessionManager);
+	// Post-run path: the agent run is still active, so isIdle() === false.
+	const streamingCtx = context(sessionManager, undefined, undefined, false);
+
+	// First threshold trigger mid-run: cancel and steer a note-taking fallback turn.
+	const first = await runBeforeCompact(captured, streamingCtx, 100, "threshold");
+	assert.deepEqual(first, { cancel: true });
+	assert.equal(captured.sent.length, 1);
+	assert.equal(captured.sent[0]?.message.customType, internal.FALLBACK_TYPE);
+	assert.equal(captured.sent[0]?.message.display, true);
+	assert.equal(captured.sent[0]?.options?.triggerTurn, true, "steered into the still-streaming run");
+	assert.equal(captured.sent[0]?.message.content, internal.FALLBACK_PROMPT);
+
+	// Second threshold trigger (after the fallback turn): real reset, no duplicate fallback.
+	const second = await runBeforeCompact(captured, streamingCtx, 104, "threshold");
+	assert.ok(second && "compaction" in second);
+	assert.equal(captured.sent.length, 1, "one fallback per window");
+
+	// Reset completes: the fallback flow auto-continues like Codex's mid-turn rollover.
+	const compactionId = sessionManager.appendCompaction(second.compaction.summary, second.compaction.firstKeptEntryId, 104, second.compaction.details, true);
+	const compactionEntry = sessionManager.getEntry(compactionId);
+	assert.ok(compactionEntry && compactionEntry.type === "compaction");
+	runHandlers(captured, "session_compact", { willRetry: false, compactionEntry }, streamingCtx);
+	assert.equal(captured.sent.length, 3, "persisted hint + hidden continuation after fallback reset");
+	assert.equal(captured.sent[1]?.message.customType, internal.HINT_TYPE);
+	assert.equal(captured.sent[2]?.options?.triggerTurn, true);
+
+	// New window: fallback re-arms.
+	const third = await runBeforeCompact(captured, streamingCtx, 50, "threshold");
+	assert.deepEqual(third, { cancel: true });
+	assert.equal(captured.sent.length, 4, "fallback re-armed in the new window");
+
+	// Idle pre-prompt path: never cancel (sendMessage would race the user prompt); reset immediately.
+	const idleManager = manager();
+	appendText(idleManager, "user", "history");
+	const idleCap = makeExtension(idleManager);
+	const idleCtx = context(idleManager, undefined, undefined, true);
+	const idleResult = await runBeforeCompact(idleCap, idleCtx, 100, "threshold");
+	assert.ok(idleResult && "compaction" in idleResult, "pre-prompt threshold resets without fallback");
+	assert.equal(idleCap.sent.length, 0);
+
+	// Overflow recovery: never cancelled, reset immediately even mid-run.
+	const overflowResult = await runBeforeCompact(captured, streamingCtx, 100, "overflow");
+	assert.ok(overflowResult && "compaction" in overflowResult, "overflow resets immediately");
 });

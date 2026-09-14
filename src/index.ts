@@ -6,6 +6,7 @@ const STATE_TYPE = "pi-context/state";
 const NOTE_TYPE = "pi-context/note";
 const HINT_TYPE = "pi-context/hint";
 const GUIDANCE_TYPE = "pi-context/guidance";
+const FALLBACK_TYPE = "pi-context/fallback";
 const RESET_MARKER_TYPE = "pi-context/reset-marker";
 const CONTINUATION_TYPE = "pi-context/continuation";
 const MAX_NOTE_BYTES = 1_000_000;
@@ -16,6 +17,10 @@ const GUIDANCE_CLOSE_TAG = "</context_window_guidance>";
 const REMINDER_THRESHOLD_TOKENS = 16_000;
 const RESET_SUMMARY = "Context window reset. Prior session entries remain available only through the pi-context history tools.";
 const CONTINUATION = "This is a fresh context window. Recover only the details needed to continue with history_* and notes_*; then continue the task.";
+
+/** Codex auto_compact_fallback_prompt parity: one note-taking chance before an automatic reset. */
+const FALLBACK_PROMPT =
+	"Context limit reached. This window is about to be reset. Write durable state with notes_write_file now: task state, decisions, open issues, next steps. Do not start new work. After this turn the window resets automatically; old conversation stays searchable through the history_* tools.";
 
 type NoteFile = { text: string; createdAt: number; updatedAt: number };
 type NoteOperation = {
@@ -277,6 +282,8 @@ export default function piContext(pi: ExtensionAPI) {
 	let rollover: "idle" | "requested" | "compacting" | "continued" = "idle";
 	let enabled = true;
 	let guidancePersistedInWindow: string | undefined;
+	let fallbackSentInWindow: string | undefined;
+	let continueAfterFallback = false;
 
 	/** Persist the context_window hint as a visible message (lands in history and the TUI), Codex-style. */
 	const persistHint = (ctx: ExtensionContext) => {
@@ -490,6 +497,22 @@ export default function piContext(pi: ExtensionAPI) {
 		if (!enabled) return undefined; // Default Pi compaction applies; keepRecentTokens is honored again.
 		// Never let an aborted or failed custom reset fall through to Pi's default summary.
 		if (event.signal.aborted) return { cancel: true };
+		// Codex auto_compact_fallback_prompt parity, adapted to Pi's trigger points:
+		// - threshold, post-run (agent still streaming): cancel once per window and steer a
+		//   note-taking turn in; _runAutoCompaction then returns hasQueuedMessages() and the
+		//   post-run loop delivers it via agent.continue(). Safe, intended path.
+		// - threshold, pre-prompt (idle): cancelling still sends the user prompt with an
+		//   over-threshold context, and sendMessage would race _runAgentPrompt. Reset instead.
+		// - overflow: never cancel; that would abandon Pi's one-shot compact-and-retry recovery.
+		if (event.reason === "threshold" && !ctx.isIdle()) {
+			const windowId = currentWindowId(ctx);
+			if (fallbackSentInWindow !== windowId) {
+				fallbackSentInWindow = windowId;
+				continueAfterFallback = true;
+				pi.sendMessage({ customType: FALLBACK_TYPE, content: FALLBACK_PROMPT, display: true }, { triggerTurn: true });
+				return { cancel: true };
+			}
+		}
 		try {
 			pi.appendEntry(RESET_MARKER_TYPE, { version: 1, reason: event.reason, requested: rollover === "compacting" });
 			const markerId = ctx.sessionManager.getLeafId();
@@ -501,11 +524,18 @@ export default function piContext(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_compact", (event, ctx) => {
-		if (!enabled) return;
+		if (!enabled) {
+			continueAfterFallback = false;
+			return;
+		}
 		// Overflow retry is already continued once by Pi core. Sending another turn would duplicate it.
 		if (event.willRetry) return;
-		if (rollover !== "compacting") return;
-		rollover = "continued";
+		// Continue after our own rollover, and after a fallback reset (Codex rolls over
+		// mid-turn and keeps going). A user's manual /compact gets no continuation.
+		const shouldContinue = rollover === "compacting" || continueAfterFallback;
+		continueAfterFallback = false;
+		if (rollover === "compacting") rollover = "continued";
+		if (!shouldContinue) return;
 		pi.appendEntry(STATE_TYPE, { version: 1, lastResetEntryId: event.compactionEntry.id });
 		persistHint(ctx);
 		pi.sendMessage({ customType: CONTINUATION_TYPE, content: CONTINUATION, display: false }, { triggerTurn: true });
@@ -516,4 +546,4 @@ export default function piContext(pi: ExtensionAPI) {
 	});
 }
 
-export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, HINT_TYPE, GUIDANCE_TYPE, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, GUIDANCE_OPEN_TAG, REMINDER_THRESHOLD_TOKENS, lineRange, assertVirtualPath };
+export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, HINT_TYPE, GUIDANCE_TYPE, FALLBACK_TYPE, FALLBACK_PROMPT, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, GUIDANCE_OPEN_TAG, REMINDER_THRESHOLD_TOKENS, lineRange, assertVirtualPath };
