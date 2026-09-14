@@ -7,7 +7,9 @@ import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-cor
 import {
 	type ContextUsage,
 	type ExtensionAPI,
+	type ExtensionCommandContext,
 	type ExtensionContext,
+	type RegisteredCommand,
 	SessionManager,
 	type SessionCompactEvent,
 	type ToolDefinition,
@@ -26,8 +28,11 @@ type SentMessage = {
 type Captured = {
 	tools: Map<string, ToolDefinition>;
 	handlers: Map<string, EventHandler[]>;
+	commands: Map<string, CommandOptions>;
 	sent: SentMessage[];
 };
+
+type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
 
 type CompactionHookResult =
 	| { cancel: true }
@@ -46,10 +51,13 @@ function manager(persisted = false): SessionManager {
 }
 
 function makeExtension(sessionManager: SessionManager): Captured {
-	const captured: Captured = { tools: new Map(), handlers: new Map(), sent: [] };
+	const captured: Captured = { tools: new Map(), handlers: new Map(), commands: new Map(), sent: [] };
 	const api = {
 		registerTool(tool: ToolDefinition) {
 			captured.tools.set(tool.name, tool);
+		},
+		registerCommand(name: string, options: CommandOptions) {
+			captured.commands.set(name, options);
 		},
 		on(name: string, handler: EventHandler) {
 			const handlers = captured.handlers.get(name) ?? [];
@@ -110,6 +118,27 @@ async function runBeforeCompact(captured: Captured, ctx: ExtensionContext, token
 
 function runHandlers(captured: Captured, name: string, event: unknown, ctx: ExtensionContext): void {
 	for (const handler of captured.handlers.get(name) ?? []) handler(event as never, ctx);
+}
+
+type Notice = { message: string; type?: "info" | "warning" | "error" };
+
+async function runCommand(captured: Captured, name: string, args: string, ctx: ExtensionContext): Promise<Notice[]> {
+	const command = captured.commands.get(name);
+	assert.ok(command, `${name} command registered`);
+	const notices: Notice[] = [];
+	const cmdCtx = Object.assign({}, ctx, {
+		ui: { notify: (message: string, type?: Notice["type"]) => notices.push({ message, type }) },
+	}) as unknown as ExtensionCommandContext;
+	await command.handler(args, cmdCtx);
+	return notices;
+}
+
+type ContextHookResult = { messages: unknown[] } | undefined;
+
+async function runContextHook(captured: Captured, ctx: ExtensionContext): Promise<ContextHookResult> {
+	const handler = captured.handlers.get("context")?.[0];
+	assert.ok(handler, "context handler registered");
+	return (await handler({ type: "context", messages: [] } as never, ctx)) as ContextHookResult;
 }
 
 function appendText(sessionManager: SessionManager, role: "user" | "assistant" | "toolResult", text: string): string {
@@ -336,3 +365,31 @@ async function runBeforeCompactAborted(captured: Captured, ctx: ExtensionContext
 	const event = { reason: "manual", willRetry: false, signal: AbortSignal.abort(), preparation: { tokensBefore: 7 } };
 	return (await handler(event as never, ctx)) as CompactionHookResult;
 }
+
+test("pi-context command toggles hint injection and reset compaction at runtime", async () => {
+	const sessionManager = manager();
+	appendText(sessionManager, "user", "hello");
+	const captured = makeExtension(sessionManager);
+	const ctx = context(sessionManager, undefined, { tokens: 1000, contextWindow: 200000, percent: 0.5 });
+
+	// On by default: context hook injects the hint.
+	assert.ok((await runContextHook(captured, ctx)) !== undefined, "hint injected while on");
+
+	let notices = await runCommand(captured, "pi-context", "off", ctx);
+	assert.match(notices[0]?.message ?? "", /off/);
+	assert.equal(await runContextHook(captured, ctx), undefined, "no injection while off");
+	assert.equal(await runBeforeCompact(captured, ctx, 123), undefined, "default Pi compaction applies while off");
+	const offResult = resultJson<{ error?: string }>(await call(captured, "new_context", {}, ctx));
+	assert.match(offResult.error ?? "", /off/, "new_context refuses while off");
+
+	notices = await runCommand(captured, "pi-context", "on", ctx);
+	assert.match(notices[0]?.message ?? "", /on/);
+	assert.ok((await runContextHook(captured, ctx)) !== undefined, "hint injected again after re-enable");
+
+	notices = await runCommand(captured, "pi-context", "maybe", ctx);
+	assert.equal(notices[0]?.type, "error", "unknown argument rejected");
+
+	// Bare command reports current state without changing it.
+	notices = await runCommand(captured, "pi-context", "", ctx);
+	assert.match(notices[0]?.message ?? "", /on/);
+});

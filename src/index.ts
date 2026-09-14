@@ -265,11 +265,28 @@ const role = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.L
 export default function piContext(pi: ExtensionAPI) {
 	let rollover: "idle" | "requested" | "compacting" | "continued" = "idle";
 	let reminderClaimedInWindow: string | undefined;
+	let enabled = true;
 	const saveNote = (op: NoteOperation) => {
 		// pi.appendEntry writes a custom SessionManager entry. Custom entries are persistent but excluded from LLM context.
 		// ExtensionContext deliberately exposes only a readonly SessionManager, so this is the public extension write path.
 		pi.appendEntry(NOTE_TYPE, op);
 	};
+
+	pi.registerCommand("pi-context", {
+		description: "Toggle pi-context: context_window hint, low-budget guidance, and reset-style compaction",
+		getArgumentCompletions: (prefix) =>
+			["on", "off"].filter((a) => a.startsWith(prefix)).map((a) => ({ value: a, label: a })),
+		handler: async (args, cmdCtx) => {
+			const arg = args.trim().toLowerCase();
+			if (arg === "on") enabled = true;
+			else if (arg === "off") enabled = false;
+			else if (arg !== "") {
+				cmdCtx.ui.notify("Usage: /pi-context [on|off]", "error");
+				return;
+			}
+			cmdCtx.ui.notify(`pi-context: ${enabled ? "on" : "off"}`, "info");
+		},
+	});
 
 	pi.registerTool(defineTool({
 		name: "history_list_windows",
@@ -391,6 +408,7 @@ export default function piContext(pi: ExtensionAPI) {
 	}
 
 	pi.on("context", (event, ctx) => {
+		if (!enabled) return undefined;
 		// Rebuilt per request, so no state diffing is needed; identical to Codex's
 		// context_window developer fragment rendered into each model call.
 		const userText = (text: string) => ({
@@ -432,18 +450,24 @@ export default function piContext(pi: ExtensionAPI) {
 		description: "Request a reset-style context rollover after this tool result is safely recorded. Call alone in a tool batch.",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute() {
+			if (!enabled) return output({ error: "pi-context is off (/pi-context on to enable)" });
 			if (rollover === "idle") rollover = "requested";
 			return output({ status: rollover === "requested" ? "rollover_requested" : "rollover_already_pending" }, undefined, true);
 		},
 	}));
 
 	pi.on("agent_end", (_event, ctx) => {
+		if (!enabled) {
+			if (rollover === "requested") rollover = "idle";
+			return;
+		}
 		if (rollover !== "requested") return;
 		rollover = "compacting";
 		ctx.compact({ onError: () => { if (rollover === "compacting") rollover = "idle"; } });
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
+		if (!enabled) return undefined; // Default Pi compaction applies; keepRecentTokens is honored again.
 		// Never let an aborted or failed custom reset fall through to Pi's default summary.
 		if (event.signal.aborted) return { cancel: true };
 		try {
@@ -457,6 +481,7 @@ export default function piContext(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_compact", (event) => {
+		if (!enabled) return;
 		// Overflow retry is already continued once by Pi core. Sending another turn would duplicate it.
 		if (event.willRetry) return;
 		if (rollover !== "compacting") return;
