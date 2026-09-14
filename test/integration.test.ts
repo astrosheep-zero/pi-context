@@ -289,12 +289,12 @@ test("context_window hint persists as a TUI-visible message at session start and
 	assert.ok(resetText.includes(`Current context window id: ${windows[1]?.windowId}`));
 });
 
-test("low-budget guidance is injected on every request while below the threshold", async () => {
+test("low-budget guidance persists once per window and covers the in-flight request transiently", async () => {
 	const sessionManager = manager();
 	const captured = makeExtension(sessionManager);
 	type TransformResult = { messages: Array<{ content: Array<{ text: string }> }> };
 
-	// Above threshold: nothing injected.
+	// Above threshold: nothing at all.
 	const comfortable = context(sessionManager, undefined, { tokens: 10_000, percent: 5, contextWindow: 200_000 });
 	assert.equal(await runContextHook(captured, comfortable), undefined);
 
@@ -302,21 +302,30 @@ test("low-budget guidance is injected on every request while below the threshold
 	const unknown = context(sessionManager, undefined, { tokens: null, percent: null, contextWindow: 200_000 });
 	assert.equal(await runContextHook(captured, unknown), undefined);
 
-	// Below threshold: guidance appended after the request messages on every call.
-	// Static text at a stable suffix position keeps the provider's prefix cache intact.
+	// Below threshold, first request of the window: persist once (TUI-visible, no
+	// turn triggered) and return a transient tail copy for the in-flight request.
 	const low = context(sessionManager, undefined, { tokens: 190_000, percent: 95, contextWindow: 200_000 });
-	const userMessage = { role: "user", content: [{ type: "text" as const, text: "next" }], timestamp: Date.now() };
-	const contextHandler = captured.handlers.get("context")?.[0];
-	assert.ok(contextHandler);
-	let transformed = (await contextHandler({ messages: [userMessage] } as never, low)) as TransformResult;
-	assert.equal(transformed.messages.length, 2);
-	assert.equal(transformed.messages[0], userMessage, "existing prefix untouched, guidance appended");
-	const guidance = transformed.messages[1]?.content[0]?.text ?? "";
-	assert.ok(guidance.startsWith(internal.GUIDANCE_OPEN_TAG));
-	assert.match(guidance, /at or below 16000 tokens remaining/);
+	let transformed = (await runContextHook(captured, low)) as TransformResult;
+	assert.equal(transformed.messages.length, 1, "transient copy covers the in-flight request");
+	const text = transformed.messages[0]?.content[0]?.text ?? "";
+	assert.ok(text.startsWith(internal.GUIDANCE_OPEN_TAG));
+	assert.match(text, /at or below 16000 tokens remaining/);
+	assert.equal(captured.sent.length, 1, "persisted exactly once");
+	assert.equal(captured.sent[0]?.message.customType, internal.GUIDANCE_TYPE);
+	assert.equal(captured.sent[0]?.message.display, true, "guidance lands in the TUI");
+	assert.equal(captured.sent[0]?.options?.triggerTurn, false, "never triggers an extra turn");
+
+	// Same window: the persisted message carries it, no more transient injection.
+	assert.equal(await runContextHook(captured, low), undefined);
+	assert.equal(captured.sent.length, 1, "no duplicate persist");
+
+	// A reset boundary creates a new window: eligible again.
+	const before = await runBeforeCompact(captured, low, 190_000);
+	assert.ok(before && "compaction" in before);
+	sessionManager.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 190_000, before.compaction.details, true);
 	transformed = (await runContextHook(captured, low)) as TransformResult;
-	assert.equal(transformed.messages.length, 1, "re-injected while still below threshold");
-	assert.equal(transformed.messages[0]?.content[0]?.text, guidance, "byte-identical across requests: no cache churn");
+	assert.equal(transformed.messages.length, 1, "new window re-arms the guidance");
+	assert.equal(captured.sent.length, 2);
 });
 
 test("new_context continues exactly once and cancellation/failure does not fall back or loop", async () => {
@@ -377,25 +386,25 @@ test("pi-context command toggles hint injection, guidance, and reset compaction 
 	const captured = makeExtension(sessionManager);
 	const low = context(sessionManager, undefined, { tokens: 190_000, contextWindow: 200_000, percent: 95 });
 
-	// On by default: session_start persists a hint; low budget injects guidance.
+	// On by default: session_start persists a hint; low budget persists guidance.
 	runHandlers(captured, "session_start", { reason: "startup" }, low);
 	assert.equal(captured.sent.length, 1);
 	assert.ok((await runContextHook(captured, low)) !== undefined);
+	assert.equal(captured.sent.length, 2, "guidance persisted");
 
 	let notices = await runCommand(captured, "pi-context", "off", low);
 	assert.match(notices[0]?.message ?? "", /off/);
 	assert.equal(await runContextHook(captured, low), undefined, "no guidance while off");
 	runHandlers(captured, "session_start", { reason: "startup" }, low);
-	assert.equal(captured.sent.length, 1, "no hint persisted while off");
+	assert.equal(captured.sent.length, 2, "no hint persisted while off");
 	assert.equal(await runBeforeCompact(captured, low, 123), undefined, "default Pi compaction applies while off");
 	const offResult = resultJson<{ error?: string }>(await call(captured, "new_context", {}, low));
 	assert.match(offResult.error ?? "", /off/, "new_context refuses while off");
 
 	notices = await runCommand(captured, "pi-context", "on", low);
 	assert.match(notices[0]?.message ?? "", /on/);
-	assert.ok((await runContextHook(captured, low)) !== undefined, "guidance injected again after re-enable");
 	runHandlers(captured, "session_start", { reason: "startup" }, low);
-	assert.equal(captured.sent.length, 2, "hint persisted again after re-enable");
+	assert.equal(captured.sent.length, 3, "hint persisted again after re-enable");
 
 	notices = await runCommand(captured, "pi-context", "maybe", low);
 	assert.equal(notices[0]?.type, "error", "unknown argument rejected");

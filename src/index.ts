@@ -5,6 +5,7 @@ import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-
 const STATE_TYPE = "pi-context/state";
 const NOTE_TYPE = "pi-context/note";
 const HINT_TYPE = "pi-context/hint";
+const GUIDANCE_TYPE = "pi-context/guidance";
 const RESET_MARKER_TYPE = "pi-context/reset-marker";
 const CONTINUATION_TYPE = "pi-context/continuation";
 const MAX_NOTE_BYTES = 1_000_000;
@@ -236,12 +237,22 @@ export function contextWindowHint(ctx: ExtensionContext): string {
 }
 
 /**
- * Codex-equivalent low-budget reminder. Static by design: this text is injected on
- * every request while below the threshold, so a varying token count would invalidate
- * the provider's prefix cache on each call. The exact figure is one tool call away.
+ * Codex-equivalent low-budget reminder. Static by design: a stale token count in a
+ * persisted message would mislead later turns; the exact figure is one tool call away.
  */
 function tokenBudgetGuidance(): string {
 	return `${GUIDANCE_OPEN_TAG}\nContext budget is at or below ${REMINDER_THRESHOLD_TOKENS} tokens remaining. Persist durable state with notes_write_file, then call new_context before the window closes. get_context_remaining reports the exact figure.\n${GUIDANCE_CLOSE_TAG}`;
+}
+
+/** Cheap current-window lookup: scan the branch tail for the latest compaction entry. */
+function currentWindowId(ctx: ExtensionContext): string {
+	const sessionId = ctx.sessionManager.getSessionId();
+	const branch = ctx.sessionManager.getBranch();
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i];
+		if (entry?.type === "compaction") return `pcw:${sessionId}:${entry.id}`;
+	}
+	return `pcw:${sessionId}:root`;
 }
 
 function lineRange(text: string, startValue: unknown, stopValue: unknown) {
@@ -265,6 +276,7 @@ const role = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.L
 export default function piContext(pi: ExtensionAPI) {
 	let rollover: "idle" | "requested" | "compacting" | "continued" = "idle";
 	let enabled = true;
+	let guidancePersistedInWindow: string | undefined;
 
 	/** Persist the context_window hint as a visible message (lands in history and the TUI), Codex-style. */
 	const persistHint = (ctx: ExtensionContext) => {
@@ -418,17 +430,23 @@ export default function piContext(pi: ExtensionAPI) {
 
 	pi.on("context", (event, ctx) => {
 		if (!enabled) return undefined;
-		// Transient while below the threshold: Codex's reminder persists in history and
-		// stays visible, so continuous low-budget visibility is the effective parity.
-		// Appended (not prepended) with static text: the cached prefix stays untouched,
-		// crossing the threshold only adds one stable suffix segment.
 		const usage = ctx.getContextUsage();
 		if (!usage || usage.tokens === null) return undefined;
 		const remaining = Math.max(0, usage.contextWindow - usage.tokens);
 		if (remaining > REMINDER_THRESHOLD_TOKENS) return undefined;
+		const windowId = currentWindowId(ctx);
+		if (guidancePersistedInWindow === windowId) return undefined;
+		guidancePersistedInWindow = windowId;
+		// Persist once per window, like the hint. sendMessage defers safely to end of
+		// turn while streaming (sendCustomMessage queues instead of splitting a tool
+		// call/result pair), so from the next turn on the guidance lives in history
+		// and the TUI. A transient tail copy covers the in-flight request; it is
+		// appended, static, and one-shot, so the cached prefix survives.
+		const text = tokenBudgetGuidance();
+		pi.sendMessage({ customType: GUIDANCE_TYPE, content: text, display: true }, { triggerTurn: false });
 		const guidance = {
 			role: "user" as const,
-			content: [{ type: "text" as const, text: tokenBudgetGuidance() }],
+			content: [{ type: "text" as const, text }],
 			timestamp: Date.now(),
 		};
 		return { messages: [...event.messages, guidance] };
@@ -498,4 +516,4 @@ export default function piContext(pi: ExtensionAPI) {
 	});
 }
 
-export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, HINT_TYPE, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, GUIDANCE_OPEN_TAG, REMINDER_THRESHOLD_TOKENS, lineRange, assertVirtualPath };
+export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, HINT_TYPE, GUIDANCE_TYPE, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, GUIDANCE_OPEN_TAG, REMINDER_THRESHOLD_TOKENS, lineRange, assertVirtualPath };
