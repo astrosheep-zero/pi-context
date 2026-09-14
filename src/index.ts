@@ -274,6 +274,7 @@ const role = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.L
 export default function piContext(pi: ExtensionAPI) {
 	let rollover: "idle" | "requested" | "compacting" = "idle";
 	let enabled = true;
+	let hintInjectedInWindow: string | undefined;
 	let guidancePersistedInWindow: string | undefined;
 	let fallbackPersistedInWindow: string | undefined;
 	let handledCompactionId: string | undefined;
@@ -455,21 +456,42 @@ export default function piContext(pi: ExtensionAPI) {
 
 	pi.on("context", (event, ctx) => {
 		if (!enabled) return undefined;
-		const usage = ctx.getContextUsage();
-		if (!usage || usage.tokens === null) return undefined;
-		const remaining = Math.max(0, usage.contextWindow - usage.tokens);
 		const windowId = currentWindowId(ctx);
-		if (remaining > thresholds().reminder) return undefined;
-		if (guidancePersistedInWindow === windowId) return undefined;
-		guidancePersistedInWindow = windowId;
-		// Persist once per window, like the hint. sendMessage defers safely to end of
-		// turn while streaming (sendCustomMessage queues instead of splitting a tool
-		// call/result pair), so from the next turn on the guidance lives in history
-		// and the TUI. A transient tail copy covers the in-flight request; it is
-		// appended, static, and one-shot, so the cached prefix survives.
-		const text = tokenBudgetGuidance();
-		pi.sendMessage({ customType: GUIDANCE_TYPE, content: text, display: true }, { triggerTurn: false });
-		return { messages: [...event.messages, userMessage(text)] };
+		// Late-hint repair: session_compact persists the window hint, but that
+		// durable message may not be in history yet when the first provider request
+		// of the fresh window goes out (session_compact runs after the reset). This
+		// hook fires before every LLM call, so append one transient copy to that
+		// first request. Once the persisted hint reaches event.messages the customType
+		// check stops the transient copy; the injected window id keeps it to one per
+		// window even while the persisted copy is still in flight.
+		const needsHint =
+			hintInjectedInWindow !== windowId &&
+			!event.messages.some((message) => message.role === "custom" && message.customType === HINT_TYPE);
+		if (needsHint) hintInjectedInWindow = windowId;
+		let guidance: string | undefined;
+		const usage = ctx.getContextUsage();
+		if (usage && usage.tokens !== null) {
+			const remaining = Math.max(0, usage.contextWindow - usage.tokens);
+			if (remaining <= thresholds().reminder && guidancePersistedInWindow !== windowId) {
+				guidancePersistedInWindow = windowId;
+				// Persist once per window, like the hint. sendMessage defers safely to end of
+				// turn while streaming (sendCustomMessage queues instead of splitting a tool
+				// call/result pair), so from the next turn on the guidance lives in history
+				// and the TUI. A transient tail copy covers the in-flight request; it is
+				// appended, static, and one-shot, so the cached prefix survives.
+				guidance = tokenBudgetGuidance();
+				pi.sendMessage({ customType: GUIDANCE_TYPE, content: guidance, display: true }, { triggerTurn: false });
+			}
+		}
+		if (!needsHint && guidance === undefined) return undefined;
+		// Hint first so the fresh window's identity and note index lead the request.
+		return {
+			messages: [
+				...event.messages,
+				...(needsHint ? [userMessage(contextWindowHint(ctx))] : []),
+				...(guidance === undefined ? [] : [userMessage(guidance)]),
+			],
+		};
 	});
 
 	// Graceful fallback without intercepting user input: before a fresh prompt, if
@@ -492,6 +514,11 @@ export default function piContext(pi: ExtensionAPI) {
 
 	pi.on("turn_end", (_event, ctx) => {
 		if (!enabled) return undefined;
+		// Streaming case only: at a turn boundary inside a running agent run the
+		// queue flush cannot deliver the fallback before the next provider request,
+		// so start one final run here. The idle pre-prompt case is owned by
+		// before_agent_start above.
+		if (ctx.isIdle()) return undefined;
 		const usage = ctx.getContextUsage();
 		if (!usage || usage.tokens === null) return;
 		const remaining = Math.max(0, usage.contextWindow - usage.tokens);

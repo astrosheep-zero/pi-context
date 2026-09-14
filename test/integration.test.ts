@@ -311,11 +311,25 @@ test("context_window hint persists as a TUI-visible message at session start and
 test("low-budget guidance persists once per window and covers the in-flight request transiently", async () => {
 	const sessionManager = manager();
 	const captured = makeExtension(sessionManager);
-	type TransformResult = { messages: Array<{ content: Array<{ text: string }> }> };
+	type TransformResult = { messages: Array<{ role: string; customType?: string; content: Array<{ text: string }> }> };
 
-	// Above threshold: nothing at all.
+	// First request of the window: the transient context_window hint covers it, because
+	// the hint session_compact persists may not have landed in history yet.
 	const comfortable = context(sessionManager, undefined, { tokens: 10_000, percent: 5, contextWindow: 200_000 });
+	let transformed = (await runContextHook(captured, comfortable)) as TransformResult;
+	assert.equal(transformed.messages.length, 1, "only the transient window hint, no guidance");
+	assert.equal(transformed.messages[0]?.role, "user");
+	assert.match(transformed.messages[0]?.content[0]?.text ?? "", new RegExp(`^${internal.CONTEXT_WINDOW_OPEN_TAG}`));
+	assert.equal(captured.sent.length, 0, "the transient hint is not persisted by the context hook");
+
+	// Same window: no re-injection.
 	assert.equal(await runContextHook(captured, comfortable), undefined);
+
+	// A hint already present in the request messages suppresses the transient copy.
+	const persisted = makeExtension(manager());
+	const persistedHint = { role: "custom", customType: internal.HINT_TYPE, content: "<context_window>\npersisted\n</context_window>", display: true, timestamp: 0 };
+	assert.equal(await runContextHook(persisted, comfortable, { messages: [persistedHint] }), undefined, "no transient copy beside a persisted hint");
+	assert.equal(persisted.sent.length, 0);
 
 	// Unknown usage (right after compaction): stay silent.
 	const unknown = context(sessionManager, undefined, { tokens: null, percent: null, contextWindow: 200_000 });
@@ -324,7 +338,7 @@ test("low-budget guidance persists once per window and covers the in-flight requ
 	// Below threshold, first request of the window: persist once (TUI-visible, no
 	// turn triggered) and return a transient tail copy for the in-flight request.
 	const low = context(sessionManager, undefined, { tokens: 190_000, percent: 95, contextWindow: 200_000 });
-	let transformed = (await runContextHook(captured, low)) as TransformResult;
+	transformed = (await runContextHook(captured, low)) as TransformResult;
 	assert.equal(transformed.messages.length, 1, "transient copy covers the in-flight request");
 	const text = transformed.messages[0]?.content[0]?.text ?? "";
 	assert.ok(text.startsWith(internal.GUIDANCE_OPEN_TAG));
@@ -339,12 +353,14 @@ test("low-budget guidance persists once per window and covers the in-flight requ
 	assert.equal(await runContextHook(captured, low), undefined);
 	assert.equal(captured.sent.length, 1, "no duplicate persist");
 
-	// A reset boundary creates a new window: eligible again.
+	// A reset boundary creates a new window: eligible again, hint before guidance.
 	const before = await runBeforeCompact(captured, low, 190_000);
 	assert.ok(before && "compaction" in before);
 	sessionManager.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 190_000, before.compaction.details, true);
 	transformed = (await runContextHook(captured, low)) as TransformResult;
-	assert.equal(transformed.messages.length, 1, "new window re-arms the guidance");
+	assert.equal(transformed.messages.length, 2, "new window re-arms the transient hint and the guidance");
+	assert.match(transformed.messages[0]?.content[0]?.text ?? "", new RegExp(`^${internal.CONTEXT_WINDOW_OPEN_TAG}`));
+	assert.match(transformed.messages[1]?.content[0]?.text ?? "", new RegExp(`^${internal.GUIDANCE_OPEN_TAG}`));
 	assert.equal(captured.sent.length, 2);
 });
 
@@ -468,7 +484,12 @@ test("reminder defaults precede a 32768-token reserve and are configurable", asy
 	const atRemaining = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window });
 	assert.equal(internal.REMINDER_THRESHOLD_TOKENS, 65_536);
 	assert.equal(internal.FALLBACK_THRESHOLD_TOKENS, 40_960);
-	assert.equal(await runContextHook(captured, atRemaining(65_537)), undefined);
+	assert.equal(
+		(await runContextHook(captured, atRemaining(65_537)) as { messages: unknown[] } | undefined)?.messages.length,
+		1,
+		"above the reminder threshold only the transient window hint is injected",
+	);
+	assert.equal(captured.sent.length, 0, "no guidance above the reminder threshold");
 	assert.ok(await runContextHook(captured, atRemaining(65_536)));
 	assert.equal(captured.sent.length, 1, "reminds well before Pi's 32768 reserve");
 	const marker = captured.sent[0];
@@ -480,7 +501,12 @@ test("reminder defaults precede a 32768-token reserve and are configurable", asy
 	const customAt = (remaining: number) => context(customSm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window });
 	custom.flags.set(internal.REMINDER_FLAG, "100000");
 	custom.flags.set(internal.FALLBACK_FLAG, "50000");
-	assert.equal(await runContextHook(custom, customAt(100_001)), undefined);
+	assert.equal(
+		(await runContextHook(custom, customAt(100_001)) as { messages: unknown[] } | undefined)?.messages.length,
+		1,
+		"transient window hint only, no guidance above the custom threshold",
+	);
+	assert.equal(custom.sent.length, 0, "no guidance above the custom reminder threshold");
 	assert.ok(await runContextHook(custom, customAt(100_000)), "custom reminder threshold fires");
 	const invalidAt = atRemaining(90_000);	for (const value of ["0", "-1", "NaN", "2.5"]) {
 		const invalid = makeExtension(manager());
@@ -519,7 +545,7 @@ test("final fallback turn uses public turn boundaries without intercepting or re
 	assert.equal(nextFallback?.message?.customType, internal.FALLBACK_TYPE, "fallback re-armed after reset");
 
 	// A running tool chain gets the same final-call message at the ordinary turn boundary.
-	const streaming = makeExtension(manager());
+	const streaming = makeExtension(sm);
 	const streamingCtx = ctxAt(40_960, false);
 	runHandlers(streaming, "turn_end", {}, streamingCtx);
 	assert.equal(streaming.sent.length, 1);
@@ -527,7 +553,24 @@ test("final fallback turn uses public turn boundaries without intercepting or re
 	assert.equal(streaming.sent[0]?.options?.triggerTurn, true);
 	assert.match(String(streaming.sent[0]?.message.content), /final fallback turn/);
 	runHandlers(streaming, "turn_end", {}, streamingCtx);
-	assert.equal(streaming.sent.length, 1, "turn_end fallback is one-shot");
+	assert.equal(streaming.sent.length, 1, "turn_end fallback is one-shot per window");
+
+	// Idle turns stay with the before_agent_start path; only streaming gets a new run.
+	const idleOnly = makeExtension(manager());
+	runHandlers(idleOnly, "turn_end", {}, ctxAt(40_960, true));
+	assert.equal(idleOnly.sent.length, 0, "turn_end fallback does not fire while idle");
+
+	// A fresh window re-arms the turn_end fallback.
+	const streamingReset = await runBeforeCompact(streaming, streamingCtx, 100, "threshold");
+	assert.ok(streamingReset && "compaction" in streamingReset);
+	const streamingCompactionId = sm.appendCompaction(streamingReset.compaction.summary, streamingReset.compaction.firstKeptEntryId, 100, streamingReset.compaction.details, true);
+	const streamingCompactionEntry = sm.getEntry(streamingCompactionId);
+	assert.ok(streamingCompactionEntry && streamingCompactionEntry.type === "compaction");
+	runHandlers(streaming, "session_compact", { reason: "threshold", willRetry: false, compactionEntry: streamingCompactionEntry }, streamingCtx);
+	assert.equal(streaming.sent.length, 2, "the reset persists a hint only");
+	runHandlers(streaming, "turn_end", {}, streamingCtx);
+	assert.equal(streaming.sent.length, 3, "fresh window re-arms the streaming fallback once");
+	assert.equal(streaming.sent[2]?.message.customType, internal.FALLBACK_TYPE);
 });
 
 test("new_context can reset successive windows without duplicate compactions or continuations", async () => {
