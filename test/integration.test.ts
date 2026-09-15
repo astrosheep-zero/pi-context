@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
@@ -11,10 +11,55 @@ import {
 	type ExtensionContext,
 	type RegisteredCommand,
 	SessionManager,
+	SettingsManager,
 	type SessionCompactEvent,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import piContext, { historyFromSession, internal, notesFromSession } from "../src/index.js";
+
+// Settings fixtures live in temp directories. PI_CODING_AGENT_DIR is redirected for the
+// whole test process so the extension's SettingsManager.create(ctx.cwd, undefined, ...)
+// never reads the user's real ~/.pi. beforeEach points it back at an empty fixture.
+const DEFAULT_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-context-agent-"));
+const DEFAULT_CWD = mkdtempSync(join(tmpdir(), "pi-context-cwd-"));
+process.env.PI_CODING_AGENT_DIR = DEFAULT_AGENT_DIR;
+
+type Notice = { message: string; type?: "info" | "warning" | "error" };
+
+function writeJson(path: string, value: unknown): void {
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, JSON.stringify(value, null, 2));
+}
+
+type SettingsFixture = { cwd: string; agentDir: string };
+
+/**
+ * Materialize global (agentDir/settings.json) and project (cwd/.pi/settings.json)
+ * settings in temp directories, then read them back through the same public
+ * SettingsManager.create the extension uses. Never touches the real ~/.pi.
+ */
+function settingsFixture(options: {
+	global?: Record<string, unknown>;
+	project?: Record<string, unknown>;
+	reserveTokens?: number;
+} = {}): SettingsFixture {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-context-cwd-"));
+	const agentDir = mkdtempSync(join(tmpdir(), "pi-context-agent-"));
+	const global = { ...(options.global ?? {}) };
+	if (options.reserveTokens !== undefined) global.compaction = { reserveTokens: options.reserveTokens };
+	writeJson(join(agentDir, "settings.json"), global);
+	if (options.project) writeJson(join(cwd, ".pi", "settings.json"), options.project);
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+	// The fixture itself must parse through SettingsManager.create with these temp dirs.
+	const fixtureManager = SettingsManager.create(cwd, agentDir, { projectTrusted: true });
+	const projectReserve = (options.project?.compaction as { reserveTokens?: number } | undefined)?.reserveTokens;
+	assert.equal(fixtureManager.getCompactionSettings().reserveTokens, projectReserve ?? options.reserveTokens ?? 16_384, "fixture reserve reads back");
+	return { cwd, agentDir };
+}
+
+test.beforeEach(() => {
+	process.env.PI_CODING_AGENT_DIR = DEFAULT_AGENT_DIR;
+});
 
 type EventHandler = (event: never, ctx: ExtensionContext) => unknown;
 
@@ -30,7 +75,7 @@ type Captured = {
 	handlers: Map<string, EventHandler[]>;
 	commands: Map<string, CommandOptions>;
 	sent: SentMessage[];
-	flags: Map<string, string | boolean>;
+	flags: string[];
 };
 
 type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
@@ -52,13 +97,10 @@ function manager(persisted = false): SessionManager {
 }
 
 function makeExtension(sessionManager: SessionManager): Captured {
-	const captured: Captured = { tools: new Map(), handlers: new Map(), commands: new Map(), sent: [], flags: new Map() };
+	const captured: Captured = { tools: new Map(), handlers: new Map(), commands: new Map(), sent: [], flags: [] };
 	const api = {
-		registerFlag(name: string, options: { default?: string | boolean }) {
-			if (options.default !== undefined) captured.flags.set(name, options.default);
-		},
-		getFlag(name: string) {
-			return captured.flags.get(name);
+		registerFlag(name: string) {
+			captured.flags.push(name);
 		},
 		registerTool(tool: ToolDefinition) {
 			captured.tools.set(tool.name, tool);
@@ -89,15 +131,25 @@ function context(
 	compact?: ExtensionContext["compact"],
 	usage?: ContextUsage,
 	idle = true,
+	cwd = DEFAULT_CWD,
+	projectTrusted = true,
 ): ExtensionContext {
-	const fake: Pick<ExtensionContext, "sessionManager" | "getContextUsage" | "compact" | "isIdle"> = {
+	const notices: Notice[] = [];
+	const fake: Pick<ExtensionContext, "sessionManager" | "getContextUsage" | "compact" | "isIdle" | "cwd" | "isProjectTrusted" | "ui"> = {
 		sessionManager,
 		getContextUsage: () => usage,
 		compact: compact ?? (() => {}),
 		isIdle: () => idle,
+		cwd,
+		isProjectTrusted: () => projectTrusted,
+		ui: { notify: (message: string, type?: Notice["type"]) => notices.push({ message, type }) } as unknown as ExtensionContext["ui"],
 	};
-	// Only the members the extension reads; ui/modelRegistry/events are unused.
-	return fake as unknown as ExtensionContext;
+	// Only the members the extension reads; the rest of the ExtensionContext surface is unused.
+	return Object.assign(fake as unknown as ExtensionContext, { notices });
+}
+
+function noticesOf(ctx: ExtensionContext): Notice[] {
+	return (ctx as ExtensionContext & { notices: Notice[] }).notices;
 }
 
 async function call(
@@ -132,8 +184,6 @@ async function runBeforeCompact(
 function runHandlers(captured: Captured, name: string, event: unknown, ctx: ExtensionContext): void {
 	for (const handler of captured.handlers.get(name) ?? []) handler(event as never, ctx);
 }
-
-type Notice = { message: string; type?: "info" | "warning" | "error" };
 
 async function runCommand(captured: Captured, name: string, args: string, ctx: ExtensionContext): Promise<Notice[]> {
 	const command = captured.commands.get(name);
@@ -481,50 +531,203 @@ test("all compaction paths reset immediately, persist one hint, and leave native
 	}
 });
 
-test("reminder defaults precede Pi's 16384-token reserve and are configurable", async () => {
+test("thresholds derive from compaction.reserveTokens plus pi-context margins", async () => {
+	const fixture = settingsFixture({
+		reserveTokens: 100_000,
+		global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 30_000, fallbackMarginTokens: 10_000 } },
+	});
 	const sm = manager();
 	const captured = makeExtension(sm);
-	const window = 200_000;
-	const atRemaining = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window });
-	assert.equal(internal.REMINDER_THRESHOLD_TOKENS, 65_536);
-	assert.equal(internal.FALLBACK_THRESHOLD_TOKENS, 40_960);
-	assert.equal(
-		(await runContextHook(captured, atRemaining(65_537)) as { messages: unknown[] } | undefined)?.messages.length,
-		1,
-		"above the reminder threshold only the transient window hint is injected",
-	);
-	assert.equal(captured.sent.length, 0, "no guidance above the reminder threshold");
-	assert.equal(await runContextHook(captured, atRemaining(65_536)), undefined, "crossing persists only, no transient guidance");
-	assert.equal(captured.sent.length, 1, "reminds well before Pi's 16384 reserve");
-	const boundaryText = typeof captured.sent[0]?.message.content === "string" ? captured.sent[0].message.content : "";
-	assert.match(boundaryText, /only 65536 tokens remained when this reminder was recorded/);
-	const marker = captured.sent[0];
-	assert.ok(marker);
-	assert.deepEqual(resultJson(await call(captured, "get_context_remaining", {}, atRemaining(65_536))), { remaining_tokens: 65_536 });
+	const window = 300_000;
+	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
 
-	const customSm = manager();
-	const custom = makeExtension(customSm);
-	const customAt = (remaining: number) => context(customSm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window });
-	custom.flags.set(internal.REMINDER_FLAG, "100000");
-	custom.flags.set(internal.FALLBACK_FLAG, "50000");
+	// fallback = 100000 + 10000, reminder = 100000 + 30000.
 	assert.equal(
-		(await runContextHook(custom, customAt(100_001)) as { messages: unknown[] } | undefined)?.messages.length,
+		(await runContextHook(captured, at(130_001)) as { messages: unknown[] } | undefined)?.messages.length,
 		1,
-		"transient window hint only, no guidance above the custom threshold",
+		"above the derived reminder only the transient window hint is injected",
 	);
-	assert.equal(custom.sent.length, 0, "no guidance above the custom reminder threshold");
-	assert.equal(await runContextHook(custom, customAt(100_000)), undefined, "custom reminder threshold persists only");
-	assert.equal(custom.sent.length, 1, "custom reminder threshold fires");
-	const invalidAt = atRemaining(90_000);	for (const value of ["0", "-1", "NaN", "2.5"]) {
-		const invalid = makeExtension(manager());
-		invalid.flags.set(internal.REMINDER_FLAG, value);
-		await assert.rejects(() => runContextHook(invalid, invalidAt), /positive integer/);
-	}
-	const reversed = makeExtension(manager());
-	reversed.flags.set(internal.REMINDER_FLAG, "30000");
-	reversed.flags.set(internal.FALLBACK_FLAG, "40000");
-	await assert.rejects(() => runContextHook(reversed, atRemaining(20_000)), /lower than/);
+	assert.equal(captured.sent.length, 0, "no guidance above the derived reminder");
+	assert.equal(await runContextHook(captured, at(130_000)), undefined, "derived reminder crossing persists only");
+	assert.equal(captured.sent.length, 1, "derived reminder fires");
+	assert.match(String(captured.sent[0]?.message.content), /only 130000 tokens remained when this reminder was recorded/);
+
+	assert.equal(await runBeforeAgentStart(captured, at(110_001)), undefined, "above the derived fallback");
+	const fallback = await runBeforeAgentStart(captured, at(110_000));
+	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, "derived fallback fires");
 });
+
+test("absent pi-context key or margins reproduce the legacy thresholds at Pi's default reserve", async () => {
+	assert.equal(internal.DEFAULT_RESERVE_TOKENS, 16_384);
+	assert.equal(internal.DEFAULT_RESERVE_TOKENS + internal.DEFAULT_REMINDER_MARGIN_TOKENS, 65_536);
+	assert.equal(internal.DEFAULT_RESERVE_TOKENS + internal.DEFAULT_FALLBACK_MARGIN_TOKENS, 40_960);
+
+	for (const [label, options] of [
+		["absent key", { global: {} }],
+		["absent margins", { global: { [internal.PI_CONTEXT_SETTINGS_KEY]: {} } }],
+	] as const) {
+		const fixture = settingsFixture(options);
+		const sm = manager();
+		const captured = makeExtension(sm);
+		const window = 200_000;
+		const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
+		const first = at(65_537);
+		assert.equal(((await runContextHook(captured, first)) as { messages: unknown[] }).messages.length, 1, `${label}: transient hint only above the legacy reminder`);
+		assert.equal(captured.sent.length, 0, `${label}: no guidance above the legacy reminder`);
+		assert.equal(await runContextHook(captured, at(65_536)), undefined, `${label}: legacy reminder crossing persists only`);
+		assert.equal(captured.sent.length, 1, `${label}: legacy reminder fires`);
+		assert.match(String(captured.sent[0]?.message.content), /only 65536 tokens remained/, label);
+		assert.equal(await runBeforeAgentStart(captured, at(40_961)), undefined, `${label}: above the legacy fallback`);
+		const fallback = await runBeforeAgentStart(captured, at(40_960));
+		assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, `${label}: legacy fallback fires`);
+		assert.equal(noticesOf(first).length, 0, `${label}: valid defaults warn nobody`);
+	}
+});
+
+test("project pi-context margins and reserve override global per key", async () => {
+	const fixture = settingsFixture({
+		reserveTokens: 20_000,
+		global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 30_000, fallbackMarginTokens: 10_000 } },
+		project: { compaction: { reserveTokens: 50_000 }, [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 40_000 } },
+	});
+	// Project reserve wins: reminder = 50000 + 40000 (project margin), fallback = 50000 + 10000 (global margin).
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const window = 300_000;
+	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
+	assert.equal(((await runContextHook(captured, at(90_001))) as { messages: unknown[] }).messages.length, 1, "above the project-derived reminder");
+	assert.equal(captured.sent.length, 0);
+	assert.equal(await runContextHook(captured, at(90_000)), undefined, "project-derived reminder crossing persists only");
+	assert.equal(captured.sent.length, 1, "project reminder margin wins");
+	assert.equal(await runBeforeAgentStart(captured, at(60_001)), undefined, "above the project-derived fallback");
+	const fallback = await runBeforeAgentStart(captured, at(60_000));
+	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, "global fallback margin survives the project override");
+});
+
+test("an untrusted project is ignored, so global pi-context margins apply", async () => {
+	const fixture = settingsFixture({
+		global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 30_000 } },
+		project: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 40_000 } },
+	});
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const window = 100_000;
+	// Global reminder = 16384 + 30000 = 46384, not the project's 56384.
+	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd, false);
+	assert.equal(((await runContextHook(captured, at(56_000))) as { messages: unknown[] }).messages.length, 1, "untrusted project margin ignored; transient hint only");
+	assert.equal(captured.sent.length, 0, "no guidance from the untrusted project margin");
+	assert.equal(await runContextHook(captured, at(46_384)), undefined, "global margin fires instead");
+	assert.equal(captured.sent.length, 1);
+});
+
+test("thresholds are re-read from settings.json on session_start", async () => {
+	const fixture = settingsFixture({ global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { fallbackMarginTokens: 10_000 } } });
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const at = (remaining: number) => context(sm, undefined, { tokens: 100_000 - remaining, percent: 0, contextWindow: 100_000 }, true, fixture.cwd);
+	runHandlers(captured, "session_start", { reason: "startup" }, at(0));
+	// Initial fallback = 16384 + 10000 = 26384; 35000 is above it.
+	assert.equal(await runBeforeAgentStart(captured, at(35_000)), undefined, "initial fallback margin");
+	// Rewrite the global settings file, then session_start must pick up the new margin.
+	writeJson(join(fixture.agentDir, "settings.json"), { [internal.PI_CONTEXT_SETTINGS_KEY]: { fallbackMarginTokens: 24_576 } });
+	runHandlers(captured, "session_start", { reason: "startup" }, at(0));
+	// New fallback = 16384 + 24576 = 40960; 35000 is now below it.
+	const fallback = await runBeforeAgentStart(captured, at(35_000));
+	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, "fallback margin re-read on session_start");
+});
+
+test("invalid margins degrade per key with one warning and never throw", async () => {
+	const fixture = settingsFixture({ global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 0, fallbackMarginTokens: 10_000 } } });
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const ctx = context(sm, undefined, undefined, true, fixture.cwd);
+	assert.doesNotThrow(() => runHandlers(captured, "session_start", { reason: "startup" }, ctx));
+	const notices = noticesOf(ctx);
+	assert.equal(notices.length, 1, "one warning for the offending key");
+	assert.equal(notices[0]?.type, "warning");
+	assert.match(notices[0]?.message ?? "", /reminderMarginTokens/);
+	assert.match(notices[0]?.message ?? "", /49152/);
+
+	const window = 200_000;
+	const at = (remaining: number, idle = true) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, idle, fixture.cwd);
+	// Valid fallback margin is preserved: fallback = 16384 + 10000 = 26384; reminder = 16384 + 49152 = 65536.
+	assert.equal(((await runContextHook(captured, at(65_537))) as { messages: unknown[] }).messages.length, 1);
+	assert.equal(await runContextHook(captured, at(65_536)), undefined, "degraded reminder uses its default");
+	assert.equal(captured.sent.length, 2, "session hint plus degraded reminder");
+	assert.equal(await runBeforeAgentStart(captured, at(26_385)), undefined);
+	const fallback = await runBeforeAgentStart(captured, at(26_384));
+	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, "valid fallback margin survives");
+	assert.doesNotThrow(() => runHandlers(captured, "turn_end", {}, at(0, false)));
+	assert.equal(notices.length, 1, "warning stays one-time across session handlers");
+});
+
+test("a reminder margin that does not clear the fallback degrades to its default with one warning", async () => {
+	const fixture = settingsFixture({ global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 1_000, fallbackMarginTokens: 2_000 } } });
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const ctx = context(sm, undefined, undefined, true, fixture.cwd);
+	assert.doesNotThrow(() => runHandlers(captured, "session_start", { reason: "startup" }, ctx));
+	const notices = noticesOf(ctx);
+	assert.equal(notices.length, 1, "one warning for the reversed ordering");
+	assert.match(notices[0]?.message ?? "", /reminderMarginTokens/);
+	assert.match(notices[0]?.message ?? "", /49152/);
+
+	const at = (remaining: number, idle = true) => context(sm, undefined, { tokens: 200_000 - remaining, percent: 0, contextWindow: 200_000 }, idle, fixture.cwd);
+	// reminder = 65536, valid fallback = 16384 + 2000 = 18384.
+	assert.equal(((await runContextHook(captured, at(65_537))) as { messages: unknown[] }).messages.length, 1);
+	assert.equal(await runContextHook(captured, at(65_536)), undefined, "degraded reminder fires at default margin");
+	assert.equal(captured.sent.length, 2);
+	assert.equal(await runBeforeAgentStart(captured, at(18_385)), undefined);
+	const fallback = await runBeforeAgentStart(captured, at(18_384));
+	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE);
+	assert.doesNotThrow(() => runHandlers(captured, "turn_end", {}, at(0, false)));
+	assert.equal(notices.length, 1, "warning stays one-time");
+});
+
+test("an invalid fallback margin degrades alone without disturbing a valid reminder margin", async () => {
+	const fixture = settingsFixture({ global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 30_000, fallbackMarginTokens: "nope" } } });
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const ctx = context(sm, undefined, undefined, true, fixture.cwd);
+	runHandlers(captured, "session_start", { reason: "startup" }, ctx);
+	const notices = noticesOf(ctx);
+	assert.equal(notices.length, 1, "one warning for the offending fallback key");
+	assert.match(notices[0]?.message ?? "", /fallbackMarginTokens/);
+	assert.match(notices[0]?.message ?? "", /24576/);
+
+	const at = (remaining: number) => context(sm, undefined, { tokens: 200_000 - remaining, percent: 0, contextWindow: 200_000 }, true, fixture.cwd);
+	// reminder = 16384 + 30000 = 46384; degraded fallback = 16384 + 24576 = 40960.
+	assert.equal(((await runContextHook(captured, at(46_385))) as { messages: unknown[] }).messages.length, 1, "above the valid reminder");
+	assert.equal(await runContextHook(captured, at(46_384)), undefined, "valid reminder margin still fires");
+	assert.equal(captured.sent.length, 2, "session hint plus valid reminder");
+	const fallback = await runBeforeAgentStart(captured, at(40_960));
+	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, "degraded fallback uses its default");
+	assert.equal(notices.length, 1);
+});
+
+test("the old threshold flags are no longer registered", () => {
+	const captured = makeExtension(manager());
+	assert.deepEqual(captured.flags, []);
+});
+
+test("a fallback margin that still overwhelms the default reminder degrades too, keeping the invariant", async () => {
+	const fixture = settingsFixture({ global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 1_000, fallbackMarginTokens: 60_000 } } });
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const ctx = context(sm, undefined, undefined, true, fixture.cwd);
+	runHandlers(captured, "session_start", { reason: "startup" }, ctx);
+	const notices = noticesOf(ctx);
+	assert.equal(notices.length, 2, "each offending key warns once");
+	assert.match(notices[0]?.message ?? "", /reminderMarginTokens/);
+	assert.match(notices[1]?.message ?? "", /fallbackMarginTokens/);
+
+	const at = (remaining: number) => context(sm, undefined, { tokens: 200_000 - remaining, percent: 0, contextWindow: 200_000 }, true, fixture.cwd);
+	// Both margins degrade to defaults, so reminder 65536 > fallback 40960 > reserve 16384 still holds.
+	assert.equal(await runBeforeAgentStart(captured, at(40_961)), undefined);
+	const fallback = await runBeforeAgentStart(captured, at(40_960));
+	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE);
+});
+
 
 test("final fallback turn uses public turn boundaries without intercepting or replaying user input", async () => {
 	const sm = manager();

@@ -1,6 +1,6 @@
 import { Type, type TextContent } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { defineTool, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const STATE_TYPE = "pi-context/state";
 const NOTE_TYPE = "pi-context/note";
@@ -14,15 +14,18 @@ const CONTEXT_WINDOW_OPEN_TAG = "<context_window>";
 const CONTEXT_WINDOW_CLOSE_TAG = "</context_window>";
 const GUIDANCE_OPEN_TAG = "<context_window_guidance>";
 const GUIDANCE_CLOSE_TAG = "</context_window_guidance>";
-const REMINDER_THRESHOLD_TOKENS = 65_536;
-const REMINDER_FLAG = "pi-context-reminder-tokens";
-const FALLBACK_THRESHOLD_TOKENS = 40_960;
-const FALLBACK_FLAG = "pi-context-fallback-tokens";
+const PI_CONTEXT_SETTINGS_KEY = "pi-context";
+const DEFAULT_RESERVE_TOKENS = 16_384;
+const DEFAULT_REMINDER_MARGIN_TOKENS = 49_152;
+const DEFAULT_FALLBACK_MARGIN_TOKENS = 24_576;
 const RESET_SUMMARY = "Context window reset. No summary was generated. Retrieve prior details through history_* and notes_*.";
 const CONTINUATION = "This is a fresh context window. Recover only the details needed to continue with history_* and notes_*; then continue the task.";
 
 const FALLBACK_PROMPT =
 	"Context budget is almost exhausted. This is the final fallback turn before the window resets automatically. Write task state, decisions, open issues, and next steps with notes_write_file now. Do not start new work; old conversation remains searchable through history_*.";
+
+type ResolvedThresholds = { reminder: number; fallback: number };
+type PiContextMargins = { reminderMarginTokens: unknown; fallbackMarginTokens: unknown };
 
 type NoteFile = { text: string; createdAt: number; updatedAt: number };
 type NoteOperation = {
@@ -272,6 +275,67 @@ const nullableInteger = () => Type.Optional(Type.Union([Type.Integer(), Type.Nul
 const positiveInteger = () => Type.Optional(Type.Integer({ minimum: 1 }));
 const role = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool"), Type.Literal("system"), Type.Literal("developer"), Type.Null()]);
 
+function isSettingsObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Read the raw "pi-context" object from one parsed settings scope. */
+function piContextSettings(settings: unknown): Record<string, unknown> {
+	if (!isSettingsObject(settings)) return {};
+	const value = settings[PI_CONTEXT_SETTINGS_KEY];
+	return isSettingsObject(value) ? value : {};
+}
+
+/** Merge the global and project "pi-context" objects per key; project wins, mirroring Pi's deep merge. */
+export function mergePiContextSettings(globalSettings: unknown, projectSettings: unknown): PiContextMargins {
+	const merged = { ...piContextSettings(globalSettings), ...piContextSettings(projectSettings) };
+	return { reminderMarginTokens: merged.reminderMarginTokens, fallbackMarginTokens: merged.fallbackMarginTokens };
+}
+
+/** A margin is usable only as a positive integer; anything else is ignored. */
+function validMargin(raw: unknown): number | undefined {
+	if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw <= 0) return undefined;
+	return raw;
+}
+
+/**
+ * Pure derivation of the effective thresholds from Pi's reserve plus the pi-context
+ * margins. Invalid margins and a reminder that does not clear the fallback degrade
+ * to defaults per offending key and report one warning each.
+ */
+export function deriveThresholds(reserveTokens: number, margins: PiContextMargins): { thresholds: ResolvedThresholds; warnings: string[] } {
+	const warnings: string[] = [];
+	const reminderKey = `${PI_CONTEXT_SETTINGS_KEY}.reminderMarginTokens`;
+	const fallbackKey = `${PI_CONTEXT_SETTINGS_KEY}.fallbackMarginTokens`;
+	const parsedReminder = validMargin(margins.reminderMarginTokens);
+	const parsedFallback = validMargin(margins.fallbackMarginTokens);
+
+	let reminderMargin: number;
+	if (margins.reminderMarginTokens === undefined) reminderMargin = DEFAULT_REMINDER_MARGIN_TOKENS;
+	else if (parsedReminder === undefined) {
+		warnings.push(`pi-context: ${reminderKey} must be a positive integer; using default ${DEFAULT_REMINDER_MARGIN_TOKENS}.`);
+		reminderMargin = DEFAULT_REMINDER_MARGIN_TOKENS;
+	} else reminderMargin = parsedReminder;
+
+	let fallbackMargin: number;
+	if (margins.fallbackMarginTokens === undefined) fallbackMargin = DEFAULT_FALLBACK_MARGIN_TOKENS;
+	else if (parsedFallback === undefined) {
+		warnings.push(`pi-context: ${fallbackKey} must be a positive integer; using default ${DEFAULT_FALLBACK_MARGIN_TOKENS}.`);
+		fallbackMargin = DEFAULT_FALLBACK_MARGIN_TOKENS;
+	} else fallbackMargin = parsedFallback;
+
+	if (reminderMargin <= fallbackMargin) {
+		warnings.push(`pi-context: ${reminderKey} must exceed ${fallbackKey}; using default ${DEFAULT_REMINDER_MARGIN_TOKENS}.`);
+		reminderMargin = DEFAULT_REMINDER_MARGIN_TOKENS;
+		if (reminderMargin <= fallbackMargin) {
+			warnings.push(`pi-context: ${fallbackKey} must be below ${reminderKey}; using default ${DEFAULT_FALLBACK_MARGIN_TOKENS}.`);
+			fallbackMargin = DEFAULT_FALLBACK_MARGIN_TOKENS;
+		}
+	}
+
+	return { thresholds: { reminder: reserveTokens + reminderMargin, fallback: reserveTokens + fallbackMargin }, warnings };
+}
+
 export default function piContext(pi: ExtensionAPI) {
 	let rollover: "idle" | "requested" | "compacting" = "idle";
 	let enabled = true;
@@ -279,29 +343,32 @@ export default function piContext(pi: ExtensionAPI) {
 	let guidancePersistedInWindow: string | undefined;
 	let fallbackPersistedInWindow: string | undefined;
 	let handledCompactionId: string | undefined;
+	let thresholds: ResolvedThresholds | undefined;
 
-	pi.registerFlag(REMINDER_FLAG, {
-		description: "Remind once when remaining context reaches this value; set above Pi reserveTokens",
-		type: "string",
-		default: String(REMINDER_THRESHOLD_TOKENS),
-	});
-	pi.registerFlag(FALLBACK_FLAG, {
-		description: "Offer one final note-taking turn when remaining context reaches this value",
-		type: "string",
-		default: String(FALLBACK_THRESHOLD_TOKENS),
-	});
-	const threshold = (flag: string, fallback: number) => {
-		const value = Number(pi.getFlag(flag) ?? fallback);
-		if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`--${flag} must be a positive integer`);
-		return value;
-	};
-	const thresholds = () => {
-		const next = {
-			reminder: threshold(REMINDER_FLAG, REMINDER_THRESHOLD_TOKENS),
-			fallback: threshold(FALLBACK_FLAG, FALLBACK_THRESHOLD_TOKENS),
-		};
-		if (next.fallback >= next.reminder) throw new Error(`--${FALLBACK_FLAG} must be lower than --${REMINDER_FLAG}`);
-		return next;
+	/**
+	 * Resolve the thresholds for this session from Pi's compaction reserve plus the
+	 * settings.json "pi-context" margins. The file-backed read is cached until the next
+	 * session_start; invalid configuration degrades per offending key with one warning
+	 * and never throws during session operation.
+	 */
+	const resolveThresholds = (ctx: ExtensionContext): ResolvedThresholds => {
+		if (thresholds) return thresholds;
+		try {
+			const settingsManager = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
+			const derived = deriveThresholds(
+				settingsManager.getCompactionSettings().reserveTokens,
+				mergePiContextSettings(settingsManager.getGlobalSettings(), settingsManager.getProjectSettings()),
+			);
+			for (const warning of derived.warnings) ctx.ui.notify(warning, "warning");
+			thresholds = derived.thresholds;
+		} catch (error) {
+			ctx.ui.notify(`pi-context: could not read settings; using defaults (${String(error)}).`, "warning");
+			thresholds = {
+				reminder: DEFAULT_RESERVE_TOKENS + DEFAULT_REMINDER_MARGIN_TOKENS,
+				fallback: DEFAULT_RESERVE_TOKENS + DEFAULT_FALLBACK_MARGIN_TOKENS,
+			};
+		}
+		return thresholds;
 	};
 
 	/** Persist the context_window hint as a visible message (lands in history and the TUI), Codex-style. */
@@ -310,6 +377,9 @@ export default function piContext(pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", (_event, ctx) => {
+		// Re-read settings.json on every session start; the resolved values are cached for the session.
+		thresholds = undefined;
+		resolveThresholds(ctx);
 		if (!enabled) return;
 		persistHint(ctx);
 	});
@@ -472,7 +542,7 @@ export default function piContext(pi: ExtensionAPI) {
 		const usage = ctx.getContextUsage();
 		if (usage && usage.tokens !== null) {
 			const remaining = Math.max(0, usage.contextWindow - usage.tokens);
-			if (remaining <= thresholds().reminder && guidancePersistedInWindow !== windowId) {
+			if (remaining <= resolveThresholds(ctx).reminder && guidancePersistedInWindow !== windowId) {
 				guidancePersistedInWindow = windowId;
 				// Persist once per window — no transient copy. A transient bridge would
 				// cover the crossing request, but history would record the reminder after
@@ -502,7 +572,7 @@ export default function piContext(pi: ExtensionAPI) {
 		const usage = ctx.getContextUsage();
 		if (!usage || usage.tokens === null) return undefined;
 		const remaining = Math.max(0, usage.contextWindow - usage.tokens);
-		if (remaining > thresholds().fallback) return undefined;
+		if (remaining > resolveThresholds(ctx).fallback) return undefined;
 		const windowId = currentWindowId(ctx);
 		if (fallbackPersistedInWindow === windowId) return undefined;
 		fallbackPersistedInWindow = windowId;
@@ -522,7 +592,7 @@ export default function piContext(pi: ExtensionAPI) {
 		const usage = ctx.getContextUsage();
 		if (!usage || usage.tokens === null) return;
 		const remaining = Math.max(0, usage.contextWindow - usage.tokens);
-		if (remaining > thresholds().fallback) return;
+		if (remaining > resolveThresholds(ctx).fallback) return;
 		const windowId = currentWindowId(ctx);
 		if (fallbackPersistedInWindow === windowId) return;
 		if (rollover !== "idle") return;
@@ -608,4 +678,4 @@ export default function piContext(pi: ExtensionAPI) {
 	});
 }
 
-export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, HINT_TYPE, GUIDANCE_TYPE, FALLBACK_TYPE, FALLBACK_PROMPT, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, GUIDANCE_OPEN_TAG, REMINDER_THRESHOLD_TOKENS, REMINDER_FLAG, FALLBACK_THRESHOLD_TOKENS, FALLBACK_FLAG, lineRange, assertVirtualPath };
+export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, HINT_TYPE, GUIDANCE_TYPE, FALLBACK_TYPE, FALLBACK_PROMPT, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, DEFAULT_FALLBACK_MARGIN_TOKENS, deriveThresholds, mergePiContextSettings, lineRange, assertVirtualPath };

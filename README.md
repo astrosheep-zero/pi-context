@@ -20,20 +20,39 @@ The extension composes Pi's public `session_before_compact` / `session_compact` 
 
 - **`new_context` tool** — the model requests a fresh context window. The extension waits for the current tool turn to end, compacts with a short deterministic reset message (old conversation is excluded from the new provider context but stays in the session), then sends exactly one hidden continuation turn.
 - **`<context_window>` hint** — persisted as a visible custom message at session start and after each window reset (Codex-style: written once into history instead of re-injected per request). Because that durable message can land after the fresh window's first provider request, the `context` hook appends one transient copy to that first request only; once the persisted hint is in history, its custom type suppresses the transient copy. It carries the agent name, first/current/previous window IDs, and the 5 most recently updated notes. Within a window the note list goes stale, exactly like Codex's steady-state world-state diffing.
-- **Low-budget guidance** — when estimated remaining context first drops to **65,536 tokens** or below, a `<context_window_guidance>` reminder is **persisted once per window** into history (TUI-visible, no extra turn; `sendMessage` safely defers mid-stream). There is deliberately no transient copy: a bridge would make the model meet the same text twice at shifted positions, because history records the persisted copy after the crossing request's assistant reply. The reminder is an early warning, so arriving from the next request on costs nothing and keeps the model's view identical to recorded history. The measured remaining count is frozen into the text at the threshold crossing, so the persisted reminder is a snapshot true at write time; `get_context_remaining` remains the live source for the current figure. The text is appended rather than prepended; existing history is not rewritten.
+- **Low-budget guidance** — when estimated remaining context first drops to the reminder threshold (by default **65,536 tokens**: Pi's default 16,384 `reserveTokens` plus a 49,152 reminder margin; see [Reminder timing](#reminder-timing)), a `<context_window_guidance>` reminder is **persisted once per window** into history (TUI-visible, no extra turn; `sendMessage` safely defers mid-stream). There is deliberately no transient copy: a bridge would make the model meet the same text twice at shifted positions, because history records the persisted copy after the crossing request's assistant reply. The reminder is an early warning, so arriving from the next request on costs nothing and keeps the model's view identical to recorded history. The measured remaining count is frozen into the text at the threshold crossing, so the persisted reminder is a snapshot true at write time; `get_context_remaining` remains the live source for the current figure. The text is appended rather than prepended; existing history is not rewritten.
 - **Direct automatic reset** — every automatic compaction immediately uses the same reset handler. No cancellation to obtain a fallback turn, no input interception or replay, and no special idle/streaming scheduling. The reminder asks the model to write notes early; if it misses that opportunity, old history remains searchable. Pi owns automatic continuation, queued inputs, and overflow retry.
-- **Graceful fallback** — when estimated remaining context reaches **40,960 tokens**, the extension inserts one final note-taking instruction once per window. Before a fresh user turn, it is persisted through `before_agent_start`; after a running tool turn (only while the agent is still streaming), it is sent at the ordinary `turn_end` boundary with `triggerTurn: true`, which Pi routes to `agent.steer()`: the message is drained after the turn end and injected before the next LLM call, extending the current run by one note-taking turn while a queued user prompt (follow-up) waits until the agent would stop. It never copies, handles, or replays user input and never cancels Pi's compaction. Pi's automatic compaction still performs the reset afterward.
+- **Graceful fallback** — when estimated remaining context reaches the fallback threshold (by default **40,960 tokens**: Pi's default 16,384 `reserveTokens` plus a 24,576 fallback margin; see [Reminder timing](#reminder-timing)), the extension inserts one final note-taking instruction once per window. Before a fresh user turn, it is persisted through `before_agent_start`; after a running tool turn (only while the agent is still streaming), it is sent at the ordinary `turn_end` boundary with `triggerTurn: true`, which Pi routes to `agent.steer()`: the message is drained after the turn end and injected before the next LLM call, extending the current run by one note-taking turn while a queued user prompt (follow-up) waits until the agent would stop. It never copies, handles, or replays user input and never cancels Pi's compaction. Pi's automatic compaction still performs the reset afterward.
 - **Runtime toggle** — `/pi-context off` disables hint injection, guidance, and reset-style compaction (Pi's default compaction, including `keepRecentTokens`, applies again). `/pi-context on` re-enables; a bare `/pi-context` reports the current state.
 - **History tools** — the model searches pre-reset conversation with case-sensitive literal substring search, exactly like Codex's `history.*` namespace.
 - **Notes tools** — persistent, session-scoped virtual files that survive window resets.
 
 ## Reminder timing
 
-```sh
-pi --pi-context-reminder-tokens 65536 --pi-context-fallback-tokens 40960
+Reminder and fallback thresholds derive from Pi's compaction reserve plus margins configured in `settings.json` under the top-level `pi-context` key:
+
+```json
+{
+  "compaction": { "reserveTokens": 16384 },
+  "pi-context": {
+    "reminderMarginTokens": 49152,
+    "fallbackMarginTokens": 24576
+  }
+}
 ```
 
-Both flags accept positive integers measured in **remaining context tokens**, not tokens consumed. The reminder must be above the fallback, and both should be above your Pi `compaction.reserveTokens` with enough headroom for a turn. With Pi's default `reserveTokens: 16384`, the defaults leave roughly 24.5k tokens between early reminder and fallback, then another 24.5k between fallback and Pi's reset line. The extension does not change Pi settings or reserve additional context. Large tool outputs or user inputs can jump over one or both reminders; overflow recovery still resets immediately rather than forcing a doomed extra turn. For small context windows, tune all values to fit the model.
+Both margins are measured in **remaining context tokens** added on top of Pi's `compaction.reserveTokens`:
+
+- `fallback = reserveTokens + fallbackMarginTokens` (default margin `24576`)
+- `reminder = reserveTokens + reminderMarginTokens` (default margin `49152`)
+
+Put the key in the global settings (`~/.pi/agent/settings.json`) or the project settings (`<cwd>/.pi/settings.json`); project values win per key, mirroring Pi's own settings merge. With Pi's default `reserveTokens: 16384` the default margins reproduce the historical absolute thresholds exactly: reminder `65536`, fallback `40960`. That keeps roughly 24.5k tokens between the early reminder and the fallback, and another 24.5k between the fallback and Pi's reset line, no matter how you set `reserveTokens`.
+
+Pi's `reserveTokens` and the `pi-context` margins are re-read from disk at every `session_start` and cached for that session. Invalid values — a margin that is not a positive integer, or a `reminderMarginTokens` that does not clear `fallbackMarginTokens` — are ignored per offending key with one TUI warning naming the key and the default used instead; session handling never throws. If `fallbackMarginTokens` still leaves the reminder below the fallback after the reminder's default is applied, that key degrades too, with its own warning.
+
+This is a file-backed read through Pi's public `SettingsManager`. It sees committed `settings.json` only: SDK-level ephemeral `applyOverrides()` calls and the unreleased `compaction.modelOverrides` are not seen by this extension.
+
+The extension does not change Pi settings or reserve additional context. Large tool outputs or user inputs can jump over one or both reminders; overflow recovery still resets immediately rather than forcing a doomed extra turn. For small context windows, tune the margins (or Pi's reserve) to fit the model.
 
 ## Tools
 
@@ -79,4 +98,4 @@ npm run typecheck
 npm test
 ```
 
-The integration harness uses the installed Pi `SessionManager`, including an on-disk JSONL reload. It verifies note persistence/Unicode/path rules, provider context exclusion after the real `firstKeptEntryId` boundary while history remains searchable, completed tool-result boundary placement, threshold ordering/config validation, one early reminder and one final fallback per window, one continuation only, and cancellation/failure/no-double-retry behavior. It uses no model or network call.
+The integration harness uses the installed Pi `SessionManager` and `SettingsManager` (global and project settings fixtures in temp directories, so the real `~/.pi` is never touched), including an on-disk JSONL reload. It verifies note persistence/Unicode/path rules, provider context exclusion after the real `firstKeptEntryId` boundary while history remains searchable, completed tool-result boundary placement, settings-derived threshold resolution and margin validation, one early reminder and one final fallback per window, one continuation only, and cancellation/failure/no-double-retry behavior. It uses no model or network call.
