@@ -21,8 +21,11 @@ const GUIDANCE_CLOSE_TAG = "</context_window_guidance>";
 const PI_CONTEXT_SETTINGS_KEY = "pi-context";
 const DEFAULT_RESERVE_TOKENS = 16_384;
 const DEFAULT_REMINDER_MARGIN_TOKENS = 24_576;
-const DEFAULT_FALLBACK_MARGIN_TOKENS = 8_192;
-const RESET_SUMMARY = "Context window reset. No summary was generated. Retrieve prior details through history_* and notes_*.";
+const RESET_SUMMARY =
+	"Context window reset: this is a fresh window. The previous conversation is not included and no summary was generated. Notes and durable session history persist across windows.";
+const NOTE_PREVIEW_HEAD_CHARS = 120;
+const NOTE_PREVIEW_TAIL_CHARS = 80;
+const NOTE_PREVIEW_CHARS = NOTE_PREVIEW_HEAD_CHARS + NOTE_PREVIEW_TAIL_CHARS;
 const CONTINUATION = "This is a fresh context window. Recover only the details needed to continue with history_* and notes_*; then continue the task.";
 
 /**
@@ -43,8 +46,8 @@ ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 const FALLBACK_PROMPT =
 	"Context budget is almost exhausted. This is the final fallback turn before the window resets automatically. Write task state, decisions, open issues, and next steps with notes_write_file now. Do not start new work; old conversation remains searchable through history_*.";
 
-type ResolvedThresholds = { reminder: number; fallback: number };
-type PiContextMargins = { reminderMarginTokens: unknown; fallbackMarginTokens: unknown };
+type ResolvedThresholds = { reminder: number };
+type PiContextMargins = { reminderMarginTokens: unknown };
 
 type NoteFile = { text: string; createdAt: number; updatedAt: number };
 type NoteOperation = {
@@ -196,7 +199,7 @@ function filteredItems(ctx: ExtensionContext, params: HistoryFilter): HistoryIte
 	if (typeof params.role === "string") items = items.filter((item) => item.role === params.role);
 	if (typeof params.tool_namespace === "string") items = items.filter((item) => item.toolNamespace === params.tool_namespace);
 	if (typeof params.tool_name === "string") items = items.filter((item) => item.toolName === params.tool_name);
-	if (params.recent_first === true) items.reverse();
+	if (params.recent_first !== false) items.reverse();
 	return items;
 }
 
@@ -256,15 +259,29 @@ function identityBlock(agentName: string, firstWindowId: string, currentWindowId
 	return `${CONTEXT_WINDOW_OPEN_TAG}\n${lines.join("\n")}\n${CONTEXT_WINDOW_CLOSE_TAG}`;
 }
 
-/** Recent-notes index with the existing wording; empty when the session has no notes. */
+/**
+ * Recent-notes index: up to three most-recent notes. Each note shows its path, line count,
+ * UTF-8 byte count and local ISO update time, followed by an indented inline preview: the
+ * whole text when it fits in NOTE_PREVIEW_CHARS, otherwise its first NOTE_PREVIEW_HEAD_CHARS
+ * and last NOTE_PREVIEW_TAIL_CHARS Unicode characters joined by an explicit ellipsis. The
+ * two slices never overlap, so the preview never duplicates head content as tail content.
+ * Empty when the session has no notes.
+ */
 function notesIndex(ctx: ExtensionContext): string {
 	const recentNotes = [...notesFromSession(ctx)]
 		.sort((a, b) => b[1].updatedAt - a[1].updatedAt)
-		.slice(0, 5);
+		.slice(0, 3);
 	if (recentNotes.length === 0) return "";
-	const lines = ["Recent notes (up to 5, most-recent first):"];
+	const lines = ["Recent notes at window open (up to 3, most-recent first):"];
 	for (const [path, file] of recentNotes) {
-		lines.push(`- ${path} (${file.text.split("\n").length} lines, ${Buffer.byteLength(file.text, "utf8")} UTF-8 bytes)`);
+		lines.push(`- ${path} (${file.text.split("\n").length} lines, ${Buffer.byteLength(file.text, "utf8")} UTF-8 bytes, updated ${localIso(file.updatedAt)})`);
+		const chars = Array.from(file.text);
+		// Short notes stay whole; long notes keep both ends. head + tail <= NOTE_PREVIEW_CHARS < chars.length,
+		// so the slices are disjoint and no character is shown twice.
+		const preview = chars.length <= NOTE_PREVIEW_CHARS
+			? file.text
+			: `${chars.slice(0, NOTE_PREVIEW_HEAD_CHARS).join("")}…${chars.slice(chars.length - NOTE_PREVIEW_TAIL_CHARS).join("")}`;
+		lines.push(preview.split("\n").map((line) => `  ${line}`).join("\n"));
 	}
 	return lines.join("\n");
 }
@@ -319,9 +336,26 @@ function lineRange(text: string, startValue: unknown, stopValue: unknown) {
 	return { start_line: start, stop_line: stop, content: start > stop ? "" : lines.slice(start - 1, stop).join("\n") };
 }
 
+const pad2 = (value: number) => String(value).padStart(2, "0");
+
+/**
+ * Format epoch milliseconds as an ISO 8601 string in the host's local time zone with an
+ * explicit numeric offset (e.g. 2026-09-15T17:31:45.392+08:00). A UTC host renders
+ * "+00:00"; the "Z" designator is never used, and Date.parse round-trips the value.
+ */
+function localIso(epochMs: number): string {
+	const date = new Date(epochMs);
+	const offsetMinutes = -date.getTimezoneOffset();
+	const absOffset = Math.abs(offsetMinutes);
+	const offset = `${offsetMinutes < 0 ? "-" : "+"}${pad2(Math.floor(absOffset / 60))}:${pad2(absOffset % 60)}`;
+	const wallClock = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}.${String(date.getMilliseconds()).padStart(3, "0")}`;
+	return `${wallClock}${offset}`;
+}
+
 const nullableString = () => Type.Optional(Type.Union([Type.String(), Type.Null()]));
 const nullableInteger = () => Type.Optional(Type.Union([Type.Integer(), Type.Null()]));
 const positiveInteger = () => Type.Optional(Type.Integer({ minimum: 1 }));
+const recentFirst = () => Type.Optional(Type.Boolean({ description: "Return newest-first. Only an explicit false returns oldest-first. Defaults to true." }));
 const role = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool"), Type.Literal("system"), Type.Literal("developer"), Type.Null()]);
 
 function isSettingsObject(value: unknown): value is Record<string, unknown> {
@@ -338,7 +372,7 @@ function piContextSettings(settings: unknown): Record<string, unknown> {
 /** Merge the global and project "pi-context" objects per key; project wins, mirroring Pi's deep merge. */
 export function mergePiContextSettings(globalSettings: unknown, projectSettings: unknown): PiContextMargins {
 	const merged = { ...piContextSettings(globalSettings), ...piContextSettings(projectSettings) };
-	return { reminderMarginTokens: merged.reminderMarginTokens, fallbackMarginTokens: merged.fallbackMarginTokens };
+	return { reminderMarginTokens: merged.reminderMarginTokens };
 }
 
 /** A margin is usable only as a positive integer; anything else is ignored. */
@@ -348,49 +382,37 @@ function validMargin(raw: unknown): number | undefined {
 }
 
 /**
- * Pure derivation of the effective thresholds from Pi's reserve plus the pi-context
- * margins. Invalid margins and a reminder that does not clear the fallback degrade
- * to defaults per offending key and report one warning each.
+ * Pure derivation of the reminder threshold from Pi's reserve plus the pi-context
+ * reminder margin. An invalid margin degrades to the default and reports one warning.
+ * The borrowed fallback turn has no token threshold of its own: it is driven by Pi's
+ * automatic threshold/overflow compaction request (see session_before_compact).
  */
 export function deriveThresholds(reserveTokens: number, margins: PiContextMargins): { thresholds: ResolvedThresholds; warnings: string[] } {
 	const warnings: string[] = [];
 	const reminderKey = `${PI_CONTEXT_SETTINGS_KEY}.reminderMarginTokens`;
-	const fallbackKey = `${PI_CONTEXT_SETTINGS_KEY}.fallbackMarginTokens`;
-	const parsedReminder = validMargin(margins.reminderMarginTokens);
-	const parsedFallback = validMargin(margins.fallbackMarginTokens);
-
 	let reminderMargin: number;
 	if (margins.reminderMarginTokens === undefined) reminderMargin = DEFAULT_REMINDER_MARGIN_TOKENS;
-	else if (parsedReminder === undefined) {
-		warnings.push(`pi-context: ${reminderKey} must be a positive integer; using default ${DEFAULT_REMINDER_MARGIN_TOKENS}.`);
-		reminderMargin = DEFAULT_REMINDER_MARGIN_TOKENS;
-	} else reminderMargin = parsedReminder;
-
-	let fallbackMargin: number;
-	if (margins.fallbackMarginTokens === undefined) fallbackMargin = DEFAULT_FALLBACK_MARGIN_TOKENS;
-	else if (parsedFallback === undefined) {
-		warnings.push(`pi-context: ${fallbackKey} must be a positive integer; using default ${DEFAULT_FALLBACK_MARGIN_TOKENS}.`);
-		fallbackMargin = DEFAULT_FALLBACK_MARGIN_TOKENS;
-	} else fallbackMargin = parsedFallback;
-
-	if (reminderMargin <= fallbackMargin) {
-		warnings.push(`pi-context: ${reminderKey} must exceed ${fallbackKey}; using default ${DEFAULT_REMINDER_MARGIN_TOKENS}.`);
-		reminderMargin = DEFAULT_REMINDER_MARGIN_TOKENS;
-		if (reminderMargin <= fallbackMargin) {
-			warnings.push(`pi-context: ${fallbackKey} must be below ${reminderKey}; using default ${DEFAULT_FALLBACK_MARGIN_TOKENS}.`);
-			fallbackMargin = DEFAULT_FALLBACK_MARGIN_TOKENS;
-		}
+	else {
+		const parsed = validMargin(margins.reminderMarginTokens);
+		if (parsed === undefined) {
+			warnings.push(`pi-context: ${reminderKey} must be a positive integer; using default ${DEFAULT_REMINDER_MARGIN_TOKENS}.`);
+			reminderMargin = DEFAULT_REMINDER_MARGIN_TOKENS;
+		} else reminderMargin = parsed;
 	}
-
-	return { thresholds: { reminder: reserveTokens + reminderMargin, fallback: reserveTokens + fallbackMargin }, warnings };
+	return { thresholds: { reminder: reserveTokens + reminderMargin }, warnings };
 }
 
 export default function piContext(pi: ExtensionAPI) {
 	let rollover: "idle" | "requested" | "compacting" = "idle";
 	let enabled = true;
 	let guidancePersistedInWindow: string | undefined;
-	let fallbackPersistedInWindow: string | undefined;
 	let handledCompactionId: string | undefined;
+	// Two-phase main-line fallback. The first automatic threshold/overflow compaction
+	// borrows one final note-taking turn (cancel + steer) instead of resetting at once;
+	// the next compaction request is allowed through. The phase only returns to "idle"
+	// after a completed reset, so the cancel happens at most once per window and a failed
+	// reset retries the real compaction instead of borrowing another turn.
+	let fallbackPhase: "idle" | "steered" | "allow" | "requested" = "idle";
 	let thresholds: ResolvedThresholds | undefined;
 
 	/**
@@ -411,10 +433,7 @@ export default function piContext(pi: ExtensionAPI) {
 			thresholds = derived.thresholds;
 		} catch (error) {
 			ctx.ui.notify(`pi-context: could not read settings; using defaults (${String(error)}).`, "warning");
-			thresholds = {
-				reminder: DEFAULT_RESERVE_TOKENS + DEFAULT_REMINDER_MARGIN_TOKENS,
-				fallback: DEFAULT_RESERVE_TOKENS + DEFAULT_FALLBACK_MARGIN_TOKENS,
-			};
+			thresholds = { reminder: DEFAULT_RESERVE_TOKENS + DEFAULT_REMINDER_MARGIN_TOKENS };
 		}
 		return thresholds;
 	};
@@ -458,10 +477,10 @@ export default function piContext(pi: ExtensionAPI) {
 		name: "history_list_windows",
 		label: "History list windows",
 		description: "List durable Pi session-history windows.",
-		parameters: Type.Object({ limit: positiveInteger(), recent_first: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+		parameters: Type.Object({ limit: positiveInteger(), recent_first: recentFirst() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			let windows = historyFromSession(ctx);
-			if (params.recent_first) windows = [...windows].reverse();
+			if (params.recent_first !== false) windows = [...windows].reverse();
 			const limit = params.limit ?? windows.length;
 			return output({ windows: windows.slice(0, limit).map((window) => ({ window_id: window.windowId, item_count: window.items.length })) });
 		},
@@ -471,7 +490,7 @@ export default function piContext(pi: ExtensionAPI) {
 		name: "history_list_items",
 		label: "History list items",
 		description: "List durable session items, including items before compaction, using opaque item and window IDs.",
-		parameters: Type.Object({ limit: positiveInteger(), recent_first: Type.Optional(Type.Boolean()), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
+		parameters: Type.Object({ limit: positiveInteger(), recent_first: recentFirst(), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const items = filteredItems(ctx, params);
 			return output({ items: items.slice(0, params.limit ?? items.length).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200)) });
@@ -497,7 +516,7 @@ export default function piContext(pi: ExtensionAPI) {
 		name: "history_search_contents",
 		label: "History search",
 		description: "Case-sensitive literal substring search over durable Pi session history; no semantic search.",
-		parameters: Type.Object({ limit: positiveInteger(), query: Type.String(), recent_first: Type.Optional(Type.Boolean()), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString() }, { additionalProperties: false }),
+		parameters: Type.Object({ limit: positiveInteger(), query: Type.String(), recent_first: recentFirst(), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const items = filteredItems(ctx, params);
 			const matching = items.filter((item) => item.content.includes(params.query));
@@ -508,7 +527,7 @@ export default function piContext(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_list_files_by_prefix",
 		label: "Notes list files",
-		description: "List persistent, session-scoped virtual note files.",
+		description: "List persistent, session-scoped virtual note files. created_at and updated_at are local-time ISO 8601 strings with an explicit UTC offset.",
 		parameters: Type.Object({ prefix: nullableString(), max_results: positiveInteger(), file_order_by: Type.Optional(Type.Union([Type.Literal("name"), Type.Literal("created_at"), Type.Literal("updated_at")])), file_order: Type.Optional(Type.Union([Type.Literal("ascending"), Type.Literal("descending")])) }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const prefix = assertVirtualPrefix(params.prefix);
@@ -516,34 +535,34 @@ export default function piContext(pi: ExtensionAPI) {
 			const key = params.file_order_by ?? "name";
 			files.sort(([aPath, a], [bPath, b]) => key === "name" ? aPath.localeCompare(bPath) : (key === "created_at" ? a.createdAt - b.createdAt : a.updatedAt - b.updatedAt));
 			if (params.file_order === "descending") files.reverse();
-			return output({ files: files.slice(0, params.max_results ?? files.length).map(([path, file]) => ({ path, size_bytes: Buffer.byteLength(file.text, "utf8"), created_at: file.createdAt, updated_at: file.updatedAt })) });
+			return output({ files: files.slice(0, params.max_results ?? files.length).map(([path, file]) => ({ path, size_bytes: Buffer.byteLength(file.text, "utf8"), created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt) })) });
 		},
 	}));
 
 	pi.registerTool(defineTool({
 		name: "notes_read_file",
 		label: "Notes read file",
-		description: "Read a virtual note file, optionally by inclusive 1-based line range; negative lines count from the end.",
+		description: "Read a virtual note file, optionally by inclusive 1-based line range; negative lines count from the end. Success results carry created_at and updated_at as local-time ISO 8601 strings with an explicit UTC offset.",
 		parameters: Type.Object({ path: Type.String(), start_line: nullableInteger(), stop_line: nullableInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const path = assertVirtualPath(params.path);
 			const file = notesFromSession(ctx).get(path);
 			if (!file) return output({ error: "note file not found", path });
-			return output({ path, ...lineRange(file.text, params.start_line, params.stop_line) });
+			return output({ path, ...lineRange(file.text, params.start_line, params.stop_line), created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt) });
 		},
 	}));
 
 	pi.registerTool(defineTool({
 		name: "notes_search_contents",
 		label: "Notes search",
-		description: "Case-sensitive literal substring search over virtual note lines; no semantic search.",
+		description: "Case-sensitive literal substring search over virtual note lines; no semantic search. Each matched file carries created_at and updated_at as local-time ISO 8601 strings with an explicit UTC offset.",
 		parameters: Type.Object({ max_matches_per_file: positiveInteger(), query: Type.String(), recent_file_first: Type.Optional(Type.Boolean()), max_files: positiveInteger(), path_prefix: nullableString() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const prefix = assertVirtualPrefix(params.path_prefix);
 			let files = [...notesFromSession(ctx)].filter(([path]) => !prefix || path.startsWith(prefix));
 			if (params.recent_file_first) files.sort((a, b) => b[1].createdAt - a[1].createdAt);
 			const maxPerFile = params.max_matches_per_file ?? Number.POSITIVE_INFINITY;
-			const result = files.map(([path, file]) => ({ path, matches: file.text.split("\n").flatMap((line, index) => line.includes(params.query) ? [{ line: index + 1, text: line }] : []).slice(0, maxPerFile) })).filter((file) => file.matches.length > 0);
+			const result = files.map(([path, file]) => ({ path, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt), matches: file.text.split("\n").flatMap((line, index) => line.includes(params.query) ? [{ line: index + 1, text: line }] : []).slice(0, maxPerFile) })).filter((file) => file.matches.length > 0);
 			return output({ files: result.slice(0, params.max_files ?? result.length) });
 		},
 	}));
@@ -594,47 +613,6 @@ export default function piContext(pi: ExtensionAPI) {
 		return undefined;
 	});
 
-	// Graceful fallback without intercepting user input: before a fresh prompt, if
-	// remaining context has entered the buffer between this threshold and Pi's
-	// reserve line, append a persistent user-level final-call instruction. Pi then
-	// runs that turn with the user's queued prompt still present and runs its own
-	// automatic compaction before the following prompt. Overflow is excluded: Pi
-	// already owns its one-shot compact-and-retry recovery.
-	pi.on("before_agent_start", (event, ctx) => {
-		if (!enabled) return undefined;
-		const usage = ctx.getContextUsage();
-		if (!usage || usage.tokens === null) return undefined;
-		const remaining = Math.max(0, usage.contextWindow - usage.tokens);
-		if (remaining > resolveThresholds(ctx).fallback) return undefined;
-		const windowId = currentWindowId(ctx);
-		if (fallbackPersistedInWindow === windowId) return undefined;
-		fallbackPersistedInWindow = windowId;
-		return { message: { customType: FALLBACK_TYPE, content: FALLBACK_PROMPT, display: true } };
-	});
-
-	pi.on("turn_end", (_event, ctx) => {
-		if (!enabled) return undefined;
-		// Streaming case only: while the agent is streaming, triggerTurn:true routes
-		// to agent.steer() — Pi drains the steering queue after this turn_end and
-		// injects the message before the next LLM call, extending the current run by
-		// one note-taking turn. A queued user prompt (follow-up) drains only when the
-		// agent would stop, so it is processed after the notes turn. (Defensive: in
-		// v0.85.1 turn_end always fires inside an active run, so isIdle is never
-		// true here; the idle pre-prompt case is owned by before_agent_start above.)
-		if (ctx.isIdle()) return undefined;
-		const usage = ctx.getContextUsage();
-		if (!usage || usage.tokens === null) return;
-		const remaining = Math.max(0, usage.contextWindow - usage.tokens);
-		if (remaining > resolveThresholds(ctx).fallback) return;
-		const windowId = currentWindowId(ctx);
-		if (fallbackPersistedInWindow === windowId) return;
-		if (rollover !== "idle") return;
-		fallbackPersistedInWindow = windowId;
-		// The steered message reaches the model before the pending user input and no
-		// input text/images are copied or replayed.
-		pi.sendMessage({ customType: FALLBACK_TYPE, content: fallbackGuidance(), display: true }, { triggerTurn: true });
-	});
-
 	pi.registerTool(defineTool({
 		name: "get_context_remaining",
 		label: "Get context remaining",
@@ -662,19 +640,65 @@ export default function piContext(pi: ExtensionAPI) {
 	pi.on("agent_end", (_event, ctx) => {
 		if (!enabled) {
 			if (rollover === "requested") rollover = "idle";
+			fallbackPhase = "idle";
 			return;
 		}
+		// The borrowed fallback turn (if any) has just finished. Arm the allowance so the
+		// next compaction request performs the real reset instead of cancelling again.
+		if (fallbackPhase === "steered") fallbackPhase = "allow";
 		if (rollover !== "requested") return;
 		rollover = "compacting";
 		ctx.compact({ onError: () => { if (rollover === "compacting") rollover = "idle"; } });
 	});
 
+	// Request the reset after the borrowed run settles, unless another compaction has
+	// already completed. Both threshold and overflow need this path: the agent loop
+	// can end without another threshold check, and overflow has a one-shot recovery
+	// guard. Waiting for agent_settled avoids requesting this reset from agent_end
+	// while Pi is still finishing the active run.
+	pi.on("agent_settled", (_event, ctx) => {
+		if (!enabled) {
+			fallbackPhase = "idle";
+			return;
+		}
+		if (fallbackPhase === "steered") {
+			// The borrowed turn has not been observed yet. Stay armed: the next automatic
+			// request is still allowed through, and re-arming from idle here would let an
+			// undeliverable steer cancel forever.
+			return;
+		}
+		if (fallbackPhase !== "allow") return;
+		fallbackPhase = "requested";
+		ctx.compact({ onError: () => { /* the allowance stays armed so the real reset is retried */ } });
+	});
+
 	pi.on("session_before_compact", async (event, ctx) => {
-		if (!enabled) return undefined; // Default Pi compaction applies; keepRecentTokens is honored again.
+		if (!enabled) {
+			fallbackPhase = "idle";
+			return undefined; // Default Pi compaction applies; keepRecentTokens is honored again.
+		}
 		// Never let an aborted or failed custom reset fall through to Pi's default summary.
 		if (event.signal.aborted) return { cancel: true };
-		// Every compaction uses the same reset path. Never cancel to borrow a
-		// note-taking turn: Pi owns user input, queued work, and overflow recovery.
+		// Manual /compact and new_context bypass the borrowed-turn phase entirely.
+		const selfRequested = rollover === "requested" || rollover === "compacting";
+		const automatic = event.reason === "threshold" || event.reason === "overflow";
+		// Phase 1: the first automatic crossing of the reserve line borrows one final
+		// note-taking turn instead of resetting immediately. This is only safe while Pi is
+		// streaming: there `pi.sendMessage(..., triggerTurn)` routes to agent.steer() and is
+		// queued synchronously, so it reaches the model before pending user input with no
+		// text/images copied, intercepted, or replayed (no input hook is registered). While
+		// idle, the same call would instead start a nested agent run (AgentSession's
+		// sendCustomMessage -> _runAgentPrompt), and the prompt that triggered this idle
+		// pre-flight check would then fail with "Agent is already processing a prompt"
+		// (Agent.prompt rejects while activeRun exists). So idle crossings reset directly.
+		if (automatic && !selfRequested && fallbackPhase === "idle" && !ctx.isIdle()) {
+			fallbackPhase = "steered";
+			pi.sendMessage({ customType: FALLBACK_TYPE, content: fallbackGuidance(), display: true }, { triggerTurn: true });
+			return { cancel: true };
+		}
+		// Phase 2 (or manual/new_context): perform the real reset. fallbackPhase deliberately
+		// stays armed until session_compact confirms success, so a failed reset is retried
+		// without borrowing another turn.
 		try {
 			const sessionId = ctx.sessionManager.getSessionId();
 			// Pi mints the compaction entry id only after this hook returns, so the
@@ -705,8 +729,10 @@ export default function piContext(pi: ExtensionAPI) {
 	pi.on("session_compact", (event, ctx) => {
 		if (!enabled) {
 			rollover = "idle";
+			fallbackPhase = "idle";
 			return;
 		}
+		fallbackPhase = "idle"; // A completed reset re-arms the borrowed-turn phase for the next window.
 		const entry = ctx.sessionManager.getEntry(event.compactionEntry.id);
 		if (entry?.type !== "compaction" || resetV2WindowId(entry.details) === undefined) return;
 		if (handledCompactionId === entry.id) return;
@@ -726,4 +752,4 @@ export default function piContext(pi: ExtensionAPI) {
 	});
 }
 
-export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, FALLBACK_TYPE, FALLBACK_PROMPT, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, DEFAULT_FALLBACK_MARGIN_TOKENS, deriveThresholds, mergePiContextSettings, lineRange, assertVirtualPath };
+export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, FALLBACK_TYPE, FALLBACK_PROMPT, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, deriveThresholds, mergePiContextSettings, lineRange, assertVirtualPath };

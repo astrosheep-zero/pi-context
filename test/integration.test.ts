@@ -169,6 +169,24 @@ function resultJson<T>(result: AgentToolResult<unknown>): T {
 	return JSON.parse(text.text) as T;
 }
 
+/**
+ * Assert a value is a local-time ISO 8601 string with an explicit numeric offset (never "Z")
+ * and that Date.parse restores the stored epoch milliseconds. No time zone is assumed.
+ */
+function assertLocalIso(value: unknown, epochMs: number, message: string): void {
+	assert.equal(typeof value, "string", message);
+	assert.match(value as string, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/, message);
+	assert.equal(Date.parse(value as string), epochMs, `${message}: Date.parse restores the stored epoch ms`);
+}
+
+/** Assert the text contains a well-formed local ISO timestamp and return it, without pinning surrounding wording. */
+function assertIsoTimestamp(text: string, message: string): string {
+	const match = text.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}/);
+	assert.ok(match, message);
+	assert.equal(Number.isNaN(Date.parse(match[0])), false, `${message}: timestamp parses`);
+	return match[0];
+}
+
 async function runBeforeCompact(
 	captured: Captured,
 	ctx: ExtensionContext,
@@ -204,14 +222,6 @@ async function runContextHook(captured: Captured, ctx: ExtensionContext, eventOv
 	return (await handler({ type: "context", messages: [], ...eventOverride } as never, ctx)) as ContextHookResult;
 }
 
-type BeforeAgentStartResult = { message?: { customType: string; content: unknown; display: boolean } } | undefined;
-
-async function runBeforeAgentStart(captured: Captured, ctx: ExtensionContext): Promise<BeforeAgentStartResult> {
-	const handler = captured.handlers.get("before_agent_start")?.[0];
-	assert.ok(handler, "before_agent_start handler registered");
-	return (await handler({ type: "before_agent_start", prompt: "user input", images: undefined, systemPrompt: "system", systemPromptOptions: {} } as never, ctx)) as BeforeAgentStartResult;
-}
-
 function appendText(sessionManager: SessionManager, role: "user" | "assistant" | "toolResult", text: string): string {
 	const base = {
 		role,
@@ -239,6 +249,11 @@ test("schemas cover the nine History/Notes actions plus reset controls", () => {
 	}
 	assert.equal(objectSchema(captured.tools.get("history_read_item"))?.required?.includes("item_id"), true);
 	assert.equal(objectSchema(captured.tools.get("notes_write_file"))?.required?.includes("text"), true);
+	// The history ordering switch is documented as newest-first by default.
+	for (const name of ["history_list_windows", "history_list_items", "history_search_contents"]) {
+		const schema = captured.tools.get(name)?.parameters as { properties?: Record<string, { description?: string }> } | undefined;
+		assert.equal(schema?.properties?.recent_first?.description?.includes("Defaults to true."), true, `${name} documents the recent_first default`);
+	}
 });
 
 test("persisted note operations restore, are Unicode byte-limited, and use safe virtual paths", async () => {
@@ -257,14 +272,31 @@ test("persisted note operations restore, are Unicode byte-limited, and use safe 
 	restored.setSessionFile(file);
 	const restoredCtx = context(restored);
 	assert.equal(notesFromSession(restoredCtx).get("checkpoint/进度.txt")?.text, "第一行\nneedle Café\n最后一行");
-	assert.deepEqual(
-		resultJson(await call(captured, "notes_read_file", { path: "checkpoint/进度.txt", start_line: -1, stop_line: -1 }, ctx)),
-		{ path: "checkpoint/进度.txt", start_line: 3, stop_line: 3, content: "最后一行" },
+	const noteMeta = notesFromSession(ctx).get("checkpoint/进度.txt");
+	assert.ok(noteMeta);
+	const read = resultJson<{ path: string; start_line: number; stop_line: number; content: string; created_at: unknown; updated_at: unknown }>(
+		await call(captured, "notes_read_file", { path: "checkpoint/进度.txt", start_line: -1, stop_line: -1 }, ctx),
 	);
-	const searched = resultJson<{ files: Array<{ matches: Array<{ line: number }> }> }>(
+	assert.equal(read.path, "checkpoint/进度.txt");
+	assert.equal(read.start_line, 3);
+	assert.equal(read.stop_line, 3);
+	assert.equal(read.content, "最后一行");
+	assertLocalIso(read.created_at, noteMeta.createdAt, "notes_read_file created_at");
+	assertLocalIso(read.updated_at, noteMeta.updatedAt, "notes_read_file updated_at");
+	const searched = resultJson<{ files: Array<{ path: string; matches: Array<{ line: number }>; created_at: unknown; updated_at: unknown }> }>(
 		await call(captured, "notes_search_contents", { query: "Café" }, ctx),
 	);
 	assert.equal(searched.files[0]?.matches[0]?.line, 2);
+	// Every notes tool reports the persisted note metadata with the same local-time formatting.
+	assertLocalIso(searched.files[0]?.created_at, noteMeta.createdAt, "notes_search_contents created_at");
+	assertLocalIso(searched.files[0]?.updated_at, noteMeta.updatedAt, "notes_search_contents updated_at");
+	const listedFiles = resultJson<{ files: Array<{ path: string; created_at: unknown; updated_at: unknown }> }>(
+		await call(captured, "notes_list_files_by_prefix", { prefix: "checkpoint" }, ctx),
+	);
+	assertLocalIso(listedFiles.files[0]?.created_at, noteMeta.createdAt, "notes_list_files_by_prefix created_at");
+	assertLocalIso(listedFiles.files[0]?.updated_at, noteMeta.updatedAt, "notes_list_files_by_prefix updated_at");
+	assert.equal(searched.files[0]?.created_at, listedFiles.files[0]?.created_at, "note tools agree on the timestamp format");
+	assert.equal(searched.files[0]?.updated_at, listedFiles.files[0]?.updated_at);
 	await assert.rejects(() => call(captured, "notes_write_file", { path: "../escape", text: "x" }, ctx), /unsupported component/);
 	const tooLarge = resultJson<{ error: string }>(
 		await call(captured, "notes_write_file", { path: "large", text: "é".repeat(500_001) }, ctx),
@@ -296,7 +328,7 @@ test("custom reset boundary removes old provider context but history remains sea
 	);
 	const providerText = JSON.stringify(sessionManager.buildSessionContext().messages);
 	assert.equal(providerText.includes("OLD-UNIQUE-TRANSCRIPT"), false);
-	assert.equal(providerText.includes(internal.RESET_SUMMARY), true);
+	assert.equal(providerText.includes(internal.CONTEXT_WINDOW_OPEN_TAG), true);
 
 	const windows = historyFromSession(ctx);
 	assert.equal(windows.length, 2);
@@ -312,6 +344,36 @@ test("custom reset boundary removes old provider context but history remains sea
 	assert.equal(found.items.length, 1);
 	assert.equal(found.items[0]?.item_id, oldUserId);
 	assert.ok(sessionManager.getEntry(compactionId));
+});
+
+test("the boot notes preview keeps short notes whole and long notes head-to-tail", async () => {
+	const sessionManager = manager();
+	const captured = makeExtension(sessionManager);
+	const ctx = context(sessionManager);
+	// Unique Unicode code points so an overlap introduced by a naive head+tail concat is detectable.
+	const longText = Array.from({ length: 230 }, (_, index) => String.fromCharCode(0x4e00 + index)).join("");
+	const shortText = "short-first\nshort-second";
+	await call(captured, "notes_write_file", { path: "long.md", text: longText }, ctx);
+	await call(captured, "notes_write_file", { path: "short.md", text: shortText }, ctx);
+	runHandlers(captured, "session_start", { reason: "startup" }, ctx);
+	const boot = captured.sent[0];
+	const text = typeof boot?.message.content === "string" ? boot.message.content : "";
+	assert.ok(text.includes("long.md") && text.includes("short.md"), "both notes are indexed");
+
+	// Short note: complete, with its newline preserved and each line indented 2 spaces.
+	assert.ok(text.includes("  short-first\n  short-second"), "short note text is shown whole and indented");
+
+	// Long note preview: exactly first 120 + separator + last 80 Unicode characters.
+	const chars = Array.from(longText);
+	const head = chars.slice(0, 120).join("");
+	const tail = chars.slice(chars.length - 80).join("");
+	const previewLine = text.split("\n").find((line) => line.startsWith("  ") && line.includes("…"));
+	assert.ok(previewLine, "long note carries an ellipsis preview line");
+	const preview = Array.from(previewLine.slice(2));
+	assert.ok(previewLine.includes(head), "long preview keeps the head");
+	assert.ok(previewLine.includes(tail), "long preview keeps the tail");
+	assert.equal(preview.length, 201, "head 120 + one separator + tail 80, nothing duplicated");
+	assert.equal(previewLine.includes(longText), false, "long note is truncated, not shown whole");
 });
 
 test("the boot block is persisted at the root and baked into every reset summary", async () => {
@@ -333,7 +395,11 @@ test("the boot block is persisted at the root and baked into every reset summary
 	assert.ok(rootText.startsWith(internal.CONTEXT_WINDOW_OPEN_TAG), "root block omits the reset line");
 	assert.equal(rootText.includes("Previous context window id:"), false, "root block omits the previous-id line");
 	assert.match(rootText, /Current context window id: pcw:.+:root/);
-	assert.match(rootText, /- decisions\.md \(1 lines, 9 UTF-8 bytes\)/);
+	assert.ok(rootText.includes("decisions.md"));
+	const decisionsMeta = notesFromSession(ctx).get("decisions.md");
+	assert.ok(decisionsMeta);
+	const bootUpdated = assertIsoTimestamp(rootText, "note metadata carries an updated timestamp");
+	assert.equal(Date.parse(bootUpdated), decisionsMeta.updatedAt, "boot note timestamp restores the persisted updatedAt");
 	assert.ok(rootText.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG));
 
 	// Reset: the boot block IS the compaction summary; no separate boot/hint is persisted.
@@ -344,9 +410,11 @@ test("the boot block is persisted at the root and baked into every reset summary
 	const details = before.compaction.details as { piContext: string; windowId: string };
 	assert.equal(details.piContext, "reset-v2");
 	assert.match(details.windowId, /^pcw:.+:[0-9a-f]{8}$/);
-	assert.ok(before.compaction.summary.startsWith(internal.RESET_SUMMARY));
+	assert.equal(before.compaction.summary.startsWith(internal.CONTEXT_WINDOW_OPEN_TAG), false, "a reset line precedes the identity block");
 	assert.match(before.compaction.summary, new RegExp(`Current context window id: ${details.windowId}`));
-	assert.match(before.compaction.summary, /- decisions\.md \(1 lines, 9 UTF-8 bytes\)/);
+	assert.ok(before.compaction.summary.includes("decisions.md"));
+	const resetUpdated = assertIsoTimestamp(before.compaction.summary, "reset summary keeps the note updated timestamp");
+	assert.equal(Date.parse(resetUpdated), decisionsMeta.updatedAt, "reset summary keeps the persisted updatedAt");
 	assert.ok(before.compaction.summary.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG));
 	const windows = historyFromSession(ctx);
 	assert.ok(before.compaction.summary.includes(`Previous context window id: ${windows[windows.length - 1]?.windowId}`));
@@ -377,9 +445,14 @@ test("reset window ids are extension-minted and drive history_* lookups", async 
 	assert.ok(compactionEntry && compactionEntry.type === "compaction");
 
 	// history_list_windows reports exactly the minted id carried in details.
+	// The default is newest-first, so the current window is listed first.
 	const windows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_list_windows", {}, ctx));
 	assert.equal(windows.windows.length, 2);
-	assert.equal(windows.windows[1]?.window_id, details.windowId);
+	assert.equal(windows.windows[0]?.window_id, details.windowId, "recent_first defaults to newest-first");
+	// Only an explicit false restores oldest-first window order.
+	const oldestWindows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_list_windows", { recent_first: false }, ctx));
+	assert.equal(oldestWindows.windows[0]?.window_id, `pcw:${sessionManager.getSessionId()}:root`, "explicit false keeps the oldest window first");
+	assert.equal(oldestWindows.windows[1]?.window_id, details.windowId);
 	// The minted id is Pi's 8-hex entry-id shape, but the window id is ours.
 	assert.match(details.windowId, /^pcw:.+:[0-9a-f]{8}$/);
 
@@ -387,6 +460,26 @@ test("reset window ids are extension-minted and drive history_* lookups", async 
 	const listed = resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_list_items", { window_id: details.windowId }, ctx));
 	assert.equal(listed.items.length, 1);
 	assert.equal(listed.items[0]?.item_id, compactionEntry.id);
+});
+
+test("recent_first defaults to newest-first for items and search; only false is oldest-first", async () => {
+	const sessionManager = manager();
+	const captured = makeExtension(sessionManager);
+	const ctx = context(sessionManager);
+	const firstId = appendText(sessionManager, "user", "needle alpha");
+	const secondId = appendText(sessionManager, "assistant", "needle beta");
+	const thirdId = appendText(sessionManager, "user", "needle gamma");
+
+	const listOrder = async (params: Record<string, unknown>) =>
+		resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_list_items", params, ctx)).items.map((item) => item.item_id);
+	assert.deepEqual(await listOrder({}), [thirdId, secondId, firstId], "omitted recent_first lists the newest item first");
+	assert.deepEqual(await listOrder({ recent_first: true }), [thirdId, secondId, firstId], "recent_first true lists the newest item first");
+	assert.deepEqual(await listOrder({ recent_first: false }), [firstId, secondId, thirdId], "explicit false lists the oldest item first");
+
+	const searchOrder = async (params: Record<string, unknown>) =>
+		resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_search_contents", { query: "needle", ...params }, ctx)).items.map((item) => item.item_id);
+	assert.deepEqual(await searchOrder({}), [thirdId, secondId, firstId], "search shares the newest-first default");
+	assert.deepEqual(await searchOrder({ recent_first: false }), [firstId, secondId, thirdId], "search honours an explicit false");
 });
 
 test("a Pi-native compaction with the extension off keeps entry.id as the window id", async () => {
@@ -398,7 +491,7 @@ test("a Pi-native compaction with the extension off keeps entry.id as the window
 
 	const compactionId = sessionManager.appendCompaction("Pi native summary", sessionManager.getLeafId() as string, 100, { readFiles: [], modifiedFiles: [] }, true);
 	const windows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_list_windows", {}, ctx));
-	assert.equal(windows.windows[1]?.window_id, `pcw:${sessionManager.getSessionId()}:${compactionId}`, "native compactions fall back to entry.id");
+	assert.equal(windows.windows[0]?.window_id, `pcw:${sessionManager.getSessionId()}:${compactionId}`, "native compactions fall back to entry.id");
 });
 
 test("low-budget guidance persists once per window with no transient copy", async () => {
@@ -533,19 +626,37 @@ test("pi-context command toggles the boot block, guidance, and reset compaction 
 	assert.match(notices[0]?.message ?? "", /on/);
 });
 
-test("all compaction paths reset immediately, bake the boot block, and leave native scheduling alone", async () => {
+test("compaction paths reset directly or borrow one run, then bake the boot block without extra continuations", async () => {
 	for (const reason of ["manual", "threshold", "overflow"] as const) {
 		for (const idle of [false, true]) {
 			const sm = manager();
 			appendText(sm, "user", "long task history");
 			const captured = makeExtension(sm);
-			const ctx = context(sm, undefined, undefined, idle);
+			let compactions = 0;
+			const ctx = context(sm, () => { compactions++; }, undefined, idle);
 			assert.equal(captured.handlers.has("input"), false, "no user-input interception");
 			for (let window = 0; window < 2; window++) {
-				const before = await runBeforeCompact(captured, ctx, 100, reason);
-				assert.ok(before && "compaction" in before, `${reason}, idle=${idle}: no fallback cancellation`);
-				assert.equal(captured.sent.length, 0, "no extra note-taking turn and no hint");
-				assert.match(before.compaction.summary, /No summary was generated/);
+				let before: CompactionHookResult;
+				if (reason === "manual" || idle) {
+					// Manual resets directly, and an idle automatic crossing resets directly too:
+					// borrowing a turn while idle would start a nested run and break the prompt.
+					before = await runBeforeCompact(captured, ctx, 100, reason);
+					assert.ok(before && "compaction" in before, `${reason}, idle=${idle}: resets directly`);
+					assert.equal(captured.sent.length, 0, `${reason}, idle=${idle}: no borrowed turn`);
+				} else {
+					// Phase 1: the streaming automatic crossing borrows exactly one fallback turn.
+					before = await runBeforeCompact(captured, ctx, 100, reason);
+					assert.deepEqual(before, { cancel: true }, `${reason}, idle=${idle}: first automatic crossing is borrowed`);
+					assert.equal(captured.sent.filter((m) => m.message.customType === internal.FALLBACK_TYPE).length, window + 1, "one fallback steer per window");
+					runHandlers(captured, "agent_end", {}, ctx);
+					// Neither reason guarantees another automatic entry once the run ends.
+					runHandlers(captured, "agent_settled", {}, ctx);
+					assert.equal(compactions, window + 1, `${reason}: ctx.compact() requests the reset`);
+					runHandlers(captured, "agent_settled", {}, ctx);
+					assert.equal(compactions, window + 1, `${reason}: settling twice does not duplicate the reset`);
+					before = await runBeforeCompact(captured, ctx, 100, "manual");
+					assert.ok(before && "compaction" in before, `${reason}, idle=${idle}: the real reset follows the borrowed turn`);
+				}
 				const details = before.compaction.details as { piContext: string; windowId: string };
 				assert.equal(details.piContext, "reset-v2");
 				assert.match(before.compaction.summary, new RegExp(`Current context window id: ${details.windowId}`));
@@ -555,38 +666,133 @@ test("all compaction paths reset immediately, bake the boot block, and leave nat
 				const event = { reason, willRetry: reason === "overflow", compactionEntry };
 				runHandlers(captured, "session_compact", event, ctx);
 				runHandlers(captured, "session_compact", event, ctx);
-				assert.equal(captured.sent.length, 0, "no hint and no continuation; Pi owns automatic scheduling");
+				// Only borrowed-turn steers are ever sent: no continuation and no hint.
+				assert.equal(captured.sent.filter((m) => m.message.customType !== internal.FALLBACK_TYPE).length, 0, `${reason}, idle=${idle}: no continuation and no hint`);
 			}
 		}
 	}
 });
 
-test("thresholds derive from compaction.reserveTokens plus pi-context margins", async () => {
+test("threshold fallback borrows exactly one turn, then resets once and re-arms per window", async () => {
+	const sm = manager();
+	appendText(sm, "user", "long task history");
+	const captured = makeExtension(sm);
+	let compactions = 0;
+	// The fallback turn runs while Pi is streaming; the hook is entered mid-run.
+	const ctx = context(sm, () => { compactions++; }, undefined, false);
+	assert.equal(captured.handlers.has("input"), false, "no user-input interception or replay");
+
+	// Phase 1: the first automatic threshold crossing is cancelled and a steer is queued.
+	const first = await runBeforeCompact(captured, ctx, 100, "threshold");
+	assert.deepEqual(first, { cancel: true }, "first automatic entry cancels instead of resetting");
+	assert.equal(captured.sent.length, 1, "exactly one fallback steer queued");
+	assert.equal(captured.sent[0]?.message.customType, internal.FALLBACK_TYPE);
+	assert.equal(captured.sent[0]?.options?.triggerTurn, true, "the fallback turn is triggered by Pi, not by input replay");
+	assert.equal(captured.sent[0]?.message.display, true);
+	assert.equal(compactions, 0, "no compaction requested while borrowing the turn");
+
+	// The borrowed turn ends; agent_end only arms the allowance.
+	runHandlers(captured, "agent_end", {}, ctx);
+	assert.equal(compactions, 0, "agent_end does not itself compact");
+
+	// Phase 2: the next automatic entry performs the real reset with no second steer.
+	const second = await runBeforeCompact(captured, ctx, 100, "threshold");
+	assert.ok(second && "compaction" in second, "the second entry resets for real");
+	assert.equal(captured.sent.length, 1, "no second fallback turn");
+	const details = second.compaction.details as { piContext: string; windowId: string };
+	assert.equal(details.piContext, "reset-v2");
+	const id = sm.appendCompaction(second.compaction.summary, second.compaction.firstKeptEntryId, 100, details, true);
+	runHandlers(captured, "session_compact", { reason: "threshold", willRetry: false, compactionEntry: sm.getEntry(id) }, ctx);
+	// If another compaction already completed, settling must not request a second one.
+	runHandlers(captured, "agent_settled", {}, ctx);
+	assert.equal(compactions, 0, "no extra ctx.compact() once another compaction reset successfully");
+
+	// A completed reset re-arms the borrowed-turn phase for the next window, not before.
+	const third = await runBeforeCompact(captured, ctx, 100, "threshold");
+	assert.deepEqual(third, { cancel: true }, "the next window borrows one turn again");
+	assert.equal(captured.sent.length, 2, "one fallback per window, never an unbounded loop");
+});
+
+test("overflow re-triggers the reset through ctx.compact() once, and manual/new_context never cancel", async () => {
+	const sm = manager();
+	appendText(sm, "user", "long task history");
+	const captured = makeExtension(sm);
+	let compactions = 0;
+	const ctx = context(sm, () => { compactions++; }, undefined, false);
+
+	// Overflow phase 1: cancel + steer.
+	const first = await runBeforeCompact(captured, ctx, 100, "overflow");
+	assert.deepEqual(first, { cancel: true }, "overflow also borrows a turn first");
+	assert.equal(captured.sent.length, 1);
+	assert.equal(captured.sent[0]?.message.customType, internal.FALLBACK_TYPE);
+	runHandlers(captured, "agent_end", {}, ctx);
+	assert.equal(compactions, 0, "agent_end alone does not re-trigger");
+
+	// Pi's overflow guard blocks an automatic re-entry, so settling asks exactly once.
+	runHandlers(captured, "agent_settled", {}, ctx);
+	assert.equal(compactions, 1, "ctx.compact() re-triggers the reset after the fallback turn settles");
+	runHandlers(captured, "agent_settled", {}, ctx);
+	assert.equal(compactions, 1, "settling again does not double-request the reset");
+
+	// The extension-requested compaction is allowed through without another steer.
+	const second = await runBeforeCompact(captured, ctx, 100, "manual");
+	assert.ok(second && "compaction" in second, "the requested reset performs the real compaction");
+	assert.equal(captured.sent.length, 1, "no extra fallback steer");
+	const details = second.compaction.details as { piContext: string; windowId: string };
+	const id = sm.appendCompaction(second.compaction.summary, second.compaction.firstKeptEntryId, 100, details, true);
+	runHandlers(captured, "session_compact", { reason: "manual", willRetry: false, compactionEntry: sm.getEntry(id) }, ctx);
+
+	// User /compact resets directly.
+	const manual = await runBeforeCompact(captured, ctx, 100, "manual");
+	assert.ok(manual && "compaction" in manual, "manual compaction is never intercepted");
+	assert.equal(captured.sent.length, 1, "manual compaction sends nothing");
+
+	// new_context keeps its own requested -> agent_end -> ctx.compact() path.
+	await call(captured, "new_context", {}, ctx);
+	runHandlers(captured, "agent_end", {}, ctx);
+	assert.equal(compactions, 2, "new_context still compacts through ctx.compact()");
+	const explicit = await runBeforeCompact(captured, ctx, 100, "manual");
+	assert.ok(explicit && "compaction" in explicit, "new_context reset is allowed");
+	assert.equal(captured.sent.length, 1, "new_context never cancels or emits a fallback steer");
+});
+
+test("an idle pre-prompt automatic crossing resets directly instead of starting a nested run", async () => {
+	// Pi's AgentSession.prompt() runs _checkCompaction() while idle, before submitting the
+	// user's prompt. Borrowing a turn there would call sendCustomMessage -> _runAgentPrompt,
+	// whose activeRun makes the pending Agent.prompt() reject with "Agent is already
+	// processing a prompt". The extension must therefore never cancel an idle crossing.
+	const sm = manager();
+	appendText(sm, "user", "long task history");
+	const captured = makeExtension(sm);
+	const idle = context(sm, undefined, undefined, true);
+	for (const reason of ["threshold", "overflow"] as const) {
+		const result = await runBeforeCompact(captured, idle, 100, reason);
+		assert.ok(result && "compaction" in result, `${reason}: idle crossing resets directly`);
+	}
+	assert.equal(captured.sent.length, 0, "no steer is queued while idle, so no nested run races the prompt");
+});
+
+test("the reminder threshold derives from compaction.reserveTokens plus the pi-context reminder margin", async () => {
 	const fixture = settingsFixture({
 		reserveTokens: 100_000,
-		global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 30_000, fallbackMarginTokens: 10_000 } },
+		global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 30_000 } },
 	});
 	const sm = manager();
 	const captured = makeExtension(sm);
 	const window = 300_000;
 	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
 
-	// fallback = 100000 + 10000, reminder = 100000 + 30000.
+	// reminder = 100000 + 30000. The borrowed automatic fallback has no token threshold of its own.
 	assert.equal(await runContextHook(captured, at(130_001)), undefined, "nothing injected above the derived reminder");
 	assert.equal(captured.sent.length, 0, "no guidance above the derived reminder");
 	assert.equal(await runContextHook(captured, at(130_000)), undefined, "derived reminder crossing persists only");
 	assert.equal(captured.sent.length, 1, "derived reminder fires");
 	assert.match(String(captured.sent[0]?.message.content), /only 130000 tokens remained when this reminder was recorded/);
-
-	assert.equal(await runBeforeAgentStart(captured, at(110_001)), undefined, "above the derived fallback");
-	const fallback = await runBeforeAgentStart(captured, at(110_000));
-	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, "derived fallback fires");
 });
 
-test("absent pi-context key or margins reproduce the default thresholds at Pi's default reserve", async () => {
+test("absent pi-context key or margins reproduce the default reminder threshold at Pi's default reserve", async () => {
 	assert.equal(internal.DEFAULT_RESERVE_TOKENS, 16_384);
 	assert.equal(internal.DEFAULT_RESERVE_TOKENS + internal.DEFAULT_REMINDER_MARGIN_TOKENS, 40_960);
-	assert.equal(internal.DEFAULT_RESERVE_TOKENS + internal.DEFAULT_FALLBACK_MARGIN_TOKENS, 24_576);
 
 	for (const [label, options] of [
 		["absent key", { global: {} }],
@@ -603,20 +809,17 @@ test("absent pi-context key or margins reproduce the default thresholds at Pi's 
 		assert.equal(await runContextHook(captured, at(40_960)), undefined, `${label}: default reminder crossing persists only`);
 		assert.equal(captured.sent.length, 1, `${label}: default reminder fires`);
 		assert.match(String(captured.sent[0]?.message.content), /only 40960 tokens remained/, label);
-		assert.equal(await runBeforeAgentStart(captured, at(24_577)), undefined, `${label}: above the default fallback`);
-		const fallback = await runBeforeAgentStart(captured, at(24_576));
-		assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, `${label}: default fallback fires`);
 		assert.equal(noticesOf(first).length, 0, `${label}: valid defaults warn nobody`);
 	}
 });
 
-test("project pi-context margins and reserve override global per key", async () => {
+test("project pi-context reminder margin and reserve override global per key", async () => {
 	const fixture = settingsFixture({
 		reserveTokens: 20_000,
-		global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 30_000, fallbackMarginTokens: 10_000 } },
+		global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 30_000 } },
 		project: { compaction: { reserveTokens: 50_000 }, [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 40_000 } },
 	});
-	// Project reserve wins: reminder = 50000 + 40000 (project margin), fallback = 50000 + 10000 (global margin).
+	// Project reserve wins: reminder = 50000 + 40000 (project margin).
 	const sm = manager();
 	const captured = makeExtension(sm);
 	const window = 300_000;
@@ -625,9 +828,6 @@ test("project pi-context margins and reserve override global per key", async () 
 	assert.equal(captured.sent.length, 0);
 	assert.equal(await runContextHook(captured, at(90_000)), undefined, "project-derived reminder crossing persists only");
 	assert.equal(captured.sent.length, 1, "project reminder margin wins");
-	assert.equal(await runBeforeAgentStart(captured, at(60_001)), undefined, "above the project-derived fallback");
-	const fallback = await runBeforeAgentStart(captured, at(60_000));
-	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, "global fallback margin survives the project override");
 });
 
 test("an untrusted project is ignored, so global pi-context margins apply", async () => {
@@ -646,24 +846,27 @@ test("an untrusted project is ignored, so global pi-context margins apply", asyn
 	assert.equal(captured.sent.length, 1);
 });
 
-test("thresholds are re-read from settings.json on session_start", async () => {
-	const fixture = settingsFixture({ global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { fallbackMarginTokens: 10_000 } } });
+test("the reminder margin is re-read from settings.json on session_start", async () => {
+	const fixture = settingsFixture({ global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 10_000 } } });
 	const sm = manager();
 	const captured = makeExtension(sm);
-	const at = (remaining: number) => context(sm, undefined, { tokens: 100_000 - remaining, percent: 0, contextWindow: 100_000 }, true, fixture.cwd);
+	const window = 100_000;
+	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
+	const guidance = () => captured.sent.filter((sent) => sent.message.customType === internal.GUIDANCE_TYPE);
+	// Initial reminder = 16384 + 10000 = 26384; 35000 is above it, so nothing is persisted.
 	runHandlers(captured, "session_start", { reason: "startup" }, at(0));
-	// Initial fallback = 16384 + 10000 = 26384; 35000 is above it.
-	assert.equal(await runBeforeAgentStart(captured, at(35_000)), undefined, "initial fallback margin");
+	assert.equal(await runContextHook(captured, at(35_000)), undefined);
+	assert.equal(guidance().length, 0, "no guidance above the initial reminder");
 	// Rewrite the global settings file, then session_start must pick up the new margin.
-	writeJson(join(fixture.agentDir, "settings.json"), { [internal.PI_CONTEXT_SETTINGS_KEY]: { fallbackMarginTokens: 20_000 } });
+	writeJson(join(fixture.agentDir, "settings.json"), { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 40_000 } });
 	runHandlers(captured, "session_start", { reason: "startup" }, at(0));
-	// New fallback = 16384 + 20000 = 36384; 35000 is now below it.
-	const fallback = await runBeforeAgentStart(captured, at(35_000));
-	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, "fallback margin re-read on session_start");
+	// New reminder = 16384 + 40000 = 56384; 35000 is now below it.
+	assert.equal(await runContextHook(captured, at(35_000)), undefined, "the crossing persists only");
+	assert.equal(guidance().length, 1, "reminder margin re-read on session_start");
 });
 
-test("invalid margins degrade per key with one warning and never throw", async () => {
-	const fixture = settingsFixture({ global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 0, fallbackMarginTokens: 10_000 } } });
+test("an invalid reminder margin degrades to its default with one warning and never throws", async () => {
+	const fixture = settingsFixture({ global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 0 } } });
 	const sm = manager();
 	const captured = makeExtension(sm);
 	const ctx = context(sm, undefined, undefined, true, fixture.cwd);
@@ -675,60 +878,12 @@ test("invalid margins degrade per key with one warning and never throw", async (
 	assert.match(notices[0]?.message ?? "", /24576/);
 
 	const window = 200_000;
-	const at = (remaining: number, idle = true) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, idle, fixture.cwd);
-	// Valid fallback margin is preserved: fallback = 16384 + 10000 = 26384; reminder = 16384 + 24576 = 40960.
+	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
+	// The degraded reminder is Pi's default reserve + default margin = 40960.
 	assert.equal(await runContextHook(captured, at(40_961)), undefined, "nothing injected above the degraded reminder");
 	assert.equal(await runContextHook(captured, at(40_960)), undefined, "degraded reminder uses its default");
 	assert.equal(captured.sent.length, 2, "root boot plus degraded reminder");
-	assert.equal(await runBeforeAgentStart(captured, at(26_385)), undefined);
-	const fallback = await runBeforeAgentStart(captured, at(26_384));
-	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, "valid fallback margin survives");
-	assert.doesNotThrow(() => runHandlers(captured, "turn_end", {}, at(0, false)));
-	assert.equal(notices.length, 1, "warning stays one-time across session handlers");
-});
-
-test("a reminder margin that does not clear the fallback degrades to its default with one warning", async () => {
-	const fixture = settingsFixture({ global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 1_000, fallbackMarginTokens: 2_000 } } });
-	const sm = manager();
-	const captured = makeExtension(sm);
-	const ctx = context(sm, undefined, undefined, true, fixture.cwd);
-	assert.doesNotThrow(() => runHandlers(captured, "session_start", { reason: "startup" }, ctx));
-	const notices = noticesOf(ctx);
-	assert.equal(notices.length, 1, "one warning for the reversed ordering");
-	assert.match(notices[0]?.message ?? "", /reminderMarginTokens/);
-	assert.match(notices[0]?.message ?? "", /24576/);
-
-	const at = (remaining: number, idle = true) => context(sm, undefined, { tokens: 200_000 - remaining, percent: 0, contextWindow: 200_000 }, idle, fixture.cwd);
-	// reminder = 40960, valid fallback = 16384 + 2000 = 18384.
-	assert.equal(await runContextHook(captured, at(40_961)), undefined, "nothing injected above the degraded reminder");
-	assert.equal(await runContextHook(captured, at(40_960)), undefined, "degraded reminder fires at default margin");
-	assert.equal(captured.sent.length, 2);
-	assert.equal(await runBeforeAgentStart(captured, at(18_385)), undefined);
-	const fallback = await runBeforeAgentStart(captured, at(18_384));
-	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE);
-	assert.doesNotThrow(() => runHandlers(captured, "turn_end", {}, at(0, false)));
-	assert.equal(notices.length, 1, "warning stays one-time");
-});
-
-test("an invalid fallback margin degrades alone without disturbing a valid reminder margin", async () => {
-	const fixture = settingsFixture({ global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 30_000, fallbackMarginTokens: "nope" } } });
-	const sm = manager();
-	const captured = makeExtension(sm);
-	const ctx = context(sm, undefined, undefined, true, fixture.cwd);
-	runHandlers(captured, "session_start", { reason: "startup" }, ctx);
-	const notices = noticesOf(ctx);
-	assert.equal(notices.length, 1, "one warning for the offending fallback key");
-	assert.match(notices[0]?.message ?? "", /fallbackMarginTokens/);
-	assert.match(notices[0]?.message ?? "", /8192/);
-
-	const at = (remaining: number) => context(sm, undefined, { tokens: 200_000 - remaining, percent: 0, contextWindow: 200_000 }, true, fixture.cwd);
-	// reminder = 16384 + 30000 = 46384; degraded fallback = 16384 + 8192 = 24576.
-	assert.equal(await runContextHook(captured, at(46_385)), undefined, "nothing injected above the valid reminder");
-	assert.equal(await runContextHook(captured, at(46_384)), undefined, "valid reminder margin still fires");
-	assert.equal(captured.sent.length, 2, "root boot plus valid reminder");
-	const fallback = await runBeforeAgentStart(captured, at(24_576));
-	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, "degraded fallback uses its default");
-	assert.equal(notices.length, 1);
+	assert.equal(notices.length, 1, "warning stays one-time across handler calls");
 });
 
 test("the old threshold flags are no longer registered", () => {
@@ -736,77 +891,31 @@ test("the old threshold flags are no longer registered", () => {
 	assert.deepEqual(captured.flags, []);
 });
 
-test("a fallback margin that still overwhelms the default reminder degrades too, keeping the invariant", async () => {
-	const fixture = settingsFixture({ global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 1_000, fallbackMarginTokens: 60_000 } } });
+test("the removed pre-prompt/turn_end fallback no longer exists; only session_before_compact borrows a turn", async () => {
 	const sm = manager();
 	const captured = makeExtension(sm);
-	const ctx = context(sm, undefined, undefined, true, fixture.cwd);
-	runHandlers(captured, "session_start", { reason: "startup" }, ctx);
-	const notices = noticesOf(ctx);
-	assert.equal(notices.length, 2, "each offending key warns once");
-	assert.match(notices[0]?.message ?? "", /reminderMarginTokens/);
-	assert.match(notices[1]?.message ?? "", /fallbackMarginTokens/);
-
-	const at = (remaining: number) => context(sm, undefined, { tokens: 200_000 - remaining, percent: 0, contextWindow: 200_000 }, true, fixture.cwd);
-	// Both margins degrade to defaults, so reminder 40960 > fallback 24576 > reserve 16384 still holds.
-	assert.equal(await runBeforeAgentStart(captured, at(24_577)), undefined);
-	const fallback = await runBeforeAgentStart(captured, at(24_576));
-	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE);
-});
-
-
-test("final fallback turn uses public turn boundaries without intercepting or replaying user input", async () => {
-	const sm = manager();
-	const captured = makeExtension(sm);
-	const window = 200_000;
-	const ctxAt = (remaining: number, idle = false) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, idle);
-
+	// The old graceful-fallback path registered both hooks and fired on a token threshold of its
+	// own. It is gone: no fallback can be sent outside Pi's automatic compaction request.
+	assert.equal(captured.handlers.has("before_agent_start"), false, "before_agent_start fallback removed");
+	assert.equal(captured.handlers.has("turn_end"), false, "turn_end fallback removed");
 	assert.equal(captured.handlers.has("input"), false, "no input copy/replay special case");
-	assert.equal(await runBeforeAgentStart(captured, ctxAt(24_577)), undefined);
-	const fallback = await runBeforeAgentStart(captured, ctxAt(24_576));
-	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE);
-	assert.equal(fallback?.message?.display, true);
-	assert.equal(fallback?.message?.content, internal.FALLBACK_PROMPT);
-	assert.equal(await runBeforeAgentStart(captured, ctxAt(24_576)), undefined, "one fallback per window");
+	assert.equal(captured.handlers.has("session_before_compact"), true, "session_before_compact is the sole entry point");
 
-	// Fresh window re-arms the fallback.
-	const before = await runBeforeCompact(captured, ctxAt(30_000), 100, "threshold");
-	assert.ok(before && "compaction" in before, "the reserve-line compaction proceeds directly");
-	const compactionId = sm.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 100, before.compaction.details, true);
-	const compactionEntry = sm.getEntry(compactionId);
-	assert.ok(compactionEntry && compactionEntry.type === "compaction");
-	runHandlers(captured, "session_compact", { reason: "threshold", willRetry: false, compactionEntry }, ctxAt(30_000));
-	assert.equal(captured.sent.length, 0, "automatic reset persists nothing; the boot block is in the summary");
-	const nextFallback = await runBeforeAgentStart(captured, ctxAt(24_576));
-	assert.equal(nextFallback?.message?.customType, internal.FALLBACK_TYPE, "fallback re-armed after reset");
+	// Even deep inside the old fallback band, nothing is sent until compaction is requested.
+	const window = 200_000;
+	const ctx = context(sm, undefined, { tokens: window - 24_576, percent: 0, contextWindow: window }, false);
+	assert.equal(captured.sent.length, 0, "no fallback is sent before a compaction request");
+	const before = await runBeforeCompact(captured, ctx, 100, "threshold");
+	assert.deepEqual(before, { cancel: true }, "the automatic crossing borrows exactly one turn");
+	assert.equal(captured.sent.length, 1);
+	assert.equal(captured.sent[0]?.message.customType, internal.FALLBACK_TYPE);
+	assert.equal(captured.sent[0]?.options?.triggerTurn, true);
 
-	// A running tool chain gets the same final-call message at the ordinary turn boundary.
-	const streaming = makeExtension(sm);
-	const streamingCtx = ctxAt(24_576, false);
-	runHandlers(streaming, "turn_end", {}, streamingCtx);
-	assert.equal(streaming.sent.length, 1);
-	assert.equal(streaming.sent[0]?.message.customType, internal.FALLBACK_TYPE);
-	assert.equal(streaming.sent[0]?.options?.triggerTurn, true);
-	assert.match(String(streaming.sent[0]?.message.content), /final fallback turn/);
-	runHandlers(streaming, "turn_end", {}, streamingCtx);
-	assert.equal(streaming.sent.length, 1, "turn_end fallback is one-shot per window");
-
-	// Idle turns stay with the before_agent_start path; only streaming gets a new run.
-	const idleOnly = makeExtension(manager());
-	runHandlers(idleOnly, "turn_end", {}, ctxAt(24_576, true));
-	assert.equal(idleOnly.sent.length, 0, "turn_end fallback does not fire while idle");
-
-	// A fresh window re-arms the turn_end fallback.
-	const streamingReset = await runBeforeCompact(streaming, streamingCtx, 100, "threshold");
-	assert.ok(streamingReset && "compaction" in streamingReset);
-	const streamingCompactionId = sm.appendCompaction(streamingReset.compaction.summary, streamingReset.compaction.firstKeptEntryId, 100, streamingReset.compaction.details, true);
-	const streamingCompactionEntry = sm.getEntry(streamingCompactionId);
-	assert.ok(streamingCompactionEntry && streamingCompactionEntry.type === "compaction");
-	runHandlers(streaming, "session_compact", { reason: "threshold", willRetry: false, compactionEntry: streamingCompactionEntry }, streamingCtx);
-	assert.equal(streaming.sent.length, 1, "the reset persists nothing");
-	runHandlers(streaming, "turn_end", {}, streamingCtx);
-	assert.equal(streaming.sent.length, 2, "fresh window re-arms the streaming fallback once");
-	assert.equal(streaming.sent[1]?.message.customType, internal.FALLBACK_TYPE);
+	// The borrowed turn ends, and the next request performs the real reset without a second steer.
+	runHandlers(captured, "agent_end", {}, ctx);
+	const second = await runBeforeCompact(captured, ctx, 100, "threshold");
+	assert.ok(second && "compaction" in second, "the second entry resets for real");
+	assert.equal(captured.sent.length, 1, "one cancel, one steer, one real compaction");
 });
 
 test("new_context can reset successive windows without duplicate compactions or continuations", async () => {
