@@ -14,13 +14,15 @@ const CONTEXT_WINDOW_OPEN_TAG = "<context_window>";
 const CONTEXT_WINDOW_CLOSE_TAG = "</context_window>";
 const GUIDANCE_OPEN_TAG = "<context_window_guidance>";
 const GUIDANCE_CLOSE_TAG = "</context_window_guidance>";
-const REMINDER_THRESHOLD_TOKENS = 16_000;
-const RESET_SUMMARY = "Context window reset. Prior session entries remain available only through the pi-context history tools.";
+const REMINDER_THRESHOLD_TOKENS = 65_536;
+const REMINDER_FLAG = "pi-context-reminder-tokens";
+const FALLBACK_THRESHOLD_TOKENS = 40_960;
+const FALLBACK_FLAG = "pi-context-fallback-tokens";
+const RESET_SUMMARY = "Context window reset. No summary was generated. Retrieve prior details through history_* and notes_*.";
 const CONTINUATION = "This is a fresh context window. Recover only the details needed to continue with history_* and notes_*; then continue the task.";
 
-/** Codex auto_compact_fallback_prompt parity: one note-taking chance before an automatic reset. */
 const FALLBACK_PROMPT =
-	"Context limit reached. This window is about to be reset. Write durable state with notes_write_file now: task state, decisions, open issues, next steps. Do not start new work. After this turn the window resets automatically; old conversation stays searchable through the history_* tools.";
+	"Context budget is almost exhausted. This is the final fallback turn before the window resets automatically. Write task state, decisions, open issues, and next steps with notes_write_file now. Do not start new work; old conversation remains searchable through history_*.";
 
 type NoteFile = { text: string; createdAt: number; updatedAt: number };
 type NoteOperation = {
@@ -237,7 +239,7 @@ export function contextWindowHint(ctx: ExtensionContext): string {
  * persisted message would mislead later turns; the exact figure is one tool call away.
  */
 function tokenBudgetGuidance(): string {
-	return `${GUIDANCE_OPEN_TAG}\nContext budget is at or below ${REMINDER_THRESHOLD_TOKENS} tokens remaining. Persist durable state with notes_write_file, then call new_context before the window closes. get_context_remaining reports the exact figure.\n${GUIDANCE_CLOSE_TAG}`;
+	return `${GUIDANCE_OPEN_TAG}\nContext budget is running low. Persist task state, decisions, open issues, and next steps with notes_write_file; call new_context when ready to continue in a fresh window. Automatic reset does not guarantee another note-taking turn. get_context_remaining reports the estimated remaining tokens.\n${GUIDANCE_CLOSE_TAG}`;
 }
 
 /** Cheap current-window lookup: scan the branch tail for the latest compaction entry. */
@@ -270,11 +272,35 @@ const positiveInteger = () => Type.Optional(Type.Integer({ minimum: 1 }));
 const role = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool"), Type.Literal("system"), Type.Literal("developer"), Type.Null()]);
 
 export default function piContext(pi: ExtensionAPI) {
-	let rollover: "idle" | "requested" | "compacting" | "continued" = "idle";
+	let rollover: "idle" | "requested" | "compacting" = "idle";
 	let enabled = true;
 	let guidancePersistedInWindow: string | undefined;
-	let fallbackSentInWindow: string | undefined;
-	let continueAfterFallback = false;
+	let fallbackPersistedInWindow: string | undefined;
+	let handledCompactionId: string | undefined;
+
+	pi.registerFlag(REMINDER_FLAG, {
+		description: "Remind once when remaining context reaches this value; set above Pi reserveTokens",
+		type: "string",
+		default: String(REMINDER_THRESHOLD_TOKENS),
+	});
+	pi.registerFlag(FALLBACK_FLAG, {
+		description: "Offer one final note-taking turn when remaining context reaches this value",
+		type: "string",
+		default: String(FALLBACK_THRESHOLD_TOKENS),
+	});
+	const threshold = (flag: string, fallback: number) => {
+		const value = Number(pi.getFlag(flag) ?? fallback);
+		if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`--${flag} must be a positive integer`);
+		return value;
+	};
+	const thresholds = () => {
+		const next = {
+			reminder: threshold(REMINDER_FLAG, REMINDER_THRESHOLD_TOKENS),
+			fallback: threshold(FALLBACK_FLAG, FALLBACK_THRESHOLD_TOKENS),
+		};
+		if (next.fallback >= next.reminder) throw new Error(`--${FALLBACK_FLAG} must be lower than --${REMINDER_FLAG}`);
+		return next;
+	};
 
 	/** Persist the context_window hint as a visible message (lands in history and the TUI), Codex-style. */
 	const persistHint = (ctx: ExtensionContext) => {
@@ -420,13 +446,20 @@ export default function piContext(pi: ExtensionAPI) {
 		}));
 	}
 
+	const fallbackGuidance = () => `${GUIDANCE_OPEN_TAG}\n${FALLBACK_PROMPT}\n${GUIDANCE_CLOSE_TAG}`;
+	const userMessage = (text: string): AgentMessage => ({
+		role: "user",
+		content: [{ type: "text", text }],
+		timestamp: Date.now(),
+	});
+
 	pi.on("context", (event, ctx) => {
 		if (!enabled) return undefined;
 		const usage = ctx.getContextUsage();
 		if (!usage || usage.tokens === null) return undefined;
 		const remaining = Math.max(0, usage.contextWindow - usage.tokens);
-		if (remaining > REMINDER_THRESHOLD_TOKENS) return undefined;
 		const windowId = currentWindowId(ctx);
+		if (remaining > thresholds().reminder) return undefined;
 		if (guidancePersistedInWindow === windowId) return undefined;
 		guidancePersistedInWindow = windowId;
 		// Persist once per window, like the hint. sendMessage defers safely to end of
@@ -436,12 +469,41 @@ export default function piContext(pi: ExtensionAPI) {
 		// appended, static, and one-shot, so the cached prefix survives.
 		const text = tokenBudgetGuidance();
 		pi.sendMessage({ customType: GUIDANCE_TYPE, content: text, display: true }, { triggerTurn: false });
-		const guidance = {
-			role: "user" as const,
-			content: [{ type: "text" as const, text }],
-			timestamp: Date.now(),
-		};
-		return { messages: [...event.messages, guidance] };
+		return { messages: [...event.messages, userMessage(text)] };
+	});
+
+	// Graceful fallback without intercepting user input: before a fresh prompt, if
+	// remaining context has entered the buffer between this threshold and Pi's
+	// reserve line, append a persistent user-level final-call instruction. Pi then
+	// runs that turn with the user's queued prompt still present and runs its own
+	// automatic compaction before the following prompt. Overflow is excluded: Pi
+	// already owns its one-shot compact-and-retry recovery.
+	pi.on("before_agent_start", (event, ctx) => {
+		if (!enabled) return undefined;
+		const usage = ctx.getContextUsage();
+		if (!usage || usage.tokens === null) return undefined;
+		const remaining = Math.max(0, usage.contextWindow - usage.tokens);
+		if (remaining > thresholds().fallback) return undefined;
+		const windowId = currentWindowId(ctx);
+		if (fallbackPersistedInWindow === windowId) return undefined;
+		fallbackPersistedInWindow = windowId;
+		return { message: { customType: FALLBACK_TYPE, content: FALLBACK_PROMPT, display: true } };
+	});
+
+	pi.on("turn_end", (_event, ctx) => {
+		if (!enabled) return undefined;
+		const usage = ctx.getContextUsage();
+		if (!usage || usage.tokens === null) return;
+		const remaining = Math.max(0, usage.contextWindow - usage.tokens);
+		if (remaining > thresholds().fallback) return;
+		const windowId = currentWindowId(ctx);
+		if (fallbackPersistedInWindow === windowId) return;
+		if (rollover !== "idle") return;
+		fallbackPersistedInWindow = windowId;
+		// The previous tool turn has finished; this is an ordinary new run, not a
+		// raced compaction callback. The fallback message reaches the model before
+		// the pending user input and no input text/images are copied or replayed.
+		pi.sendMessage({ customType: FALLBACK_TYPE, content: fallbackGuidance(), display: true }, { triggerTurn: true });
 	});
 
 	pi.registerTool(defineTool({
@@ -482,22 +544,8 @@ export default function piContext(pi: ExtensionAPI) {
 		if (!enabled) return undefined; // Default Pi compaction applies; keepRecentTokens is honored again.
 		// Never let an aborted or failed custom reset fall through to Pi's default summary.
 		if (event.signal.aborted) return { cancel: true };
-		// Codex auto_compact_fallback_prompt parity, adapted to Pi's trigger points:
-		// - threshold, post-run (agent still streaming): cancel once per window and steer a
-		//   note-taking turn in; _runAutoCompaction then returns hasQueuedMessages() and the
-		//   post-run loop delivers it via agent.continue(). Safe, intended path.
-		// - threshold, pre-prompt (idle): cancelling still sends the user prompt with an
-		//   over-threshold context, and sendMessage would race _runAgentPrompt. Reset instead.
-		// - overflow: never cancel; that would abandon Pi's one-shot compact-and-retry recovery.
-		if (event.reason === "threshold" && !ctx.isIdle()) {
-			const windowId = currentWindowId(ctx);
-			if (fallbackSentInWindow !== windowId) {
-				fallbackSentInWindow = windowId;
-				continueAfterFallback = true;
-				pi.sendMessage({ customType: FALLBACK_TYPE, content: FALLBACK_PROMPT, display: true }, { triggerTurn: true });
-				return { cancel: true };
-			}
-		}
+		// Every compaction uses the same reset path. Never cancel to borrow a
+		// note-taking turn: Pi owns user input, queued work, and overflow recovery.
 		try {
 			pi.appendEntry(RESET_MARKER_TYPE, { version: 1, reason: event.reason, requested: rollover === "compacting" });
 			const markerId = ctx.sessionManager.getLeafId();
@@ -510,20 +558,23 @@ export default function piContext(pi: ExtensionAPI) {
 
 	pi.on("session_compact", (event, ctx) => {
 		if (!enabled) {
-			continueAfterFallback = false;
+			rollover = "idle";
 			return;
 		}
-		// Overflow retry is already continued once by Pi core. Sending another turn would duplicate it.
-		if (event.willRetry) return;
-		// Continue after our own rollover, and after a fallback reset (Codex rolls over
-		// mid-turn and keeps going). A user's manual /compact gets no continuation.
-		const shouldContinue = rollover === "compacting" || continueAfterFallback;
-		continueAfterFallback = false;
-		if (rollover === "compacting") rollover = "continued";
-		if (!shouldContinue) return;
-		pi.appendEntry(STATE_TYPE, { version: 1, lastResetEntryId: event.compactionEntry.id });
+		const entry = ctx.sessionManager.getEntry(event.compactionEntry.id);
+		if (entry?.type !== "compaction" || !entry.details || typeof entry.details !== "object" ||
+			!("piContext" in entry.details) || entry.details.piContext !== "reset-v1") return;
+		if (handledCompactionId === entry.id) return;
+		handledCompactionId = entry.id;
+		// Only explicit new_context needs an extension-owned continuation.
+		// Automatic resets/retries and user /compact keep Pi's native scheduling.
+		const shouldContinue = rollover === "compacting" && !event.willRetry;
+		rollover = "idle";
+		pi.appendEntry(STATE_TYPE, { version: 1, lastResetEntryId: entry.id });
 		persistHint(ctx);
-		pi.sendMessage({ customType: CONTINUATION_TYPE, content: CONTINUATION, display: false }, { triggerTurn: true });
+		if (shouldContinue) {
+			pi.sendMessage({ customType: CONTINUATION_TYPE, content: CONTINUATION, display: false }, { triggerTurn: true });
+		}
 	});
 
 	pi.on("session_compact_failed", () => {
@@ -531,4 +582,4 @@ export default function piContext(pi: ExtensionAPI) {
 	});
 }
 
-export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, HINT_TYPE, GUIDANCE_TYPE, FALLBACK_TYPE, FALLBACK_PROMPT, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, GUIDANCE_OPEN_TAG, REMINDER_THRESHOLD_TOKENS, lineRange, assertVirtualPath };
+export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, HINT_TYPE, GUIDANCE_TYPE, FALLBACK_TYPE, FALLBACK_PROMPT, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, GUIDANCE_OPEN_TAG, REMINDER_THRESHOLD_TOKENS, REMINDER_FLAG, FALLBACK_THRESHOLD_TOKENS, FALLBACK_FLAG, lineRange, assertVirtualPath };

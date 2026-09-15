@@ -20,11 +20,20 @@ The extension composes Pi's public `session_before_compact` / `session_compact` 
 
 - **`new_context` tool** — the model requests a fresh context window. The extension waits for the current tool turn to end, compacts with a short deterministic reset message (old conversation is excluded from the new provider context but stays in the session), then sends exactly one hidden continuation turn.
 - **`<context_window>` hint** — persisted as a visible custom message at session start and after each window reset (Codex-style: written once into history instead of re-injected per request). It carries the agent name, first/current/previous window IDs, and the 5 most recently updated notes. Within a window the note list goes stale, exactly like Codex's steady-state world-state diffing.
-- **Low-budget guidance** — when remaining context first drops to 16,000 tokens or below, a `<context_window_guidance>` reminder is **persisted once per window** into history (TUI-visible, no extra turn; `sendMessage` safely defers to end of turn mid-stream). The in-flight request additionally gets one transient tail copy so the model sees it immediately. Text is static and appended, so the provider prefix cache survives. The exact remaining figure is one `get_context_remaining` call away. Note: Pi's built-in auto-compaction fires when remaining context falls below `reserveTokens` (default 16,384), so raise the reminder threshold above your `reserveTokens` or the reminder never precedes compaction.
-- **Auto-compact fallback** — Codex `auto_compact_fallback_prompt` parity, adapted to Pi's trigger points. On the first proactive `threshold` compaction in a window (post-run, agent still streaming), the extension cancels compaction once and steers in a note-taking turn ("write durable state with `notes_write_file` now"); the next threshold trigger performs the real reset and auto-continues, like Codex's mid-turn rollover. The pre-prompt threshold path (idle — cancelling would race the user prompt) and `overflow` recovery (cancelling would abandon Pi's one-shot retry) reset immediately without a fallback turn.
-- **Runtime toggle** — `/pi-context off` disables hint injection, guidance, fallback turns, and reset-style compaction (Pi's default compaction, including `keepRecentTokens`, applies again). `/pi-context on` re-enables; a bare `/pi-context` reports the current state.
+- **Low-budget guidance** — when estimated remaining context first drops to **65,536 tokens** or below, a `<context_window_guidance>` reminder is **persisted once per window** into history (TUI-visible, no extra turn; `sendMessage` safely defers mid-stream). The in-flight request additionally gets one transient tail copy so the model sees it immediately. Text is static and appended rather than prepended; existing history is not rewritten. Both the reminder and `get_context_remaining` use Pi's context-usage estimate.
+- **Direct automatic reset** — every automatic compaction immediately uses the same reset handler. No cancellation to obtain a fallback turn, no input interception or replay, and no special idle/streaming scheduling. The reminder asks the model to write notes early; if it misses that opportunity, old history remains searchable. Pi owns automatic continuation, queued inputs, and overflow retry.
+- **Graceful fallback** — when estimated remaining context reaches **40,960 tokens**, the extension inserts one final note-taking instruction once per window. Before a fresh user turn, it is persisted through `before_agent_start`; after a running tool turn, it is sent at the ordinary `turn_end` boundary. It never copies, handles, or replays user input and never cancels Pi's compaction. Pi's automatic compaction still performs the reset afterward.
+- **Runtime toggle** — `/pi-context off` disables hint injection, guidance, and reset-style compaction (Pi's default compaction, including `keepRecentTokens`, applies again). `/pi-context on` re-enables; a bare `/pi-context` reports the current state.
 - **History tools** — the model searches pre-reset conversation with case-sensitive literal substring search, exactly like Codex's `history.*` namespace.
 - **Notes tools** — persistent, session-scoped virtual files that survive window resets.
+
+## Reminder timing
+
+```sh
+pi --pi-context-reminder-tokens 65536 --pi-context-fallback-tokens 40960
+```
+
+Both flags accept positive integers measured in **remaining context tokens**, not tokens consumed. The reminder must be above the fallback, and both should be above your Pi `compaction.reserveTokens` with enough headroom for a turn. With `reserveTokens: 32768`, the defaults leave roughly 24.5k tokens between early reminder and fallback, then 8k tokens between fallback and Pi's reset line. The extension does not change Pi settings or reserve additional context. Large tool outputs or user inputs can jump over one or both reminders; overflow recovery still resets immediately rather than forcing a doomed extra turn. For small context windows, tune all values to fit the model.
 
 ## Tools
 
@@ -55,7 +64,9 @@ Two extra controls compose Pi public APIs:
 
 ## Reset behavior and limits
 
-On `session_before_compact`, the extension appends a persistent custom reset marker through public `pi.appendEntry`, reads that real marker ID from the readonly session manager, and returns it as `firstKeptEntryId`. Pi's `buildContextEntries()` then keeps the compaction envelope plus that custom marker; custom markers are excluded from LLM context. Thus the subsequent provider context contains the short reset result and hidden continuation, not old conversation messages. The old entries remain only in the session tree for `history_*`.
+On `session_before_compact`, the extension appends a persistent custom reset marker through public `pi.appendEntry`, reads that real marker ID from the readonly session manager, and returns it as `firstKeptEntryId`. Pi's `buildContextEntries()` then keeps the compaction envelope plus that custom marker; custom markers are excluded from LLM context. Thus the subsequent provider context contains the short reset result and a fresh window hint, not old conversation messages. Only an explicit `new_context` adds a hidden continuation; automatic resets and user `/compact` keep Pi's native scheduling. The old entries remain only in the session tree for `history_*`.
+
+Pi's built-in “compacted into the following summary” envelope is left intact. Its content explicitly says: “Context window reset. No summary was generated. Retrieve prior details through history_* and notes_*.” No context filtering or TUI override is used to hide that envelope.
 
 The same handler is used for native automatic compaction. When Pi marks an overflow compaction `willRetry`, Pi core performs its single retry itself and this extension deliberately sends no second continuation. While the extension is enabled, its custom reset keeps nothing after the boundary marker, so Pi's `keepRecentTokens` setting has no effect; with `/pi-context off`, Pi's default compaction (and `keepRecentTokens`) applies again.
 
@@ -68,4 +79,4 @@ npm run typecheck
 npm test
 ```
 
-The integration harness uses the installed Pi `SessionManager`, including an on-disk JSONL reload. It verifies note persistence/Unicode/path rules, provider context exclusion after the real `firstKeptEntryId` boundary while history remains searchable, completed tool-result boundary placement, one continuation only, and cancellation/failure/no-double-retry behavior. It uses no model or network call.
+The integration harness uses the installed Pi `SessionManager`, including an on-disk JSONL reload. It verifies note persistence/Unicode/path rules, provider context exclusion after the real `firstKeptEntryId` boundary while history remains searchable, completed tool-result boundary placement, threshold ordering/config validation, one early reminder and one final fallback per window, one continuation only, and cancellation/failure/no-double-retry behavior. It uses no model or network call.
