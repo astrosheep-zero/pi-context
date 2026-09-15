@@ -1,17 +1,21 @@
+import { randomUUID } from "node:crypto";
 import { Type, type TextContent } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { defineTool, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const STATE_TYPE = "pi-context/state";
 const NOTE_TYPE = "pi-context/note";
-const HINT_TYPE = "pi-context/hint";
+const BOOT_TYPE = "pi-context/boot";
 const GUIDANCE_TYPE = "pi-context/guidance";
 const FALLBACK_TYPE = "pi-context/fallback";
 const RESET_MARKER_TYPE = "pi-context/reset-marker";
 const CONTINUATION_TYPE = "pi-context/continuation";
+const RESET_V2 = "reset-v2";
 const MAX_NOTE_BYTES = 1_000_000;
 const CONTEXT_WINDOW_OPEN_TAG = "<context_window>";
 const CONTEXT_WINDOW_CLOSE_TAG = "</context_window>";
+const CONTEXT_WINDOW_PROTOCOL_OPEN_TAG = "<context_window_protocol>";
+const CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG = "</context_window_protocol>";
 const GUIDANCE_OPEN_TAG = "<context_window_guidance>";
 const GUIDANCE_CLOSE_TAG = "</context_window_guidance>";
 const PI_CONTEXT_SETTINGS_KEY = "pi-context";
@@ -20,6 +24,21 @@ const DEFAULT_REMINDER_MARGIN_TOKENS = 49_152;
 const DEFAULT_FALLBACK_MARGIN_TOKENS = 24_576;
 const RESET_SUMMARY = "Context window reset. No summary was generated. Retrieve prior details through history_* and notes_*.";
 const CONTINUATION = "This is a fresh context window. Recover only the details needed to continue with history_* and notes_*; then continue the task.";
+
+/**
+ * Static protocol teaching adapted from Codex's token_budget.guidance_message to
+ * pi-context's tool names. It lives once per window in the persisted boot block;
+ * it is never re-injected, so it stays cache-stable at the head of the window.
+ */
+const PROTOCOL_BLOCK = `${CONTEXT_WINDOW_PROTOCOL_OPEN_TAG}
+For tasks that may span context windows, use notes_write_file and notes_append_to_file to maintain a concise checkpoint of the goal, decisions, progress, learnings, and next steps. Include the window ID and item ID of every relevant user request you are currently solving, plus important actions and tool calls. The read-only history_* tools can look up details from those references later. Every non-assistant item (user, tool result) has an item ID returned by history_list_items.
+
+Take incremental notes while you work so you do not lose important information. Use get_context_remaining to check the live remaining token budget for planning. Once the token budget is exhausted you lose access to the current window and continue in a fresh context window; you can recover only through notes_* and history_*. Do not over-run the context window without documentation.
+
+If a Previous context window id is present in <context_window>, a context reset occurred and this is a fresh window. The old conversation is not automatically included. After a reset, read your note checkpoint and use the read-only history_* tools to recover missing details. When a window ID and item ID are known, prefer history_read_item directly; when they are missing or uncertain, use history_list_items, or history_search_contents to locate the item first.
+
+Notes are session-scoped virtual files. Treat notes and history as internal bookkeeping; never mention them in user-facing messages.
+${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 const FALLBACK_PROMPT =
 	"Context budget is almost exhausted. This is the final fallback turn before the window resets automatically. Write task state, decisions, open issues, and next steps with notes_write_file now. Do not start new work; old conversation remains searchable through history_*.";
@@ -98,6 +117,19 @@ function toolInfo(message: AgentMessage): Pick<HistoryItem, "toolName" | "toolNa
 	return { toolName: message.toolName, toolNamespace: underscore > 0 ? message.toolName.slice(0, underscore) : undefined };
 }
 
+/** The extension-owned window id baked onto a reset-v2 compaction entry, if present. */
+function resetV2WindowId(details: unknown): string | undefined {
+	if (typeof details !== "object" || details === null) return undefined;
+	const candidate = details as { piContext?: unknown; windowId?: unknown };
+	if (candidate.piContext !== RESET_V2 || typeof candidate.windowId !== "string") return undefined;
+	return candidate.windowId;
+}
+
+/** A compaction entry's window id: the extension-minted id for reset-v2, else Pi's entry id. */
+function windowIdOf(sessionId: string, entry: { id: string; details?: unknown }): string {
+	return resetV2WindowId(entry.details) ?? `pcw:${sessionId}:${entry.id}`;
+}
+
 /** Build durable, on-demand history directly from every entry on the current session branch. */
 export function historyFromSession(ctx: ExtensionContext): HistoryWindow[] {
 	const sessionId = ctx.sessionManager.getSessionId();
@@ -105,7 +137,7 @@ export function historyFromSession(ctx: ExtensionContext): HistoryWindow[] {
 	const windows = [window];
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type === "compaction") {
-			window = { windowId: `pcw:${sessionId}:${entry.id}`, createdAt: entry.timestamp, items: [] };
+			window = { windowId: windowIdOf(sessionId, entry), createdAt: entry.timestamp, items: [] };
 			windows.push(window);
 			window.items.push({
 				windowId: window.windowId,
@@ -213,28 +245,45 @@ export function notesFromSession(ctx: ExtensionContext): Map<string, NoteFile> {
 	return files;
 }
 
-/** Codex-equivalent <context_window> hint: window identity plus recent-notes entry points. */
-export function contextWindowHint(ctx: ExtensionContext): string {
-	const windows = historyFromSession(ctx);
-	const first = windows[0];
-	const current = windows[windows.length - 1];
-	const previous = windows.length > 1 ? windows[windows.length - 2] : undefined;
+/** Codex-style <context_window> identity block: agent name and first/current/previous window ids only. */
+function identityBlock(agentName: string, firstWindowId: string, currentWindowId: string, previousWindowId?: string): string {
 	const lines = [
-		`Agent name: ${ctx.sessionManager.getSessionName() ?? "root"}`,
-		`First context window id: ${first?.windowId ?? "unknown"}`,
-		`Current context window id: ${current?.windowId ?? "unknown"}`,
+		`Agent name: ${agentName}`,
+		`First context window id: ${firstWindowId}`,
+		`Current context window id: ${currentWindowId}`,
 	];
-	if (previous) lines.push(`Previous context window id: ${previous.windowId}`);
+	if (previousWindowId) lines.push(`Previous context window id: ${previousWindowId}`);
+	return `${CONTEXT_WINDOW_OPEN_TAG}\n${lines.join("\n")}\n${CONTEXT_WINDOW_CLOSE_TAG}`;
+}
+
+/** Recent-notes index with the existing wording; empty when the session has no notes. */
+function notesIndex(ctx: ExtensionContext): string {
 	const recentNotes = [...notesFromSession(ctx)]
 		.sort((a, b) => b[1].updatedAt - a[1].updatedAt)
 		.slice(0, 5);
-	if (recentNotes.length > 0) {
-		lines.push("Recent notes (up to 5, most-recent first):");
-		for (const [path, file] of recentNotes) {
-			lines.push(`- ${path} (${file.text.split("\n").length} lines, ${Buffer.byteLength(file.text, "utf8")} UTF-8 bytes)`);
-		}
+	if (recentNotes.length === 0) return "";
+	const lines = ["Recent notes (up to 5, most-recent first):"];
+	for (const [path, file] of recentNotes) {
+		lines.push(`- ${path} (${file.text.split("\n").length} lines, ${Buffer.byteLength(file.text, "utf8")} UTF-8 bytes)`);
 	}
-	return `${CONTEXT_WINDOW_OPEN_TAG}\n${lines.join("\n")}\n${CONTEXT_WINDOW_CLOSE_TAG}`;
+	return lines.join("\n");
+}
+
+/**
+ * Assemble the static, once-per-window boot block: the reset line for resets, the
+ * <context_window> identity block, the recent-notes index at window-open time, and
+ * the <context_window_protocol> teaching block. Nothing here is re-injected, so the
+ * head of the window stays cache-stable.
+ */
+function bootBlock(ctx: ExtensionContext, currentId: string, previousId: string | undefined, resetLine: boolean): string {
+	const firstId = historyFromSession(ctx)[0]?.windowId ?? currentId;
+	const parts: string[] = [];
+	if (resetLine) parts.push(RESET_SUMMARY);
+	parts.push(identityBlock(ctx.sessionManager.getSessionName() ?? "root", firstId, currentId, previousId));
+	const index = notesIndex(ctx);
+	if (index) parts.push(index);
+	parts.push(PROTOCOL_BLOCK);
+	return parts.join("\n\n");
 }
 
 /**
@@ -252,7 +301,7 @@ function currentWindowId(ctx: ExtensionContext): string {
 	const branch = ctx.sessionManager.getBranch();
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const entry = branch[i];
-		if (entry?.type === "compaction") return `pcw:${sessionId}:${entry.id}`;
+		if (entry?.type === "compaction") return windowIdOf(sessionId, entry);
 	}
 	return `pcw:${sessionId}:root`;
 }
@@ -339,7 +388,6 @@ export function deriveThresholds(reserveTokens: number, margins: PiContextMargin
 export default function piContext(pi: ExtensionAPI) {
 	let rollover: "idle" | "requested" | "compacting" = "idle";
 	let enabled = true;
-	let hintInjectedInWindow: string | undefined;
 	let guidancePersistedInWindow: string | undefined;
 	let fallbackPersistedInWindow: string | undefined;
 	let handledCompactionId: string | undefined;
@@ -371,17 +419,18 @@ export default function piContext(pi: ExtensionAPI) {
 		return thresholds;
 	};
 
-	/** Persist the context_window hint as a visible message (lands in history and the TUI), Codex-style. */
-	const persistHint = (ctx: ExtensionContext) => {
-		pi.sendMessage({ customType: HINT_TYPE, content: contextWindowHint(ctx), display: true }, { triggerTurn: false });
-	};
-
 	pi.on("session_start", (_event, ctx) => {
 		// Re-read settings.json on every session start; the resolved values are cached for the session.
 		thresholds = undefined;
 		resolveThresholds(ctx);
 		if (!enabled) return;
-		persistHint(ctx);
+		// The root window has no compaction entry to carry the boot block, so persist
+		// it once as a visible custom message. Reset windows already carry theirs at
+		// position 0 in the compaction summary, so a resumed session adds nothing.
+		const sessionId = ctx.sessionManager.getSessionId();
+		const rootId = `pcw:${sessionId}:root`;
+		if (currentWindowId(ctx) !== rootId) return;
+		pi.sendMessage({ customType: BOOT_TYPE, content: bootBlock(ctx, rootId, undefined, false), display: true }, { triggerTurn: false });
 	});
 	const saveNote = (op: NoteOperation) => {
 		// pi.appendEntry writes a custom SessionManager entry. Custom entries are persistent but excluded from LLM context.
@@ -390,7 +439,7 @@ export default function piContext(pi: ExtensionAPI) {
 	};
 
 	pi.registerCommand("pi-context", {
-		description: "Toggle pi-context: context_window hint, low-budget guidance, and reset-style compaction",
+		description: "Toggle pi-context: context_window boot block, low-budget guidance, and reset-style compaction",
 		getArgumentCompletions: (prefix) =>
 			["on", "off"].filter((a) => a.startsWith(prefix)).map((a) => ({ value: a, label: a })),
 		handler: async (args, cmdCtx) => {
@@ -519,29 +568,16 @@ export default function piContext(pi: ExtensionAPI) {
 	}
 
 	const fallbackGuidance = () => `${GUIDANCE_OPEN_TAG}\n${FALLBACK_PROMPT}\n${GUIDANCE_CLOSE_TAG}`;
-	const userMessage = (text: string): AgentMessage => ({
-		role: "user",
-		content: [{ type: "text", text }],
-		timestamp: Date.now(),
-	});
 
-	pi.on("context", (event, ctx) => {
+	pi.on("context", (_event, ctx) => {
 		if (!enabled) return undefined;
-		const windowId = currentWindowId(ctx);
-		// Late-hint repair: session_compact persists the window hint, but that
-		// durable message may not be in history yet when the first provider request
-		// of the fresh window goes out (session_compact runs after the reset). This
-		// hook fires before every LLM call, so append one transient copy to that
-		// first request. Once the persisted hint reaches event.messages the customType
-		// check stops the transient copy; the injected window id keeps it to one per
-		// window even while the persisted copy is still in flight.
-		const needsHint =
-			hintInjectedInWindow !== windowId &&
-			!event.messages.some((message) => message.role === "custom" && message.customType === HINT_TYPE);
-		if (needsHint) hintInjectedInWindow = windowId;
+		// This hook does exactly one thing: persist the once-per-window low-budget
+		// reminder the first time remaining context crosses the reminder threshold.
+		// It never injects messages into the request.
 		const usage = ctx.getContextUsage();
 		if (usage && usage.tokens !== null) {
 			const remaining = Math.max(0, usage.contextWindow - usage.tokens);
+			const windowId = currentWindowId(ctx);
 			if (remaining <= resolveThresholds(ctx).reminder && guidancePersistedInWindow !== windowId) {
 				guidancePersistedInWindow = windowId;
 				// Persist once per window — no transient copy. A transient bridge would
@@ -555,10 +591,7 @@ export default function piContext(pi: ExtensionAPI) {
 				pi.sendMessage({ customType: GUIDANCE_TYPE, content: tokenBudgetGuidance(remaining), display: true }, { triggerTurn: false });
 			}
 		}
-		if (!needsHint) return undefined;
-		// The hint is the only transient copy: window identity and the note index
-		// must lead the fresh window's first request.
-		return { messages: [...event.messages, userMessage(contextWindowHint(ctx))] };
+		return undefined;
 	});
 
 	// Graceful fallback without intercepting user input: before a fresh prompt, if
@@ -643,10 +676,27 @@ export default function piContext(pi: ExtensionAPI) {
 		// Every compaction uses the same reset path. Never cancel to borrow a
 		// note-taking turn: Pi owns user input, queued work, and overflow recovery.
 		try {
+			const sessionId = ctx.sessionManager.getSessionId();
+			// Pi mints the compaction entry id only after this hook returns, so the
+			// extension mints and owns the window id now, avoiding collisions with any
+			// existing entry id, and bakes it into the summary and details.
+			let minted = randomUUID().slice(0, 8);
+			while (ctx.sessionManager.getEntry(minted)) minted = randomUUID().slice(0, 8);
+			const windowId = `pcw:${sessionId}:${minted}`;
+			const windows = historyFromSession(ctx);
+			const previousId = windows[windows.length - 1]?.windowId ?? `pcw:${sessionId}:root`;
+			// The reset marker stays as firstKeptEntryId; it no longer names the window.
 			pi.appendEntry(RESET_MARKER_TYPE, { version: 1, reason: event.reason, requested: rollover === "compacting" });
 			const markerId = ctx.sessionManager.getLeafId();
 			if (!markerId) return { cancel: true };
-			return { compaction: { summary: RESET_SUMMARY, firstKeptEntryId: markerId, tokensBefore: event.preparation.tokensBefore, details: { piContext: "reset-v1" } } };
+			return {
+				compaction: {
+					summary: bootBlock(ctx, windowId, previousId, true),
+					firstKeptEntryId: markerId,
+					tokensBefore: event.preparation.tokensBefore,
+					details: { piContext: RESET_V2, windowId },
+				},
+			};
 		} catch {
 			return { cancel: true };
 		}
@@ -658,8 +708,7 @@ export default function piContext(pi: ExtensionAPI) {
 			return;
 		}
 		const entry = ctx.sessionManager.getEntry(event.compactionEntry.id);
-		if (entry?.type !== "compaction" || !entry.details || typeof entry.details !== "object" ||
-			!("piContext" in entry.details) || entry.details.piContext !== "reset-v1") return;
+		if (entry?.type !== "compaction" || resetV2WindowId(entry.details) === undefined) return;
 		if (handledCompactionId === entry.id) return;
 		handledCompactionId = entry.id;
 		// Only explicit new_context needs an extension-owned continuation.
@@ -667,7 +716,6 @@ export default function piContext(pi: ExtensionAPI) {
 		const shouldContinue = rollover === "compacting" && !event.willRetry;
 		rollover = "idle";
 		pi.appendEntry(STATE_TYPE, { version: 1, lastResetEntryId: entry.id });
-		persistHint(ctx);
 		if (shouldContinue) {
 			pi.sendMessage({ customType: CONTINUATION_TYPE, content: CONTINUATION, display: false }, { triggerTurn: true });
 		}
@@ -678,4 +726,4 @@ export default function piContext(pi: ExtensionAPI) {
 	});
 }
 
-export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, HINT_TYPE, GUIDANCE_TYPE, FALLBACK_TYPE, FALLBACK_PROMPT, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, DEFAULT_FALLBACK_MARGIN_TOKENS, deriveThresholds, mergePiContextSettings, lineRange, assertVirtualPath };
+export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, FALLBACK_TYPE, FALLBACK_PROMPT, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, DEFAULT_FALLBACK_MARGIN_TOKENS, deriveThresholds, mergePiContextSettings, lineRange, assertVirtualPath };
