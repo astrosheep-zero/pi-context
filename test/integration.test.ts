@@ -518,7 +518,7 @@ test("low-budget guidance persists once per window with no transient copy", asyn
 	const text = captured.sent[0]?.message.content;
 	assert.ok(typeof text === "string" && text.startsWith(internal.GUIDANCE_OPEN_TAG));
 	assert.match(text, /Context budget is running low/);
-	assert.match(text, /only 10000 tokens remained when this reminder was recorded/);
+	assert.match(text, /only 0 tokens remained when this reminder was recorded/);
 	assert.match(text, /does not guarantee another note-taking turn/);
 
 	// Same window: no duplicate persist.
@@ -534,7 +534,7 @@ test("low-budget guidance persists once per window with no transient copy", asyn
 	assert.equal(captured.sent.length, 2);
 	const newWindowText = captured.sent[1]?.message.content;
 	assert.ok(typeof newWindowText === "string" && newWindowText.startsWith(internal.GUIDANCE_OPEN_TAG));
-	assert.match(newWindowText, /only 4000 tokens remained when this reminder was recorded/, "fresh window persists its own measured count");
+	assert.match(newWindowText, /only 0 tokens remained when this reminder was recorded/, "fresh window persists its own measured count");
 });
 
 test("new_context continues exactly once and cancellation/failure does not fall back or loop", async () => {
@@ -772,6 +772,29 @@ test("an idle pre-prompt automatic crossing resets directly instead of starting 
 	assert.equal(captured.sent.length, 0, "no steer is queued while idle, so no nested run races the prompt");
 });
 
+test("remaining budget excludes the effective reserve, clamps at zero, and preserves unknown usage", async () => {
+	const fixture = settingsFixture({
+		reserveTokens: 16_384,
+		project: { compaction: { reserveTokens: 32_768 } },
+	});
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const readBudget = async (tokens: number | null, trusted = true) => {
+		const ctx = context(sm, undefined, { tokens, contextWindow: 200_000, percent: tokens === null ? null : tokens / 2000 }, true, fixture.cwd, trusted);
+		return resultJson<{ remaining_tokens: number | null }>(await call(captured, "get_context_remaining", {}, ctx)).remaining_tokens;
+	};
+	assert.equal(await readBudget(72_563), 94_669, "project reserve is subtracted from the reported 127437 physical tokens");
+	assert.equal(await readBudget(167_232), 0, "at the reserve line");
+	assert.equal(await readBudget(190_000), 0, "inside the reserve");
+	assert.equal(await readBudget(210_000), 0, "over the physical window");
+	assert.equal(await readBudget(null), null, "unknown usage remains unknown");
+	const absent = context(sm, undefined, undefined, true, fixture.cwd);
+	assert.equal(resultJson<{ remaining_tokens: number | null }>(await call(captured, "get_context_remaining", {}, absent)).remaining_tokens, null);
+	const untrusted = context(sm, undefined, { tokens: 72_563, contextWindow: 200_000, percent: 36.2815 }, true, fixture.cwd, false);
+	runHandlers(captured, "session_start", {}, untrusted);
+	assert.equal(await readBudget(72_563, false), 111_053, "session start reloads the global reserve when the project is untrusted");
+});
+
 test("the reminder threshold derives from compaction.reserveTokens plus the pi-context reminder margin", async () => {
 	const fixture = settingsFixture({
 		reserveTokens: 100_000,
@@ -787,7 +810,7 @@ test("the reminder threshold derives from compaction.reserveTokens plus the pi-c
 	assert.equal(captured.sent.length, 0, "no guidance above the derived reminder");
 	assert.equal(await runContextHook(captured, at(130_000)), undefined, "derived reminder crossing persists only");
 	assert.equal(captured.sent.length, 1, "derived reminder fires");
-	assert.match(String(captured.sent[0]?.message.content), /only 130000 tokens remained when this reminder was recorded/);
+	assert.match(String(captured.sent[0]?.message.content), /only 30000 tokens remained when this reminder was recorded/);
 });
 
 test("absent pi-context key or margins reproduce the default reminder threshold at Pi's default reserve", async () => {
@@ -808,7 +831,7 @@ test("absent pi-context key or margins reproduce the default reminder threshold 
 		assert.equal(captured.sent.length, 0, `${label}: no guidance above the default reminder`);
 		assert.equal(await runContextHook(captured, at(40_960)), undefined, `${label}: default reminder crossing persists only`);
 		assert.equal(captured.sent.length, 1, `${label}: default reminder fires`);
-		assert.match(String(captured.sent[0]?.message.content), /only 40960 tokens remained/, label);
+		assert.match(String(captured.sent[0]?.message.content), /only 24576 tokens remained/, label);
 		assert.equal(noticesOf(first).length, 0, `${label}: valid defaults warn nobody`);
 	}
 });

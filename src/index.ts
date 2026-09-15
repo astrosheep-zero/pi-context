@@ -46,7 +46,7 @@ ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 const FALLBACK_PROMPT =
 	"Context budget is almost exhausted. This is the final fallback turn before the window resets automatically. Write task state, decisions, open issues, and next steps with notes_write_file now. Do not start new work; old conversation remains searchable through history_*.";
 
-type ResolvedThresholds = { reminder: number };
+type ResolvedThresholds = { reminder: number; reserve: number };
 type PiContextMargins = { reminderMarginTokens: unknown };
 
 type NoteFile = { text: string; createdAt: number; updatedAt: number };
@@ -399,7 +399,7 @@ export function deriveThresholds(reserveTokens: number, margins: PiContextMargin
 			reminderMargin = DEFAULT_REMINDER_MARGIN_TOKENS;
 		} else reminderMargin = parsed;
 	}
-	return { thresholds: { reminder: reserveTokens + reminderMargin }, warnings };
+	return { thresholds: { reminder: reserveTokens + reminderMargin, reserve: reserveTokens }, warnings };
 }
 
 export default function piContext(pi: ExtensionAPI) {
@@ -433,7 +433,7 @@ export default function piContext(pi: ExtensionAPI) {
 			thresholds = derived.thresholds;
 		} catch (error) {
 			ctx.ui.notify(`pi-context: could not read settings; using defaults (${String(error)}).`, "warning");
-			thresholds = { reminder: DEFAULT_RESERVE_TOKENS + DEFAULT_REMINDER_MARGIN_TOKENS };
+			thresholds = { reminder: DEFAULT_RESERVE_TOKENS + DEFAULT_REMINDER_MARGIN_TOKENS, reserve: DEFAULT_RESERVE_TOKENS };
 		}
 		return thresholds;
 	};
@@ -597,7 +597,8 @@ export default function piContext(pi: ExtensionAPI) {
 		if (usage && usage.tokens !== null) {
 			const remaining = Math.max(0, usage.contextWindow - usage.tokens);
 			const windowId = currentWindowId(ctx);
-			if (remaining <= resolveThresholds(ctx).reminder && guidancePersistedInWindow !== windowId) {
+			const { reminder, reserve } = resolveThresholds(ctx);
+			if (remaining <= reminder && guidancePersistedInWindow !== windowId) {
 				guidancePersistedInWindow = windowId;
 				// Persist once per window — no transient copy. A transient bridge would
 				// cover the crossing request, but history would record the reminder after
@@ -607,7 +608,7 @@ export default function piContext(pi: ExtensionAPI) {
 				// on (sendMessage defers safely to end of turn while streaming, queueing
 				// instead of splitting a tool call/result pair) costs nothing, and the
 				// model's view stays identical to recorded history, Codex-style.
-				pi.sendMessage({ customType: GUIDANCE_TYPE, content: tokenBudgetGuidance(remaining), display: true }, { triggerTurn: false });
+				pi.sendMessage({ customType: GUIDANCE_TYPE, content: tokenBudgetGuidance(Math.max(0, remaining - reserve)), display: true }, { triggerTurn: false });
 			}
 		}
 		return undefined;
@@ -616,11 +617,11 @@ export default function piContext(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "get_context_remaining",
 		label: "Get context remaining",
-		description: "Return remaining context tokens when Pi can estimate them, otherwise null.",
+		description: "Return estimated context tokens available before the compaction reserve, clamped to zero; null when Pi cannot estimate usage.",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_id, _params, _signal, _update, ctx) {
 			const usage = ctx.getContextUsage();
-			const remaining = usage?.tokens === null || usage === undefined ? null : Math.max(0, usage.contextWindow - usage.tokens);
+			const remaining = usage?.tokens === null || usage === undefined ? null : Math.max(0, usage.contextWindow - usage.tokens - resolveThresholds(ctx).reserve);
 			return output({ remaining_tokens: remaining });
 		},
 	}));
