@@ -583,10 +583,10 @@ test("thresholds derive from compaction.reserveTokens plus pi-context margins", 
 	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, "derived fallback fires");
 });
 
-test("absent pi-context key or margins reproduce the legacy thresholds at Pi's default reserve", async () => {
+test("absent pi-context key or margins reproduce the default thresholds at Pi's default reserve", async () => {
 	assert.equal(internal.DEFAULT_RESERVE_TOKENS, 16_384);
-	assert.equal(internal.DEFAULT_RESERVE_TOKENS + internal.DEFAULT_REMINDER_MARGIN_TOKENS, 65_536);
-	assert.equal(internal.DEFAULT_RESERVE_TOKENS + internal.DEFAULT_FALLBACK_MARGIN_TOKENS, 40_960);
+	assert.equal(internal.DEFAULT_RESERVE_TOKENS + internal.DEFAULT_REMINDER_MARGIN_TOKENS, 40_960);
+	assert.equal(internal.DEFAULT_RESERVE_TOKENS + internal.DEFAULT_FALLBACK_MARGIN_TOKENS, 24_576);
 
 	for (const [label, options] of [
 		["absent key", { global: {} }],
@@ -597,15 +597,15 @@ test("absent pi-context key or margins reproduce the legacy thresholds at Pi's d
 		const captured = makeExtension(sm);
 		const window = 200_000;
 		const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
-		const first = at(65_537);
-		assert.equal(await runContextHook(captured, first), undefined, `${label}: nothing injected above the legacy reminder`);
-		assert.equal(captured.sent.length, 0, `${label}: no guidance above the legacy reminder`);
-		assert.equal(await runContextHook(captured, at(65_536)), undefined, `${label}: legacy reminder crossing persists only`);
-		assert.equal(captured.sent.length, 1, `${label}: legacy reminder fires`);
-		assert.match(String(captured.sent[0]?.message.content), /only 65536 tokens remained/, label);
-		assert.equal(await runBeforeAgentStart(captured, at(40_961)), undefined, `${label}: above the legacy fallback`);
-		const fallback = await runBeforeAgentStart(captured, at(40_960));
-		assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, `${label}: legacy fallback fires`);
+		const first = at(40_961);
+		assert.equal(await runContextHook(captured, first), undefined, `${label}: nothing injected above the default reminder`);
+		assert.equal(captured.sent.length, 0, `${label}: no guidance above the default reminder`);
+		assert.equal(await runContextHook(captured, at(40_960)), undefined, `${label}: default reminder crossing persists only`);
+		assert.equal(captured.sent.length, 1, `${label}: default reminder fires`);
+		assert.match(String(captured.sent[0]?.message.content), /only 40960 tokens remained/, label);
+		assert.equal(await runBeforeAgentStart(captured, at(24_577)), undefined, `${label}: above the default fallback`);
+		const fallback = await runBeforeAgentStart(captured, at(24_576));
+		assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, `${label}: default fallback fires`);
 		assert.equal(noticesOf(first).length, 0, `${label}: valid defaults warn nobody`);
 	}
 });
@@ -655,9 +655,9 @@ test("thresholds are re-read from settings.json on session_start", async () => {
 	// Initial fallback = 16384 + 10000 = 26384; 35000 is above it.
 	assert.equal(await runBeforeAgentStart(captured, at(35_000)), undefined, "initial fallback margin");
 	// Rewrite the global settings file, then session_start must pick up the new margin.
-	writeJson(join(fixture.agentDir, "settings.json"), { [internal.PI_CONTEXT_SETTINGS_KEY]: { fallbackMarginTokens: 24_576 } });
+	writeJson(join(fixture.agentDir, "settings.json"), { [internal.PI_CONTEXT_SETTINGS_KEY]: { fallbackMarginTokens: 20_000 } });
 	runHandlers(captured, "session_start", { reason: "startup" }, at(0));
-	// New fallback = 16384 + 24576 = 40960; 35000 is now below it.
+	// New fallback = 16384 + 20000 = 36384; 35000 is now below it.
 	const fallback = await runBeforeAgentStart(captured, at(35_000));
 	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, "fallback margin re-read on session_start");
 });
@@ -672,13 +672,13 @@ test("invalid margins degrade per key with one warning and never throw", async (
 	assert.equal(notices.length, 1, "one warning for the offending key");
 	assert.equal(notices[0]?.type, "warning");
 	assert.match(notices[0]?.message ?? "", /reminderMarginTokens/);
-	assert.match(notices[0]?.message ?? "", /49152/);
+	assert.match(notices[0]?.message ?? "", /24576/);
 
 	const window = 200_000;
 	const at = (remaining: number, idle = true) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, idle, fixture.cwd);
-	// Valid fallback margin is preserved: fallback = 16384 + 10000 = 26384; reminder = 16384 + 49152 = 65536.
-	assert.equal(await runContextHook(captured, at(65_537)), undefined, "nothing injected above the degraded reminder");
-	assert.equal(await runContextHook(captured, at(65_536)), undefined, "degraded reminder uses its default");
+	// Valid fallback margin is preserved: fallback = 16384 + 10000 = 26384; reminder = 16384 + 24576 = 40960.
+	assert.equal(await runContextHook(captured, at(40_961)), undefined, "nothing injected above the degraded reminder");
+	assert.equal(await runContextHook(captured, at(40_960)), undefined, "degraded reminder uses its default");
 	assert.equal(captured.sent.length, 2, "root boot plus degraded reminder");
 	assert.equal(await runBeforeAgentStart(captured, at(26_385)), undefined);
 	const fallback = await runBeforeAgentStart(captured, at(26_384));
@@ -696,12 +696,12 @@ test("a reminder margin that does not clear the fallback degrades to its default
 	const notices = noticesOf(ctx);
 	assert.equal(notices.length, 1, "one warning for the reversed ordering");
 	assert.match(notices[0]?.message ?? "", /reminderMarginTokens/);
-	assert.match(notices[0]?.message ?? "", /49152/);
+	assert.match(notices[0]?.message ?? "", /24576/);
 
 	const at = (remaining: number, idle = true) => context(sm, undefined, { tokens: 200_000 - remaining, percent: 0, contextWindow: 200_000 }, idle, fixture.cwd);
-	// reminder = 65536, valid fallback = 16384 + 2000 = 18384.
-	assert.equal(await runContextHook(captured, at(65_537)), undefined, "nothing injected above the degraded reminder");
-	assert.equal(await runContextHook(captured, at(65_536)), undefined, "degraded reminder fires at default margin");
+	// reminder = 40960, valid fallback = 16384 + 2000 = 18384.
+	assert.equal(await runContextHook(captured, at(40_961)), undefined, "nothing injected above the degraded reminder");
+	assert.equal(await runContextHook(captured, at(40_960)), undefined, "degraded reminder fires at default margin");
 	assert.equal(captured.sent.length, 2);
 	assert.equal(await runBeforeAgentStart(captured, at(18_385)), undefined);
 	const fallback = await runBeforeAgentStart(captured, at(18_384));
@@ -719,14 +719,14 @@ test("an invalid fallback margin degrades alone without disturbing a valid remin
 	const notices = noticesOf(ctx);
 	assert.equal(notices.length, 1, "one warning for the offending fallback key");
 	assert.match(notices[0]?.message ?? "", /fallbackMarginTokens/);
-	assert.match(notices[0]?.message ?? "", /24576/);
+	assert.match(notices[0]?.message ?? "", /8192/);
 
 	const at = (remaining: number) => context(sm, undefined, { tokens: 200_000 - remaining, percent: 0, contextWindow: 200_000 }, true, fixture.cwd);
-	// reminder = 16384 + 30000 = 46384; degraded fallback = 16384 + 24576 = 40960.
+	// reminder = 16384 + 30000 = 46384; degraded fallback = 16384 + 8192 = 24576.
 	assert.equal(await runContextHook(captured, at(46_385)), undefined, "nothing injected above the valid reminder");
 	assert.equal(await runContextHook(captured, at(46_384)), undefined, "valid reminder margin still fires");
 	assert.equal(captured.sent.length, 2, "root boot plus valid reminder");
-	const fallback = await runBeforeAgentStart(captured, at(40_960));
+	const fallback = await runBeforeAgentStart(captured, at(24_576));
 	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE, "degraded fallback uses its default");
 	assert.equal(notices.length, 1);
 });
@@ -748,9 +748,9 @@ test("a fallback margin that still overwhelms the default reminder degrades too,
 	assert.match(notices[1]?.message ?? "", /fallbackMarginTokens/);
 
 	const at = (remaining: number) => context(sm, undefined, { tokens: 200_000 - remaining, percent: 0, contextWindow: 200_000 }, true, fixture.cwd);
-	// Both margins degrade to defaults, so reminder 65536 > fallback 40960 > reserve 16384 still holds.
-	assert.equal(await runBeforeAgentStart(captured, at(40_961)), undefined);
-	const fallback = await runBeforeAgentStart(captured, at(40_960));
+	// Both margins degrade to defaults, so reminder 40960 > fallback 24576 > reserve 16384 still holds.
+	assert.equal(await runBeforeAgentStart(captured, at(24_577)), undefined);
+	const fallback = await runBeforeAgentStart(captured, at(24_576));
 	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE);
 });
 
@@ -762,12 +762,12 @@ test("final fallback turn uses public turn boundaries without intercepting or re
 	const ctxAt = (remaining: number, idle = false) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, idle);
 
 	assert.equal(captured.handlers.has("input"), false, "no input copy/replay special case");
-	assert.equal(await runBeforeAgentStart(captured, ctxAt(40_961)), undefined);
-	const fallback = await runBeforeAgentStart(captured, ctxAt(40_960));
+	assert.equal(await runBeforeAgentStart(captured, ctxAt(24_577)), undefined);
+	const fallback = await runBeforeAgentStart(captured, ctxAt(24_576));
 	assert.equal(fallback?.message?.customType, internal.FALLBACK_TYPE);
 	assert.equal(fallback?.message?.display, true);
 	assert.equal(fallback?.message?.content, internal.FALLBACK_PROMPT);
-	assert.equal(await runBeforeAgentStart(captured, ctxAt(40_960)), undefined, "one fallback per window");
+	assert.equal(await runBeforeAgentStart(captured, ctxAt(24_576)), undefined, "one fallback per window");
 
 	// Fresh window re-arms the fallback.
 	const before = await runBeforeCompact(captured, ctxAt(30_000), 100, "threshold");
@@ -777,12 +777,12 @@ test("final fallback turn uses public turn boundaries without intercepting or re
 	assert.ok(compactionEntry && compactionEntry.type === "compaction");
 	runHandlers(captured, "session_compact", { reason: "threshold", willRetry: false, compactionEntry }, ctxAt(30_000));
 	assert.equal(captured.sent.length, 0, "automatic reset persists nothing; the boot block is in the summary");
-	const nextFallback = await runBeforeAgentStart(captured, ctxAt(40_960));
+	const nextFallback = await runBeforeAgentStart(captured, ctxAt(24_576));
 	assert.equal(nextFallback?.message?.customType, internal.FALLBACK_TYPE, "fallback re-armed after reset");
 
 	// A running tool chain gets the same final-call message at the ordinary turn boundary.
 	const streaming = makeExtension(sm);
-	const streamingCtx = ctxAt(40_960, false);
+	const streamingCtx = ctxAt(24_576, false);
 	runHandlers(streaming, "turn_end", {}, streamingCtx);
 	assert.equal(streaming.sent.length, 1);
 	assert.equal(streaming.sent[0]?.message.customType, internal.FALLBACK_TYPE);
@@ -793,7 +793,7 @@ test("final fallback turn uses public turn boundaries without intercepting or re
 
 	// Idle turns stay with the before_agent_start path; only streaming gets a new run.
 	const idleOnly = makeExtension(manager());
-	runHandlers(idleOnly, "turn_end", {}, ctxAt(40_960, true));
+	runHandlers(idleOnly, "turn_end", {}, ctxAt(24_576, true));
 	assert.equal(idleOnly.sent.length, 0, "turn_end fallback does not fire while idle");
 
 	// A fresh window re-arms the turn_end fallback.

@@ -20,8 +20,8 @@ const GUIDANCE_OPEN_TAG = "<context_window_guidance>";
 const GUIDANCE_CLOSE_TAG = "</context_window_guidance>";
 const PI_CONTEXT_SETTINGS_KEY = "pi-context";
 const DEFAULT_RESERVE_TOKENS = 16_384;
-const DEFAULT_REMINDER_MARGIN_TOKENS = 49_152;
-const DEFAULT_FALLBACK_MARGIN_TOKENS = 24_576;
+const DEFAULT_REMINDER_MARGIN_TOKENS = 24_576;
+const DEFAULT_FALLBACK_MARGIN_TOKENS = 8_192;
 const RESET_SUMMARY = "Context window reset. No summary was generated. Retrieve prior details through history_* and notes_*.";
 const CONTINUATION = "This is a fresh context window. Recover only the details needed to continue with history_* and notes_*; then continue the task.";
 
