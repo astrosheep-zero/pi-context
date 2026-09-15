@@ -469,30 +469,26 @@ export default function piContext(pi: ExtensionAPI) {
 			hintInjectedInWindow !== windowId &&
 			!event.messages.some((message) => message.role === "custom" && message.customType === HINT_TYPE);
 		if (needsHint) hintInjectedInWindow = windowId;
-		let guidance: string | undefined;
 		const usage = ctx.getContextUsage();
 		if (usage && usage.tokens !== null) {
 			const remaining = Math.max(0, usage.contextWindow - usage.tokens);
 			if (remaining <= thresholds().reminder && guidancePersistedInWindow !== windowId) {
 				guidancePersistedInWindow = windowId;
-				// Persist once per window, like the hint. sendMessage defers safely to end of
-				// turn while streaming (sendCustomMessage queues instead of splitting a tool
-				// call/result pair), so from the next turn on the guidance lives in history
-				// and the TUI. A transient tail copy covers the in-flight request; it is
-				// appended, static, and one-shot, so the cached prefix survives.
-				guidance = tokenBudgetGuidance(remaining);
-				pi.sendMessage({ customType: GUIDANCE_TYPE, content: guidance, display: true }, { triggerTurn: false });
+				// Persist once per window — no transient copy. A transient bridge would
+				// cover the crossing request, but history would record the reminder after
+				// that request's assistant reply, so across the boundary the model would
+				// meet the same text twice at shifted positions. The reminder is an early
+				// warning, not a per-request instruction: arriving from the next request
+				// on (sendMessage defers safely to end of turn while streaming, queueing
+				// instead of splitting a tool call/result pair) costs nothing, and the
+				// model's view stays identical to recorded history, Codex-style.
+				pi.sendMessage({ customType: GUIDANCE_TYPE, content: tokenBudgetGuidance(remaining), display: true }, { triggerTurn: false });
 			}
 		}
-		if (!needsHint && guidance === undefined) return undefined;
-		// Hint first so the fresh window's identity and note index lead the request.
-		return {
-			messages: [
-				...event.messages,
-				...(needsHint ? [userMessage(contextWindowHint(ctx))] : []),
-				...(guidance === undefined ? [] : [userMessage(guidance)]),
-			],
-		};
+		if (!needsHint) return undefined;
+		// The hint is the only transient copy: window identity and the note index
+		// must lead the fresh window's first request.
+		return { messages: [...event.messages, userMessage(contextWindowHint(ctx))] };
 	});
 
 	// Graceful fallback without intercepting user input: before a fresh prompt, if
@@ -515,10 +511,13 @@ export default function piContext(pi: ExtensionAPI) {
 
 	pi.on("turn_end", (_event, ctx) => {
 		if (!enabled) return undefined;
-		// Streaming case only: at a turn boundary inside a running agent run the
-		// queue flush cannot deliver the fallback before the next provider request,
-		// so start one final run here. The idle pre-prompt case is owned by
-		// before_agent_start above.
+		// Streaming case only: while the agent is streaming, triggerTurn:true routes
+		// to agent.steer() — Pi drains the steering queue after this turn_end and
+		// injects the message before the next LLM call, extending the current run by
+		// one note-taking turn. A queued user prompt (follow-up) drains only when the
+		// agent would stop, so it is processed after the notes turn. (Defensive: in
+		// v0.85.1 turn_end always fires inside an active run, so isIdle is never
+		// true here; the idle pre-prompt case is owned by before_agent_start above.)
 		if (ctx.isIdle()) return undefined;
 		const usage = ctx.getContextUsage();
 		if (!usage || usage.tokens === null) return;
@@ -528,9 +527,8 @@ export default function piContext(pi: ExtensionAPI) {
 		if (fallbackPersistedInWindow === windowId) return;
 		if (rollover !== "idle") return;
 		fallbackPersistedInWindow = windowId;
-		// The previous tool turn has finished; this is an ordinary new run, not a
-		// raced compaction callback. The fallback message reaches the model before
-		// the pending user input and no input text/images are copied or replayed.
+		// The steered message reaches the model before the pending user input and no
+		// input text/images are copied or replayed.
 		pi.sendMessage({ customType: FALLBACK_TYPE, content: fallbackGuidance(), display: true }, { triggerTurn: true });
 	});
 
