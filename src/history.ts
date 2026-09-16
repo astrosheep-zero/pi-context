@@ -123,7 +123,7 @@ export function visibleItem(item: HistoryItem, maxChars = 1200) {
 		role: item.role,
 		tool_namespace: item.toolNamespace ?? null,
 		tool_name: item.toolName ?? null,
-		truncated_content: characters.length > maxChars ? `${characters.slice(0, maxChars).join("")}…` : item.content,
+		truncated_content: characters.length > maxChars ? `${characters.slice(0, Math.max(0, maxChars - 1)).join("")}…` : item.content,
 	};
 }
 
@@ -131,7 +131,7 @@ export function allItems(ctx: SessionReader) {
 	return historyFromSession(ctx).flatMap((window) => window.items);
 }
 
-export function filteredItems(ctx: SessionReader, params: HistoryFilter): HistoryItem[] {
+	export function filteredItems(ctx: SessionReader, params: HistoryFilter): HistoryItem[] {
 	let items = allItems(ctx);
 	if (typeof params.window_id === "string") items = items.filter((item) => item.windowId === params.window_id);
 	if (typeof params.role === "string") items = items.filter((item) => item.role === params.role);

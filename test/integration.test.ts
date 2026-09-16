@@ -17,6 +17,8 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import piContext, { historyFromSession, internal, notesFromSession } from "../src/index.js";
+import { TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
+import { NOTE_TYPE } from "../src/protocol.js";
 
 // Settings fixtures live in temp directories. PI_CODING_AGENT_DIR is redirected for the
 // whole test process so the extension's SettingsManager.create(ctx.cwd, undefined, ...)
@@ -319,6 +321,77 @@ test("persisted note operations restore, are Unicode byte-limited, and use safe 
 		await call(captured, "notes_write_file", { path: "large", text: "é".repeat(500_001) }, ctx),
 	);
 	assert.match(tooLarge.error, /1000000/);
+});
+
+test("paged tool outputs stay bounded and cursors reconstruct history and notes", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const historyText = "历史内容-" + "x".repeat(50_000);
+	const historyIds = [appendText(session, "user", historyText), appendText(session, "user", historyText), appendText(session, "user", historyText)];
+	for (let index = 0; index < 10; index++) appendText(session, "user", historyText);
+	const historyPages: Array<{ item_id: string; truncated_content: string }> = [];
+	let offset = 0;
+	let next: number | null = 0;
+	while (next !== null) {
+		const result = resultJson<{ items: Array<{ item_id: string; truncated_content: string }>; next_offset: number | null }>(await call(captured, "history_list_items", { recent_first: false, max_chars_per_item: 1200, offset }, ctx));
+		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
+		historyPages.push(...result.items); next = result.next_offset; if (next !== null) offset = next;
+	}
+	assert.deepEqual(historyPages.filter((item) => historyIds.includes(item.item_id)).map((item) => item.item_id), historyIds);
+	const search = resultJson<{ items: Array<unknown>; next_offset: number | null }>(await call(captured, "history_search_contents", { query: "历史内容", recent_first: false, max_chars_per_item: 50_000 }, ctx));
+	assert.ok(Buffer.byteLength(JSON.stringify(search), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
+	assert.notEqual(search.next_offset, null);
+	const searchPages: Array<{ item_id: string }> = [];
+	let searchOffset = 0;
+	let searchNext: number | null = 0;
+	while (searchNext !== null) {
+		const result = resultJson<{ items: Array<{ item_id: string }>; next_offset: number | null }>(await call(captured, "history_search_contents", { query: "历史内容", recent_first: false, max_chars_per_item: 1200, offset: searchOffset }, ctx));
+		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
+		searchPages.push(...result.items); searchNext = result.next_offset; if (searchNext !== null) searchOffset = searchNext;
+	}
+	assert.equal(searchPages.length, 13);
+	assert.equal(searchNext, null);
+	const readParts: string[] = [];
+	let readOffset = 0;
+	let readNext: number | null = 0;
+	while (readNext !== null) {
+		const result = resultJson<{ content: string; total_chars: number; next_offset_chars: number | null }>(await call(captured, "history_read_item", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: historyIds[0], offset_chars: readOffset, limit_chars: 12000 }, ctx));
+		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
+		readParts.push(result.content); readNext = result.next_offset_chars; if (readNext !== null) readOffset = readNext;
+	}
+	assert.equal(readParts.join(""), historyText);
+
+	for (let index = 0; index < 100; index++) session.appendCustomEntry(NOTE_TYPE, { op: "write", path: `page-${"x".repeat(300)}-${index}.md`, text: Array.from({ length: 1000 }, (_, line) => `needle ${line} ${"z".repeat(30)}`).join("\n"), createdAt: Date.now(), updatedAt: Date.now() });
+	const listPages: string[] = [];
+	let listOffset = 0;
+	let listNext: number | null = 0;
+	while (listNext !== null) {
+		const result = resultJson<{ files: Array<{ path: string }>; next_offset: number | null }>(await call(captured, "notes_list_files_by_prefix", { prefix: null, max_results: 300, offset: listOffset }, ctx));
+		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
+		listPages.push(...result.files.map((file) => file.path)); listNext = result.next_offset; if (listNext !== null) listOffset = listNext;
+	}
+	assert.deepEqual(listPages, Array.from({ length: 100 }, (_, index) => `page-${"x".repeat(300)}-${index}.md`).sort((a, b) => a.localeCompare(b)));
+	assert.equal(listNext, null);
+	const searchFiles: Array<{ path: string; matches: Array<{ line: number; text: string }> }> = [];
+	let notesSearchOffset = 0;
+	let notesSearchNext: number | null = 0;
+	while (notesSearchNext !== null) {
+		const result = resultJson<{ files: Array<{ path: string; matches: Array<{ line: number; text: string }> }>; next_offset: number | null }>(await call(captured, "notes_search_contents", { query: "needle", max_matches_per_file: 100, max_files: 300, offset: notesSearchOffset }, ctx));
+		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
+		searchFiles.push(...result.files); notesSearchNext = result.next_offset; if (notesSearchNext !== null) notesSearchOffset = notesSearchNext;
+	}
+	assert.equal(searchFiles.length, 100); assert.equal(notesSearchNext, null);
+	const noteParts: string[] = [];
+	let noteStart = 1;
+	let noteNext: number | null = 1;
+	while (noteNext !== null) {
+		const result = resultJson<{ content: string; total_lines: number; next_start_line: number | null }>(await call(captured, "notes_read_file", { path: `page-${"x".repeat(300)}-0.md`, start_line: noteStart }, ctx));
+		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
+		noteParts.push(result.content); noteNext = result.next_start_line; if (noteNext !== null) noteStart = noteNext;
+	}
+	assert.equal(noteParts.join("\n"), Array.from({ length: 1000 }, (_, line) => `needle ${line} ${"z".repeat(30)}`).join("\n"));
+	assert.equal(noteNext, null);
 });
 
 test("custom reset boundary removes old provider context but history remains searchable", async () => {
