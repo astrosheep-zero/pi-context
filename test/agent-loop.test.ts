@@ -6,7 +6,7 @@ import test from "node:test";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import piContext from "../src/index.js";
-import { FALLBACK_TYPE, GUIDANCE_TYPE, NOTE_TYPE } from "../src/protocol.js";
+import { FALLBACK_PROMPT, FALLBACK_TYPE, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, NOTE_TYPE } from "../src/protocol.js";
 
 for (const mode of ["fallback-notes", "fallback-early", "fallback-write-error", "fallback-explicit", "fallback-overflow", "explicit", "fallback", "uncompactable", "followup", "steering", "repeat", "abort"] as const) {
 	test(`real Pi loop: ${mode} reset preserves history and handles completion`, { timeout: 15000 }, async () => {
@@ -124,8 +124,8 @@ for (const mode of ["fallback-notes", "fallback-early", "fallback-write-error", 
 				}
 				assert.equal(guidanceIndices.length, mode === "fallback-early" ? 1 : 0);
 				assert.ok(guidanceIndices.every((index) => index < fallbackIndex), "early reminder must precede fallback");
-				assert.ok(requests[checkpointTurn - 1].includes("final fallback turn"));
-				assert.ok(!requests.at(-1)!.includes("when this reminder was recorded"), "new window excludes old guidance");
+				assert.ok(requests[checkpointTurn - 1].includes(FALLBACK_PROMPT), "fallback prompt is delivered before the reset");
+				assert.ok(!requests.at(-1)!.includes(GUIDANCE_OPEN_TAG), "new window excludes old guidance");
 			}
 			if (mode === "followup" || mode === "steering") {
 				assert.ok(requests[1].includes("QUEUED_INPUT_SENTINEL"), "queued user work is delivered before rollover");

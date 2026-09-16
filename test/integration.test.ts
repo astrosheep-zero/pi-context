@@ -368,7 +368,7 @@ test("the boot notes preview keeps short notes whole and long notes head-to-tail
 	const captured = makeExtension(sessionManager);
 	const ctx = context(sessionManager);
 	// Unique Unicode code points so an overlap introduced by a naive head+tail concat is detectable.
-	const longText = Array.from({ length: 230 }, (_, index) => String.fromCharCode(0x4e00 + index)).join("");
+	const longText = Array.from({ length: 400 }, (_, index) => String.fromCharCode(0x4e00 + index)).join("");
 	const shortText = "short-first\nshort-second";
 	await call(captured, "notes_write_file", { path: "long.md", text: longText }, ctx);
 	await call(captured, "notes_write_file", { path: "short.md", text: shortText }, ctx);
@@ -380,16 +380,16 @@ test("the boot notes preview keeps short notes whole and long notes head-to-tail
 	// Short note: complete, with its newline preserved and each line indented 2 spaces.
 	assert.ok(text.includes("  short-first\n  short-second"), "short note text is shown whole and indented");
 
-	// Long note preview: exactly first 120 + separator + last 80 Unicode characters.
+	// Long note preview: exactly first 80 + separator + last 240 Unicode characters.
 	const chars = Array.from(longText);
-	const head = chars.slice(0, 120).join("");
-	const tail = chars.slice(chars.length - 80).join("");
+	const head = chars.slice(0, 80).join("");
+	const tail = chars.slice(chars.length - 240).join("");
 	const previewLine = text.split("\n").find((line) => line.startsWith("  ") && line.includes("…"));
 	assert.ok(previewLine, "long note carries an ellipsis preview line");
 	const preview = Array.from(previewLine.slice(2));
 	assert.ok(previewLine.includes(head), "long preview keeps the head");
 	assert.ok(previewLine.includes(tail), "long preview keeps the tail");
-	assert.equal(preview.length, 201, "head 120 + one separator + tail 80, nothing duplicated");
+	assert.equal(preview.length, 321, "head 80 + one separator + tail 240, nothing duplicated");
 	assert.equal(previewLine.includes(longText), false, "long note is truncated, not shown whole");
 });
 
@@ -536,9 +536,7 @@ test("low-budget guidance persists once per window with no transient copy", asyn
 	assert.equal(captured.sent[0]?.options?.triggerTurn, false, "never triggers an extra turn");
 	const text = captured.sent[0]?.message.content;
 	assert.ok(typeof text === "string" && text.startsWith(internal.GUIDANCE_OPEN_TAG));
-	assert.match(text, /Context budget is running low/);
-	assert.match(text, /only 0 tokens remained when this reminder was recorded/);
-	assert.match(text, /does not guarantee another note-taking turn/);
+	assert.match(text, /\b0 tokens\b/, "guidance embeds the measured remaining count");
 
 	// Same window: no duplicate persist.
 	assert.equal(await runContextHook(captured, low), undefined);
@@ -553,7 +551,7 @@ test("low-budget guidance persists once per window with no transient copy", asyn
 	assert.equal(captured.sent.length, 2);
 	const newWindowText = captured.sent[1]?.message.content;
 	assert.ok(typeof newWindowText === "string" && newWindowText.startsWith(internal.GUIDANCE_OPEN_TAG));
-	assert.match(newWindowText, /only 0 tokens remained when this reminder was recorded/, "fresh window persists its own measured count");
+	assert.match(newWindowText, /\b0 tokens\b/, "fresh window persists its own measured count");
 });
 
 test("new_context continues exactly once and cancellation/failure does not fall back or loop", async () => {
@@ -838,7 +836,7 @@ test("the reminder threshold derives from compaction.reserveTokens plus the pi-c
 	assert.equal(captured.sent.length, 0, "no guidance above the derived reminder");
 	assert.equal(await runContextHook(captured, at(130_000)), undefined, "derived reminder crossing persists only");
 	assert.equal(captured.sent.length, 1, "derived reminder fires");
-	assert.match(String(captured.sent[0]?.message.content), /only 30000 tokens remained when this reminder was recorded/);
+	assert.match(String(captured.sent[0]?.message.content), /\b30000 tokens\b/, "derived reminder embeds the measured remaining count");
 });
 
 test("absent pi-context key or margins reproduce the default reminder threshold at Pi's default reserve", async () => {
@@ -859,7 +857,7 @@ test("absent pi-context key or margins reproduce the default reminder threshold 
 		assert.equal(captured.sent.length, 0, `${label}: no guidance above the default reminder`);
 		assert.equal(await runContextHook(captured, at(40_960)), undefined, `${label}: default reminder crossing persists only`);
 		assert.equal(captured.sent.length, 1, `${label}: default reminder fires`);
-		assert.match(String(captured.sent[0]?.message.content), /only 24576 tokens remained/, label);
+		assert.match(String(captured.sent[0]?.message.content), /\b24576 tokens\b/, label);
 		assert.equal(noticesOf(first).length, 0, `${label}: valid defaults warn nobody`);
 	}
 });

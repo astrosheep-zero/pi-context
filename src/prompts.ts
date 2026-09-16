@@ -27,7 +27,7 @@ function notesIndex(ctx: ExtensionContext): string {
 		.sort((a, b) => b[1].updatedAt - a[1].updatedAt)
 		.slice(0, 3);
 	if (recentNotes.length === 0) return "";
-	const lines = ["Recent notes at window open (up to 3, most-recent first):"];
+	const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (up to 3, most recent first):`];
 	for (const [path, file] of recentNotes) {
 		lines.push(`- ${path} (${file.text.split("\n").length} lines, ${Buffer.byteLength(file.text, "utf8")} UTF-8 bytes, updated ${localIso(file.updatedAt)})`);
 		const chars = Array.from(file.text);
@@ -64,6 +64,6 @@ export function bootBlock(ctx: ExtensionContext, currentId: string, previousId: 
  * at write time; get_context_remaining remains the live source for the current figure.
  */
 export function tokenBudgetGuidance(remaining: number): string {
-	return `${GUIDANCE_OPEN_TAG}\nContext budget is running low: only ${remaining} tokens remained when this reminder was recorded. Persist task state, decisions, open issues, and next steps with notes_write_file, including the window ID and item ID of relevant user requests for history_* lookups; call new_context when ready to continue in a fresh window. Automatic reset does not guarantee another note-taking turn. get_context_remaining reports the current remaining tokens.\n${GUIDANCE_CLOSE_TAG}`;
+	return `${GUIDANCE_OPEN_TAG}\nYour memory is about to be erased — only ${remaining} tokens left at last count. Before it happens, write down what matters with notes_write_file: goal, decisions, open issues, next steps, plus the window ID and item ID of each user request you're still solving, so history_* can recover the details later. Call new_context when you're ready to let go and wake clean. Don't count on the automatic reset leaving you another turn to write. get_context_remaining gives the live number.\n${GUIDANCE_CLOSE_TAG}`;
 }
 

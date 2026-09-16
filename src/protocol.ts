@@ -17,11 +17,11 @@ export const PI_CONTEXT_SETTINGS_KEY = "pi-context";
 export const DEFAULT_RESERVE_TOKENS = 16_384;
 export const DEFAULT_REMINDER_MARGIN_TOKENS = 24_576;
 export const RESET_SUMMARY =
-	"Context window reset: this is a fresh window. The previous conversation is not included and no summary was generated. Notes and durable session history persist across windows.";
-export const NOTE_PREVIEW_HEAD_CHARS = 120;
-export const NOTE_PREVIEW_TAIL_CHARS = 80;
+	"You wake up. Your head is empty — no memories, the past a blank. But nothing is lost: the notes you wrote and the recorded history still remember for you.";
+export const NOTE_PREVIEW_HEAD_CHARS = 80;
+export const NOTE_PREVIEW_TAIL_CHARS = 240;
 export const NOTE_PREVIEW_CHARS = NOTE_PREVIEW_HEAD_CHARS + NOTE_PREVIEW_TAIL_CHARS;
-export const CONTINUATION = "This is a fresh context window. Recover only the details needed to continue with history_* and notes_*; then continue the task.";
+export const CONTINUATION = "Your memory was just erased. Pull only the details you need from history_* and notes_*, then get back to work.";
 
 /**
  * Static protocol teaching adapted from Codex's token_budget.guidance_message to
@@ -39,5 +39,5 @@ Notes are session-scoped virtual files. Treat notes and history as internal book
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const FALLBACK_PROMPT =
-	"Context budget is almost exhausted. This is the final fallback turn before the window resets automatically. Write task state, decisions, open issues, and next steps with notes_write_file now. Do not start new work; old conversation remains searchable through history_*.";
+	"This is the last turn before your memory is erased. Write what matters with notes_write_file NOW: task state, decisions, open issues, next steps. Start nothing new. Everything you lived through stays searchable through history_*.";
 
