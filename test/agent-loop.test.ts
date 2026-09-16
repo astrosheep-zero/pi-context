@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import piContext from "../src/index.js";
+import { FALLBACK_TYPE, GUIDANCE_TYPE, NOTE_TYPE } from "../src/protocol.js";
 
-for (const mode of ["explicit", "fallback", "uncompactable", "followup", "steering", "repeat", "abort"] as const) {
+for (const mode of ["fallback-notes", "fallback-early", "fallback-write-error", "fallback-explicit", "fallback-overflow", "explicit", "fallback", "uncompactable", "followup", "steering", "repeat", "abort"] as const) {
 	test(`real Pi loop: ${mode} reset preserves history and handles completion`, { timeout: 15000 }, async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-context-loop-"));
 		const previousDir = process.env.PI_CODING_AGENT_DIR;
@@ -19,17 +20,24 @@ for (const mode of ["explicit", "fallback", "uncompactable", "followup", "steeri
 			const base = runtime.getModels("openai")[0];
 			assert.ok(base);
 			const model = { ...base, contextWindow: 100000, maxTokens: 4096 };
-			const settingsManager = SettingsManager.inMemory({ compaction: { enabled: mode === "fallback", reserveTokens: 16384, keepRecentTokens: mode === "uncompactable" ? 1 : 200 }, retry: { enabled: false } });
+			const fallbackMode = mode.startsWith("fallback");
+			const checkpointMode = fallbackMode && mode !== "fallback";
+			const checkpointTurn = mode === "fallback-early" ? 3 : 2;
+			const settings = { compaction: { enabled: fallbackMode, reserveTokens: 32768, keepRecentTokens: mode === "uncompactable" ? 1 : 200 }, retry: { enabled: false } };
+			writeFileSync(join(dir, "settings.json"), JSON.stringify(settings));
+			const settingsManager = SettingsManager.create(dir, dir);
 			let resets = 0;
 			let settled = 0;
 			let finish!: () => void;
-			const finished = new Promise<void>((resolve) => { finish = resolve; });
+			let failFinish!: (error: Error) => void;
+			const finished = new Promise<void>((resolve, reject) => { finish = resolve; failFinish = reject; });
+			const finishTimeout = setTimeout(() => failFinish(new Error(`timed out waiting for ${mode} agent settlement`)), 5000);
 			const loader = new DefaultResourceLoader({ cwd: dir, agentDir: dir, settingsManager,
 				noExtensions: true, noSkills: true, noThemes: true, noPromptTemplates: true,
 				systemPromptOverride: () => "Use the tools as requested.", agentsFilesOverride: () => ({ agentsFiles: [] }),
 				extensionFactories: [piContext, (pi) => {
 					pi.on("session_compact", () => { resets++; });
-					pi.on("agent_settled", () => { if (++settled % 2 === 0 || mode === "abort") finish(); });
+					pi.on("agent_settled", () => { if (++settled % 2 === 0 || mode === "abort" || (checkpointMode && resets === 1)) finish(); });
 					pi.on("tool_result", () => {
 						if (mode === "abort") void session!.abort();
 					});
@@ -45,20 +53,25 @@ for (const mode of ["explicit", "fallback", "uncompactable", "followup", "steeri
 			sm.appendMessage({ role: "assistant", api: model.api, provider: model.provider, model: model.id,
 				content: [{ type: "text", text: "Earlier result. ".repeat(100) }], stopReason: "stop", timestamp: Date.now(),
 				usage: { input: 100, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 200, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
-			({ session } = await createAgentSession({ cwd: dir, agentDir: dir, modelRuntime: runtime, model, settingsManager, sessionManager: sm, resourceLoader: loader, tools: ["new_context"] }));
+			({ session } = await createAgentSession({ cwd: dir, agentDir: dir, modelRuntime: runtime, model, settingsManager, sessionManager: sm, resourceLoader: loader, tools: ["new_context", "notes_write_file", "get_context_remaining"] }));
 			const requests: string[] = [];
 			session.agent.streamFunction = (_model, context) => {
 				requests.push(JSON.stringify(context.messages));
 				const first = requests.length === 1;
-				const tool = (first && mode !== "fallback") || (mode === "repeat" && requests.length === 3);
-				const tokens = first && mode === "fallback" ? 90000 : 100;
+				const note = checkpointMode && requests.length === checkpointTurn;
+				const earlyProbe = (mode === "fallback-early" && first) || (mode === "fallback-notes" && requests.length === 4);
+				const explicitFallback = mode === "fallback-explicit" && requests.length === checkpointTurn + 1;
+				const tool = note || earlyProbe || explicitFallback || (first && !fallbackMode) || (mode === "repeat" && requests.length === 3);
+				const tokens = earlyProbe ? 50000 : (first && fallbackMode) || (mode === "fallback-early" && requests.length === 2) || (note && mode !== "fallback-explicit") ? 90000 : 100;
+				const overflow = mode === "fallback-overflow" && first;
 				const message: AssistantMessage = { role: "assistant", api: model.api, provider: model.provider, model: model.id,
-					content: tool ? [{ type: "toolCall", id: "reset-call", name: "new_context", arguments: {} }] : [{ type: "text", text: first ? "Checkpoint ready." : "Resumed." }],
-					stopReason: tool ? "toolUse" : "stop", timestamp: Date.now(),
+					content: earlyProbe ? [{ type: "toolCall", id: "budget-call", name: "get_context_remaining", arguments: {} }] : note ? [{ type: "toolCall", id: "checkpoint-call", name: "notes_write_file", arguments: { path: mode === "fallback-write-error" ? "../invalid.md" : "checkpoint.md", text: "CHECKPOINT_SENTINEL" } }] : tool ? [{ type: "toolCall", id: "reset-call", name: "new_context", arguments: {} }] : [{ type: "text", text: first ? "Checkpoint ready." : "Resumed." }],
+					stopReason: overflow ? "error" : tool ? "toolUse" : "stop", ...(overflow ? { errorMessage: "maximum context length is 100000 tokens" } : {}), timestamp: Date.now(),
 					usage: { input: tokens, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: tokens + 1, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
 				};
 				const stream = createAssistantMessageEventStream();
-				stream.push({ type: "done", reason: message.stopReason as "stop" | "toolUse", message });
+				if (overflow) stream.push({ type: "error", reason: "error", error: message });
+				else stream.push({ type: "done", reason: message.stopReason as "stop" | "toolUse", message });
 				stream.end();
 				return stream;
 			};
@@ -72,6 +85,7 @@ for (const mode of ["explicit", "fallback", "uncompactable", "followup", "steeri
 			});
 			await session.prompt("OLD_CONTEXT_SENTINEL: save progress and continue the task.");
 			await finished;
+			clearTimeout(finishTimeout);
 			await session.waitForIdle();
 			if (mode === "abort") {
 				assert.equal(resets, 0, "user cancellation clears pending rollover");
@@ -91,7 +105,28 @@ for (const mode of ["explicit", "fallback", "uncompactable", "followup", "steeri
 				return;
 			}
 			assert.equal(resets, 1);
-			assert.equal(requests.length, ["fallback", "followup", "steering"].includes(mode) ? 3 : 2);
+			const expectedRequests = mode === "fallback-early" || mode === "fallback-explicit" ? 4 : fallbackMode || mode === "followup" || mode === "steering" ? 3 : 2;
+			assert.equal(requests.length, expectedRequests);
+			if (checkpointMode) {
+				const branch = sm.getBranch();
+				const fallbackIndex = branch.findIndex((entry) => entry.type === "custom_message" && entry.customType === FALLBACK_TYPE);
+				const noteIndex = branch.findIndex((entry) => entry.type === "custom" && entry.customType === NOTE_TYPE);
+				const resetIndex = branch.findIndex((entry) => entry.type === "compaction");
+				const guidanceIndices = branch.flatMap((entry, i) => entry.type === "custom_message" && entry.customType === GUIDANCE_TYPE ? [i] : []);
+				assert.ok(fallbackIndex >= 0 && resetIndex > fallbackIndex);
+				if (mode === "fallback-write-error") {
+					assert.equal(noteIndex, -1, "failed write creates no checkpoint");
+					assert.ok(branch.some((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "notes_write_file" && entry.message.isError));
+					assert.ok(!requests.at(-1)!.includes("CHECKPOINT_SENTINEL"), "fresh context must not invent a saved note");
+				} else {
+					assert.ok(noteIndex > fallbackIndex && resetIndex > noteIndex, "fallback → durable checkpoint → reset");
+					assert.ok(requests.at(-1)!.includes("CHECKPOINT_SENTINEL"), "fresh boot carries the saved checkpoint");
+				}
+				assert.equal(guidanceIndices.length, mode === "fallback-early" ? 1 : 0);
+				assert.ok(guidanceIndices.every((index) => index < fallbackIndex), "early reminder must precede fallback");
+				assert.ok(requests[checkpointTurn - 1].includes("final fallback turn"));
+				assert.ok(!requests.at(-1)!.includes("when this reminder was recorded"), "new window excludes old guidance");
+			}
 			if (mode === "followup" || mode === "steering") {
 				assert.ok(requests[1].includes("QUEUED_INPUT_SENTINEL"), "queued user work is delivered before rollover");
 				assert.ok(requests[1].includes("OLD_CONTEXT_SENTINEL"), "queue drains in the existing window");
@@ -114,6 +149,15 @@ for (const mode of ["explicit", "fallback", "uncompactable", "followup", "steeri
 			assert.ok(!requests.at(-1)!.includes("OLD_CONTEXT_SENTINEL"));
 			assert.ok(requests.at(-1)!.includes("context_window"));
 			assert.ok(JSON.stringify(session.sessionManager.getBranch()).includes("OLD_CONTEXT_SENTINEL"));
+			if (mode === "fallback-notes") {
+				await session.prompt("Keep working in the new window until its reminder threshold.");
+				assert.equal(resets, 1);
+				const branch = sm.getBranch();
+				const boundary = branch.findIndex((entry) => entry.type === "compaction");
+				const reminders = branch.flatMap((entry, i) => entry.type === "custom_message" && entry.customType === GUIDANCE_TYPE ? [i] : []);
+				assert.equal(reminders.length, 1, "the next window gets its own reminder");
+				assert.ok(reminders[0] > boundary, "old fallback cannot suppress a new window's reminder");
+			}
 		} finally {
 			session?.dispose();
 			if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;

@@ -1096,3 +1096,41 @@ test("JSONL reload retains once-per-window boot and reminder without runtime mem
 	assert.equal(messages.filter((entry) => entry.customType === internal.BOOT_TYPE).length, 1);
 	assert.equal(messages.filter((entry) => entry.customType === internal.GUIDANCE_TYPE).length, 1);
 });
+
+
+test("fallback guidance supersedes the early reminder when usage jumps across both thresholds", async () => {
+	const sm = manager();
+	appendText(sm, "user", "ongoing work");
+	const captured = makeExtension(sm);
+	const ctx = context(sm, undefined, { tokens: 199_000, percent: 99.5, contextWindow: 200_000 }, false);
+	assert.deepEqual(await runBeforeCompact(captured, ctx, 199_000, "threshold"), { cancel: true });
+	runHandlers(captured, "context", {}, ctx);
+	assert.deepEqual(captured.sent.map((entry) => entry.message.customType), [internal.FALLBACK_TYPE]);
+	const reloaded = makeExtension(sm);
+	runHandlers(reloaded, "context", {}, ctx);
+	assert.equal(reloaded.sent.length, 0, "persisted fallback also suppresses a late reminder after reload");
+});
+
+
+test("fallback suppression is branch-local and survives toggling without becoming permanent", async () => {
+	const sm = manager();
+	appendText(sm, "user", "branch anchor");
+	const anchor = sm.getLeafId()!;
+	const captured = makeExtension(sm);
+	const ctx = context(sm, undefined, { tokens: 199_000, percent: 99.5, contextWindow: 200_000 }, false);
+	await runBeforeCompact(captured, ctx, 199_000, "threshold");
+	const fallbackLeaf = sm.getLeafId()!;
+	await runCommand(captured, "pi-context", "off", ctx);
+	await runCommand(captured, "pi-context", "on", ctx);
+	runHandlers(captured, "context", {}, ctx);
+	assert.equal(captured.sent.length, 1, "toggle does not revive an obsolete reminder");
+	sm.branch(anchor);
+	runHandlers(captured, "session_tree", {}, ctx);
+	runHandlers(captured, "context", {}, ctx);
+	assert.equal(captured.sent.length, 2);
+	assert.equal(captured.sent[1].message.customType, internal.GUIDANCE_TYPE, "sibling without fallback still needs its early reminder");
+	sm.branch(fallbackLeaf);
+	runHandlers(captured, "session_tree", {}, ctx);
+	runHandlers(captured, "context", {}, ctx);
+	assert.equal(captured.sent.length, 2, "returning to fallback branch remains suppressed");
+});

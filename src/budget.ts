@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, GUIDANCE_TYPE } from "./protocol.js";
+import { PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, GUIDANCE_TYPE, FALLBACK_TYPE } from "./protocol.js";
 import { currentWindowId, hasWindowMessage } from "./history.js";
 import { tokenBudgetGuidance } from "./prompts.js";
 import { output } from "./tool-output.js";
@@ -82,7 +82,7 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean) {
 	pi.on("session_start", (_event, ctx) => { thresholds = undefined; guidancePersistedInWindow = undefined; resolveThresholds(ctx); });
 	pi.on("session_tree", () => { guidancePersistedInWindow = undefined; });
 	pi.on("context", (_event, ctx) => {
-		if (!isEnabled()) return undefined;
+		if (!isEnabled() || hasWindowMessage(ctx, FALLBACK_TYPE)) return undefined;
 		// This hook does exactly one thing: persist the once-per-window low-budget
 		// reminder the first time remaining context crosses the reminder threshold.
 		// It never injects messages into the request.
