@@ -1,6 +1,6 @@
 {
   "name": "@astrosheep/pi-context",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "type": "module",
   "description": "Codex-style context windows for Pi: reset-style compaction, durable session history tools, and persistent notes.",
   "license": "MIT",
@@ -20,13 +20,14 @@
   },
   "files": [
     "src",
+    "docs",
     "LICENSE",
     "README.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/test/integration.test.js",
+    "test": "npm run build && node --test dist/test/*.test.js",
     "prepublishOnly": "npm run typecheck"
   },
   "peerDependencies": {

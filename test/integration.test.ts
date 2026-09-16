@@ -3,13 +3,14 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
 	type ContextUsage,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	type ExtensionContext,
 	type RegisteredCommand,
+	AgentSession,
 	SessionManager,
 	SettingsManager,
 	type SessionCompactEvent,
@@ -135,17 +136,19 @@ function context(
 	projectTrusted = true,
 ): ExtensionContext {
 	const notices: Notice[] = [];
-	const fake: Pick<ExtensionContext, "sessionManager" | "getContextUsage" | "compact" | "isIdle" | "cwd" | "isProjectTrusted" | "ui"> = {
+	const compactionRequests: Array<Parameters<ExtensionContext["compact"]>[0]> = [];
+	const fake: Pick<ExtensionContext, "sessionManager" | "getContextUsage" | "compact" | "isIdle" | "hasPendingMessages" | "cwd" | "isProjectTrusted" | "ui"> = {
 		sessionManager,
 		getContextUsage: () => usage,
-		compact: compact ?? (() => {}),
+		compact: (options) => { compactionRequests.push(options); compact?.(options); },
 		isIdle: () => idle,
+		hasPendingMessages: () => false,
 		cwd,
 		isProjectTrusted: () => projectTrusted,
 		ui: { notify: (message: string, type?: Notice["type"]) => notices.push({ message, type }) } as unknown as ExtensionContext["ui"],
 	};
 	// Only the members the extension reads; the rest of the ExtensionContext surface is unused.
-	return Object.assign(fake as unknown as ExtensionContext, { notices });
+	return Object.assign(fake as unknown as ExtensionContext, { notices, compactionRequests });
 }
 
 function noticesOf(ctx: ExtensionContext): Notice[] {
@@ -200,7 +203,21 @@ async function runBeforeCompact(
 }
 
 function runHandlers(captured: Captured, name: string, event: unknown, ctx: ExtensionContext): void {
-	for (const handler of captured.handlers.get(name) ?? []) handler(event as never, ctx);
+	const isIdle = ctx.isIdle;
+	if (name === "agent_settled") ctx.isIdle = () => true;
+	try {
+		for (const handler of captured.handlers.get(name) ?? []) handler(event as never, ctx);
+	} finally { ctx.isIdle = isIdle; }
+}
+
+function completeRequestedCompaction(ctx: ExtensionContext): void {
+	const requests = (ctx as ExtensionContext & { compactionRequests: Array<Parameters<ExtensionContext["compact"]>[0]> }).compactionRequests;
+	const options = requests.shift();
+	assert.ok(options?.onComplete, "a reset request has a completion callback");
+	const isIdle = ctx.isIdle;
+	ctx.isIdle = () => true;
+	try { options.onComplete({} as Parameters<NonNullable<typeof options.onComplete>>[0]); }
+	finally { ctx.isIdle = isIdle; }
 }
 
 async function runCommand(captured: Captured, name: string, args: string, ctx: ExtensionContext): Promise<Notice[]> {
@@ -405,6 +422,7 @@ test("the boot block is persisted at the root and baked into every reset summary
 	// Reset: the boot block IS the compaction summary; no separate boot/hint is persisted.
 	await call(captured, "new_context", {}, ctx);
 	runHandlers(captured, "agent_end", {}, ctx);
+	runHandlers(captured, "agent_settled", {}, ctx);
 	const before = await runBeforeCompact(captured, ctx, 9);
 	assert.ok(before && "compaction" in before);
 	const details = before.compaction.details as { piContext: string; windowId: string };
@@ -423,6 +441,7 @@ test("the boot block is persisted at the root and baked into every reset summary
 	const compactionEntry = sessionManager.getEntry(compactionId);
 	assert.ok(compactionEntry && compactionEntry.type === "compaction");
 	runHandlers(captured, "session_compact", { willRetry: false, compactionEntry }, ctx);
+	completeRequestedCompaction(ctx);
 
 	// Only the hidden continuation follows a reset; no pi-context/boot message is written.
 	assert.equal(captured.sent.length, 2);
@@ -548,7 +567,9 @@ test("new_context continues exactly once and cancellation/failure does not fall 
 	const newContext = await call(captured, "new_context", {}, ctx);
 	assert.equal(newContext.terminate, true);
 	runHandlers(captured, "agent_end", {}, ctx);
-	assert.ok(requestedCompact, "manual compaction is deferred until agent_end/tool result boundary");
+	assert.equal(requestedCompact, undefined, "agent_end does not request compaction while the run is active");
+	runHandlers(captured, "agent_settled", {}, ctx);
+	assert.ok(requestedCompact, "manual compaction is deferred until agent_settled");
 
 	const before = await runBeforeCompact(captured, ctx, 7);
 	assert.ok(before && "compaction" in before);
@@ -558,6 +579,8 @@ test("new_context continues exactly once and cancellation/failure does not fall 
 	const compactEvent: Pick<SessionCompactEvent, "willRetry" | "compactionEntry"> = { willRetry: false, compactionEntry };
 	runHandlers(captured, "session_compact", compactEvent, ctx);
 	runHandlers(captured, "session_compact", compactEvent, ctx);
+	assert.equal(captured.sent.length, 0, "the hook never starts a run while compaction is active");
+	completeRequestedCompaction(ctx);
 	assert.equal(captured.sent.length, 1, "exactly one hidden continuation and no hint");
 	assert.equal(captured.sent[0]?.message.display, false);
 	assert.equal(captured.sent[0]?.options?.triggerTurn, true);
@@ -570,6 +593,7 @@ test("new_context continues exactly once and cancellation/failure does not fall 
 	});
 	await call(failed, "new_context", {}, failedCtx);
 	runHandlers(failed, "agent_end", {}, failedCtx);
+	runHandlers(failed, "agent_settled", {}, failedCtx);
 	assert.ok(failureOptions?.onError);
 	failureOptions.onError(new Error("not compactable"));
 	runHandlers(failed, "session_compact", compactEvent, failedCtx);
@@ -615,8 +639,7 @@ test("pi-context command toggles the boot block, guidance, and reset compaction 
 	notices = await runCommand(captured, "pi-context", "on", low);
 	assert.match(notices[0]?.message ?? "", /on/);
 	runHandlers(captured, "session_start", { reason: "startup" }, low);
-	assert.equal(captured.sent.length, 3, "boot block persisted again after re-enable");
-	assert.equal(captured.sent[2]?.message.customType, internal.BOOT_TYPE);
+	assert.equal(captured.sent.length, 2, "re-enable preserves the existing boot block without duplication");
 
 	notices = await runCommand(captured, "pi-context", "maybe", low);
 	assert.equal(notices[0]?.type, "error", "unknown argument rejected");
@@ -663,11 +686,12 @@ test("compaction paths reset directly or borrow one run, then bake the boot bloc
 				const id = sm.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 100, details, true);
 				const compactionEntry = sm.getEntry(id);
 				assert.ok(compactionEntry && compactionEntry.type === "compaction");
-				const event = { reason, willRetry: reason === "overflow", compactionEntry };
+				const event = { reason: !idle && reason !== "manual" ? "manual" : reason, willRetry: idle && reason === "overflow", compactionEntry };
 				runHandlers(captured, "session_compact", event, ctx);
 				runHandlers(captured, "session_compact", event, ctx);
-				// Only borrowed-turn steers are ever sent: no continuation and no hint.
-				assert.equal(captured.sent.filter((m) => m.message.customType !== internal.FALLBACK_TYPE).length, 0, `${reason}, idle=${idle}: no continuation and no hint`);
+				// Extension-requested resets resume after completion; native resets do not.
+				if (reason !== "manual" && !idle) completeRequestedCompaction(ctx);
+				assert.equal(captured.sent.filter((m) => m.message.customType !== internal.FALLBACK_TYPE).length, reason !== "manual" && !idle ? window + 1 : 0);
 			}
 		}
 	}
@@ -741,19 +765,23 @@ test("overflow re-triggers the reset through ctx.compact() once, and manual/new_
 	const details = second.compaction.details as { piContext: string; windowId: string };
 	const id = sm.appendCompaction(second.compaction.summary, second.compaction.firstKeptEntryId, 100, details, true);
 	runHandlers(captured, "session_compact", { reason: "manual", willRetry: false, compactionEntry: sm.getEntry(id) }, ctx);
+	completeRequestedCompaction(ctx);
+	assert.equal(captured.sent.length, 2, "fallback reset resumes with one continuation");
 
 	// User /compact resets directly.
 	const manual = await runBeforeCompact(captured, ctx, 100, "manual");
 	assert.ok(manual && "compaction" in manual, "manual compaction is never intercepted");
-	assert.equal(captured.sent.length, 1, "manual compaction sends nothing");
+	assert.equal(captured.sent.length, 2, "manual compaction sends nothing");
 
-	// new_context keeps its own requested -> agent_end -> ctx.compact() path.
+	// new_context requests its reset after the run settles.
 	await call(captured, "new_context", {}, ctx);
 	runHandlers(captured, "agent_end", {}, ctx);
+	assert.equal(compactions, 1, "new_context waits for settled");
+	runHandlers(captured, "agent_settled", {}, ctx);
 	assert.equal(compactions, 2, "new_context still compacts through ctx.compact()");
 	const explicit = await runBeforeCompact(captured, ctx, 100, "manual");
 	assert.ok(explicit && "compaction" in explicit, "new_context reset is allowed");
-	assert.equal(captured.sent.length, 1, "new_context never cancels or emits a fallback steer");
+	assert.equal(captured.sent.length, 2, "new_context never cancels or emits a fallback steer");
 });
 
 test("an idle pre-prompt automatic crossing resets directly instead of starting a nested run", async () => {
@@ -941,6 +969,47 @@ test("the removed pre-prompt/turn_end fallback no longer exists; only session_be
 	assert.equal(captured.sent.length, 1, "one cancel, one steer, one real compaction");
 });
 
+test("ordinary new_context and calls inside fallback request one reset and start a fresh run", async () => {
+	for (const reason of [undefined, "threshold", "overflow"] as const) {
+		const sm = manager();
+		appendText(sm, "user", "work to continue after reset");
+		const captured = makeExtension(sm);
+		let compactions = 0;
+		const ctx = context(sm, () => { compactions++; }, undefined, false);
+		if (reason) assert.deepEqual(await runBeforeCompact(captured, ctx, 100, reason), { cancel: true });
+		const request = await call(captured, "new_context", {}, ctx);
+		assert.equal(request.terminate, true, "end the current tool loop before reset");
+		runHandlers(captured, "agent_end", {}, ctx);
+		assert.equal(compactions, 0, "no request before settled");
+		runHandlers(captured, "agent_settled", {}, ctx);
+		runHandlers(captured, "agent_settled", {}, ctx);
+		assert.equal(compactions, 1, "explicit reset consumes the fallback allowance");
+		const before = await runBeforeCompact(captured, ctx, 100, "manual");
+		assert.ok(before && "compaction" in before);
+		const id = sm.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 100, before.compaction.details, true);
+		const event = { willRetry: false, compactionEntry: sm.getEntry(id) };
+		runHandlers(captured, "session_compact", event, ctx);
+		runHandlers(captured, "session_compact", event, ctx);
+		runHandlers(captured, "agent_settled", {}, ctx);
+		assert.equal(compactions, 1, "no second reset after success");
+		completeRequestedCompaction(ctx);
+		const continuations = captured.sent.filter((sent) => sent.message.customType !== internal.FALLBACK_TYPE);
+		assert.equal(continuations.length, 1, "explicit request still owns exactly one continuation");
+		const continuation = continuations[0]!;
+		assert.equal(continuation.options?.triggerTurn, true);
+		// Exercise Pi's real custom-message routing after the old run has settled.
+		// The prompt endpoint is stubbed; no provider request is made.
+		const prompts: unknown[] = [];
+		const runtime = {
+			isStreaming: false,
+			_runAgentPrompt: async (message: unknown) => { prompts.push(message); },
+			agent: { steer: () => assert.fail("continuation must start a run, not wait in a steer queue") },
+		};
+		await AgentSession.prototype.sendCustomMessage.call(runtime as unknown as AgentSession, continuation.message, continuation.options);
+		assert.equal(prompts.length, 1, "Pi starts a fresh prompt without another user message");
+	}
+});
+
 test("new_context can reset successive windows without duplicate compactions or continuations", async () => {
 	const sm = manager();
 	const captured = makeExtension(sm);
@@ -952,6 +1021,9 @@ test("new_context can reset successive windows without duplicate compactions or 
 		assert.equal(request.status, "rollover_requested");
 		runHandlers(captured, "agent_end", {}, ctx);
 		runHandlers(captured, "agent_end", {}, ctx);
+		assert.equal(compactions, window, "agent_end only arms the reset");
+		runHandlers(captured, "agent_settled", {}, ctx);
+		runHandlers(captured, "agent_settled", {}, ctx);
 		assert.equal(compactions, window + 1);
 		const before = await runBeforeCompact(captured, ctx, 100);
 		assert.ok(before && "compaction" in before);
@@ -959,6 +1031,68 @@ test("new_context can reset successive windows without duplicate compactions or 
 		const event = { willRetry: false, compactionEntry: sm.getEntry(id) };
 		runHandlers(captured, "session_compact", event, ctx);
 		runHandlers(captured, "session_compact", event, ctx);
+		completeRequestedCompaction(ctx);
 		assert.equal(captured.sent.length, window + 1, "one continuation per explicit reset, and no hint");
 	}
+});
+
+
+test("boot and guidance deduplicate across extension reload while a new branch can receive them", () => {
+	const sm = manager();
+	appendText(sm, "user", "branch anchor");
+	const anchor = sm.getLeafId()!;
+	const ctx = context(sm, undefined, { tokens: 190_000, percent: 95, contextWindow: 200_000 });
+	const first = makeExtension(sm);
+	runHandlers(first, "session_start", {}, ctx);
+	runHandlers(first, "context", {}, ctx);
+	assert.equal(first.sent.length, 2);
+	const reloaded = makeExtension(sm);
+	runHandlers(reloaded, "session_start", {}, ctx);
+	runHandlers(reloaded, "context", {}, ctx);
+	assert.equal(reloaded.sent.length, 0, "persisted messages survive runtime replacement");
+	sm.branch(anchor);
+	runHandlers(first, "session_tree", {}, ctx);
+	runHandlers(first, "context", {}, ctx);
+	assert.equal(first.sent.length, 3, "same runtime releases the previous branch's reminder reservation");
+	const fork = makeExtension(sm);
+	runHandlers(fork, "session_start", {}, ctx);
+	runHandlers(fork, "context", {}, ctx);
+	assert.equal(fork.sent.length, 1, "sibling boot is created; this branch's reminder already exists");
+});
+
+test("malformed persisted note timestamps are ignored without poisoning valid notes or boot rendering", async () => {
+	const sm = manager();
+	const ctx = context(sm);
+	const extension = makeExtension(sm);
+	await call(extension, "notes_write_file", { path: "good.md", text: "keep me" }, ctx);
+	for (const time of [NaN, Infinity, -Infinity, 9e15]) {
+		sm.appendCustomEntry(internal.NOTE_TYPE, { op: "write", path: "good.md", text: "corrupted", createdAt: time, updatedAt: time });
+	}
+	assert.equal(notesFromSession(ctx).get("good.md")?.text, "keep me");
+	runHandlers(extension, "session_start", {}, ctx);
+	assert.ok(JSON.stringify(extension.sent).includes("keep me"));
+	assert.ok(!JSON.stringify(extension.sent).includes("NaN"));
+});
+
+
+test("JSONL reload retains once-per-window boot and reminder without runtime memory", () => {
+	const sm = manager(true);
+	const first = makeExtension(sm);
+	const usage = { tokens: 190_000, percent: 95, contextWindow: 200_000 };
+	const ctx = context(sm, undefined, usage);
+	runHandlers(first, "session_start", {}, ctx);
+	runHandlers(first, "context", {}, ctx);
+	appendText(sm, "assistant", "flush the persisted session");
+	const path = sm.getSessionFile();
+	assert.ok(path);
+	const restored = manager();
+	restored.setSessionFile(path);
+	const loaded = makeExtension(restored);
+	const loadedCtx = context(restored, undefined, usage);
+	runHandlers(loaded, "session_start", {}, loadedCtx);
+	runHandlers(loaded, "context", {}, loadedCtx);
+	assert.equal(loaded.sent.length, 0);
+	const messages = restored.getBranch().filter((entry) => entry.type === "custom_message");
+	assert.equal(messages.filter((entry) => entry.customType === internal.BOOT_TYPE).length, 1);
+	assert.equal(messages.filter((entry) => entry.customType === internal.GUIDANCE_TYPE).length, 1);
 });
