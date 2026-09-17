@@ -24,7 +24,7 @@ export default function piContext(pi: ExtensionAPI) {
 		// it once as a hidden custom message. Reset windows already carry theirs at
 		// position 0 in the compaction summary, so a resumed session adds nothing.
 		const sessionId = ctx.sessionManager.getSessionId();
-		const rootId = `pcw:${sessionId}:root`;
+		const rootId = `pcw:${sessionId.slice(0, 8)}:root`;
 		if (currentWindowId(ctx) !== rootId || hasWindowMessage(ctx, BOOT_TYPE)) return;
 		pi.sendMessage({ customType: BOOT_TYPE, content: bootBlock(ctx, rootId, undefined, false), display: false }, { triggerTurn: false });
 	});
@@ -71,15 +71,15 @@ export default function piContext(pi: ExtensionAPI) {
 		},
 		onReset: (entryId) => pi.appendEntry(STATE_TYPE, { version: 1, lastResetEntryId: entryId }),
 		buildReset: (event, ctx, explicit) => {
-			const sessionId = ctx.sessionManager.getSessionId();
+			const session8 = ctx.sessionManager.getSessionId().slice(0, 8);
 			// Window IDs are independent of Pi entry IDs. Avoid reusing a window
 			// identity already present on this branch.
 			const windows = historyFromSession(ctx);
 			const usedIds = new Set(windows.map((window) => window.windowId));
 			let minted = randomUUID().slice(0, 8);
-			while (usedIds.has(`pcw:${sessionId}:${minted}`)) minted = randomUUID().slice(0, 8);
-			const windowId = `pcw:${sessionId}:${minted}`;
-			const previousId = windows[windows.length - 1]?.windowId ?? `pcw:${sessionId}:root`;
+			while (usedIds.has(`pcw:${session8}:${minted}`)) minted = randomUUID().slice(0, 8);
+			const windowId = `pcw:${session8}:${minted}`;
+			const previousId = windows[windows.length - 1]?.windowId ?? `pcw:${session8}:root`;
 			// The reset marker stays as firstKeptEntryId; it no longer names the window.
 			pi.appendEntry(RESET_MARKER_TYPE, { version: 1, reason: event.reason, requested: explicit });
 			const markerId = ctx.sessionManager.getLeafId();

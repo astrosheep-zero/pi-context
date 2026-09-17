@@ -683,7 +683,8 @@ test("the boot block is persisted at the root and baked into every reset summary
 	const rootText = typeof rootBoot?.message.content === "string" ? rootBoot.message.content : "";
 	assert.ok(rootText.startsWith(internal.CONTEXT_WINDOW_OPEN_TAG), "root block omits the reset line");
 	assert.equal(rootText.includes("Previous context window id:"), false, "root block omits the previous-id line");
-	assert.match(rootText, /Current context window id: pcw:.+:root/);
+	assert.match(rootText, new RegExp(`First context window id: pcw:${sessionManager.getSessionId().slice(0, 8)}:root`));
+	assert.match(rootText, new RegExp(`Current context window id: pcw:${sessionManager.getSessionId().slice(0, 8)}:root`));
 	assert.ok(rootText.includes("decisions.md"));
 	const decisionsMeta = notesFromSession(ctx).get("decisions.md");
 	assert.ok(decisionsMeta);
@@ -699,7 +700,7 @@ test("the boot block is persisted at the root and baked into every reset summary
 	assert.ok(before && "compaction" in before);
 	const details = before.compaction.details as { piContext: string; windowId: string };
 	assert.equal(details.piContext, "reset-v2");
-	assert.match(details.windowId, /^pcw:.+:[0-9a-f]{8}$/);
+	assert.match(details.windowId, new RegExp(`^pcw:${sessionManager.getSessionId().slice(0, 8)}:[0-9a-f]{8}$`));
 	assert.equal(before.compaction.summary.startsWith(internal.CONTEXT_WINDOW_OPEN_TAG), false, "a reset line precedes the identity block");
 	assert.match(before.compaction.summary, new RegExp(`Current context window id: ${details.windowId}`));
 	assert.ok(before.compaction.summary.includes("decisions.md"));
@@ -742,10 +743,10 @@ test("reset window ids are extension-minted and drive history_* lookups", async 
 	assert.equal(windows.windows[0]?.window_id, details.windowId, "recent_first defaults to newest-first");
 	// Only an explicit false restores oldest-first window order.
 	const oldestWindows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_list_windows", { recent_first: false }, ctx));
-	assert.equal(oldestWindows.windows[0]?.window_id, `pcw:${sessionManager.getSessionId()}:root`, "explicit false keeps the oldest window first");
+	assert.equal(oldestWindows.windows[0]?.window_id, `pcw:${sessionManager.getSessionId().slice(0, 8)}:root`, "explicit false keeps the oldest window first");
 	assert.equal(oldestWindows.windows[1]?.window_id, details.windowId);
 	// The minted id is Pi's 8-hex entry-id shape, but the window id is ours.
-	assert.match(details.windowId, /^pcw:.+:[0-9a-f]{8}$/);
+	assert.match(details.windowId, new RegExp(`^pcw:${sessionManager.getSessionId().slice(0, 8)}:[0-9a-f]{8}$`));
 
 	// history_* accepts the minted window id and resolves the baked summary item.
 	const listed = resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_list_items", { window_id: details.windowId }, ctx));
@@ -782,7 +783,39 @@ test("a Pi-native compaction with the extension off keeps entry.id as the window
 
 	const compactionId = sessionManager.appendCompaction("Pi native summary", sessionManager.getLeafId() as string, 100, { readFiles: [], modifiedFiles: [] }, true);
 	const windows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_list_windows", {}, ctx));
-	assert.equal(windows.windows[0]?.window_id, `pcw:${sessionManager.getSessionId()}:${compactionId}`, "native compactions fall back to entry.id");
+	assert.equal(windows.windows[0]?.window_id, `pcw:${sessionManager.getSessionId().slice(0, 8)}:${compactionId}`, "native compactions fall back to entry.id");
+});
+
+test("a reset window baked under the older full-session id still projects and resolves opaquely", async () => {
+	const sessionManager = manager();
+	const captured = makeExtension(sessionManager);
+	const ctx = context(sessionManager);
+	const sessionId = sessionManager.getSessionId();
+	const projectedRoot = `pcw:${sessionId.slice(0, 8)}:root`;
+	// A window id baked by the pre-shortening extension: the full session id is part of the opaque string.
+	const oldWindowId = `pcw:${sessionId}:deadbeef`;
+
+	const rootItemId = appendText(sessionManager, "user", "message before the old reset");
+	const markerId = sessionManager.getLeafId();
+	assert.ok(markerId);
+	const compactionId = sessionManager.appendCompaction("old reset summary", markerId, 100, { piContext: "reset-v2", windowId: oldWindowId }, true);
+	const currentItemId = appendText(sessionManager, "assistant", "message after the old reset");
+
+	// The old session still projects both windows: the computed short root and the opaque baked window.
+	const windows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_list_windows", { recent_first: false }, ctx));
+	assert.deepEqual(windows.windows.map((window) => window.window_id), [projectedRoot, oldWindowId], "both the short root and the older opaque id project");
+
+	// history_read_item resolves items by the older opaque window id, and by the computed root.
+	const oldRead = resultJson<{ content: string }>(await call(captured, "history_read_item", { window_id: oldWindowId, item_id: compactionId }, ctx));
+	assert.equal(oldRead.content, "old reset summary");
+	const oldCurrent = resultJson<{ content: string }>(await call(captured, "history_read_item", { window_id: oldWindowId, item_id: currentItemId }, ctx));
+	assert.equal(oldCurrent.content, "message after the old reset");
+	const rootRead = resultJson<{ content: string }>(await call(captured, "history_read_item", { window_id: projectedRoot, item_id: rootItemId }, ctx));
+	assert.equal(rootRead.content, "message before the old reset");
+
+	// No normalization: the read path matches window ids exactly and never rewrites an older spelling.
+	const unrewritten = resultJson<{ error?: string }>(await call(captured, "history_read_item", { window_id: `pcw:${sessionId}:root`, item_id: rootItemId }, ctx));
+	assert.match(unrewritten.error ?? "", /unknown item_id or window_id/);
 });
 
 test("low-budget guidance persists once per window with no transient copy", async () => {

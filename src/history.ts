@@ -68,13 +68,13 @@ export function resetV2WindowId(details: unknown): string | undefined {
 
 /** A compaction entry's window id: the extension-minted id for reset-v2, else Pi's entry id. */
 function windowIdOf(sessionId: string, entry: { id: string; details?: unknown }): string {
-	return resetV2WindowId(entry.details) ?? `pcw:${sessionId}:${entry.id}`;
+	return resetV2WindowId(entry.details) ?? `pcw:${sessionId.slice(0, 8)}:${entry.id}`;
 }
 
 /** Build durable, on-demand history directly from every entry on the current session branch. */
 export function historyFromSession(ctx: SessionReader): HistoryWindow[] {
 	const sessionId = ctx.sessionManager.getSessionId();
-	let window: HistoryWindow = { windowId: `pcw:${sessionId}:root`, items: [] };
+	let window: HistoryWindow = { windowId: `pcw:${sessionId.slice(0, 8)}:root`, items: [] };
 	const windows = [window];
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type === "compaction") {
@@ -161,6 +161,6 @@ export function currentWindowId(ctx: SessionReader): string {
 		const entry = branch[i];
 		if (entry?.type === "compaction") return windowIdOf(sessionId, entry);
 	}
-	return `pcw:${sessionId}:root`;
+	return `pcw:${sessionId.slice(0, 8)}:root`;
 }
 
