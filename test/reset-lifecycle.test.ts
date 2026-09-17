@@ -184,3 +184,17 @@ test("do not interrupt another active run or duplicate a queued user prompt", ()
 	queued.setPending(true); queued.complete();
 	assert.deepEqual(queued.messages, [], "do not add a competing prompt");
 });
+
+test("foreign or unconfirmed reset events cannot trigger a successful continuation", () => {
+	const h = harness();
+	h.lifecycle.request(); h.settle();
+	// isCurrentReset stands in for the reset-v2/window-id check index.ts runs against the
+	// compaction entry's details. Emitting the foreign boundary twice proves it is never
+	// marked handled, and the request stays in flight rather than completing.
+	h.emit("session_compact", { compactionEntry: { id: "foreign" }, willRetry: false });
+	h.emit("session_compact", { compactionEntry: { id: "foreign" }, willRetry: false });
+	assert.equal(h.lifecycle.request(), "rollover_already_pending", "the ignored event did not complete or clear the attempt");
+	h.complete();
+	assert.deepEqual(h.messages, [], "an unconfirmed boundary never resumes the run");
+	assert.equal(h.lifecycle.request(), "rollover_requested", "the request is released after its own completion");
+});
