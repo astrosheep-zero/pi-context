@@ -52,5 +52,5 @@ Notes are session-scoped virtual files. Treat notes and history as internal book
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const WARNING_PROMPT =
-	"Memory wipe incoming — this turn is all you get. Write your checkpoint note now: the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. Then call new_context and go out clean — anything not in the note is gone.";
+	"Memory wipe incoming — this turn is all you get. Write exactly one checkpoint note now: the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. Then call new_context and go out clean — anything not in the note is gone.";
 
