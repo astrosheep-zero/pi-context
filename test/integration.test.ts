@@ -271,7 +271,7 @@ test("schemas cover the nine History/Notes actions plus reset controls", () => {
 	const captured = makeExtension(manager());
 	for (const name of [
 		"history_list_windows", "history_list_items", "history_read_item", "history_search_contents",
-		"notes_list_files_by_prefix", "notes_read_file", "notes_search_contents", "notes_append_to_file", "notes_write_file",
+		"notes_list_files", "notes_read_file", "notes_search_contents", "notes_append_to_file", "notes_write_file",
 		"new_context", "get_context_remaining",
 	]) {
 		const tool = captured.tools.get(name);
@@ -327,10 +327,17 @@ test("persisted note operations restore, are Unicode byte-limited, and use safe 
 	assertLocalIso(searched.files[0]?.created_at, noteMeta.createdAt, "notes_search_contents created_at");
 	assertLocalIso(searched.files[0]?.updated_at, noteMeta.updatedAt, "notes_search_contents updated_at");
 	const listedFiles = resultJson<{ files: Array<{ path: string; created_at: unknown; updated_at: unknown }> }>(
-		await call(captured, "notes_list_files_by_prefix", { prefix: "checkpoint" }, ctx),
+		await call(captured, "notes_list_files", { pattern: "checkpoint/**" }, ctx),
 	);
-	assertLocalIso(listedFiles.files[0]?.created_at, noteMeta.createdAt, "notes_list_files_by_prefix created_at");
-	assertLocalIso(listedFiles.files[0]?.updated_at, noteMeta.updatedAt, "notes_list_files_by_prefix updated_at");
+	assert.equal(listedFiles.files.length, 1, "glob ** crosses into the checkpoint directory");
+	assert.equal(listedFiles.files[0]?.path, "checkpoint/进度.txt");
+	assertLocalIso(listedFiles.files[0]?.created_at, noteMeta.createdAt, "notes_list_files created_at");
+	assertLocalIso(listedFiles.files[0]?.updated_at, noteMeta.updatedAt, "notes_list_files updated_at");
+	// A single-segment * never crosses `/`, so a nested-only store matches nothing at the root.
+	const rootOnly = resultJson<{ files: Array<{ path: string }> }>(
+		await call(captured, "notes_list_files", { pattern: "*" }, ctx),
+	);
+	assert.equal(rootOnly.files.length, 0, "glob * stays within one segment");
 	assert.equal(searched.files[0]?.created_at, listedFiles.files[0]?.created_at, "note tools agree on the timestamp format");
 	assert.equal(searched.files[0]?.updated_at, listedFiles.files[0]?.updated_at);
 	await assert.rejects(() => call(captured, "notes_write_file", { path: "../escape", text: "x" }, ctx), /unsupported component/);
@@ -403,7 +410,7 @@ test("the boot notes index excludes stale notes while list, read, and search sti
 	assert.equal(text.includes("old.md"), false, "the stale note leaves the boot index");
 	assert.equal(text.includes("stale content"), false, "the stale preview is not rendered");
 
-	const listed = resultJson<{ files: Array<{ path: string; stale: boolean }> }>(await call(captured, "notes_list_files_by_prefix", {}, ctx));
+	const listed = resultJson<{ files: Array<{ path: string; stale: boolean }> }>(await call(captured, "notes_list_files", {}, ctx));
 	assert.equal(listed.files.find((file) => file.path === "old.md")?.stale, true, "list carries the stale flag");
 	assert.equal(listed.files.find((file) => file.path === "fresh.md")?.stale, false);
 
@@ -489,7 +496,7 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	let listOffset = 0;
 	let listNext: number | null = 0;
 	while (listNext !== null) {
-		const result = resultJson<{ files: Array<{ path: string }>; next_cursor: number | null }>(await call(captured, "notes_list_files_by_prefix", { prefix: null, max_results: 300, cursor: listOffset }, ctx));
+		const result = resultJson<{ files: Array<{ path: string }>; next_cursor: number | null }>(await call(captured, "notes_list_files", { pattern: null, max_results: 300, cursor: listOffset }, ctx));
 		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
 		listPages.push(...result.files.map((file) => file.path)); listNext = result.next_cursor; if (listNext !== null) listOffset = listNext;
 	}
@@ -784,10 +791,10 @@ test("oversized legacy note path: list and search truncate the path only with an
 	assert.ok(notesFromSession(ctx).has(legacyPath), "replay accepts a legacy path beyond the write cap");
 
 	const listed = resultJson<{ files: Array<{ path: string; path_truncated?: boolean }>; next_cursor: number | null }>(
-		await call(captured, "notes_list_files_by_prefix", {}, ctx),
+		await call(captured, "notes_list_files", {}, ctx),
 	);
 	const listedBytes = Buffer.byteLength(JSON.stringify(listed), "utf8");
-	console.log(`pathological page bytes: notes_list_files_by_prefix path=40KB -> ${listedBytes}`);
+	console.log(`pathological page bytes: notes_list_files path=40KB -> ${listedBytes}`);
 	assert.ok(listedBytes <= TOOL_OUTPUT_MAX_BYTES, `legacy path list page is ${listedBytes} bytes`);
 	assert.equal(listed.files.length, 1);
 	const listedFile = listed.files[0]!;

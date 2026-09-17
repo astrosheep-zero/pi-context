@@ -2,7 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { output, page, middleTruncate, withinBudget } from "./tool-output.js";
 import { nullableString, nullableInteger, positiveInteger, cursor, searchQuery, searchQueries } from "./tool-schema.js";
-import { notesFromSession, assertVirtualPath, assertVirtualPrefix, lineRange, localIso, type NoteOperation } from "./notes.js";
+import { notesFromSession, assertVirtualPath, assertVirtualPrefix, assertGlobPattern, globToRegExp, lineRange, localIso, type NoteOperation } from "./notes.js";
 import { NOTE_TYPE, MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "./protocol.js";
 
 export function registerNoteTools(pi: ExtensionAPI) {
@@ -13,13 +13,14 @@ export function registerNoteTools(pi: ExtensionAPI) {
 	};
 
 	pi.registerTool(defineTool({
-		name: "notes_list_files_by_prefix",
+		name: "notes_list_files",
 		label: "Notes list files",
-		description: "List persistent, session-scoped virtual note files. created_at and updated_at are local-time ISO 8601 strings with an explicit UTC offset.",
-		parameters: Type.Object({ prefix: nullableString(), max_results: positiveInteger(), cursor: cursor(), file_order_by: Type.Optional(Type.Union([Type.Literal("name"), Type.Literal("created_at"), Type.Literal("updated_at")])), file_order: Type.Optional(Type.Union([Type.Literal("ascending"), Type.Literal("descending")])) }, { additionalProperties: false }),
+		description: "List persistent, session-scoped virtual note files, optionally filtered by a glob pattern: * matches within a path segment, ** matches across segments (a leading **/ also matches the root), ? matches one character within a segment; an omitted or empty pattern lists every file. Each entry carries its stale flag. created_at and updated_at are local-time ISO 8601 strings with an explicit UTC offset.",
+		parameters: Type.Object({ pattern: nullableString(), max_results: positiveInteger(), cursor: cursor(), file_order_by: Type.Optional(Type.Union([Type.Literal("name"), Type.Literal("created_at"), Type.Literal("updated_at")])), file_order: Type.Optional(Type.Union([Type.Literal("ascending"), Type.Literal("descending")])) }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
-			const prefix = assertVirtualPrefix(params.prefix);
-			let files = [...notesFromSession(ctx)].filter(([path]) => !prefix || path.startsWith(prefix));
+			const pattern = assertGlobPattern(params.pattern);
+			const matcher = pattern ? globToRegExp(pattern) : undefined;
+			let files = [...notesFromSession(ctx)].filter(([path]) => !matcher || matcher.test(path));
 			const key = params.file_order_by ?? "name";
 			files.sort(([aPath, a], [bPath, b]) => key === "name" ? aPath.localeCompare(bPath) : (key === "created_at" ? a.createdAt - b.createdAt : a.updatedAt - b.updatedAt));
 			if (params.file_order === "descending") files.reverse();

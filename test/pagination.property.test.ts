@@ -1,7 +1,7 @@
 /**
  * Property-based pagination tests for the four paginating pi-context tools:
  * history_list_items, history_search_contents, notes_search_contents,
- * notes_list_files_by_prefix.
+ * notes_list_files.
  *
  * Each case is generated from a seed, so a failure names its seed and reproduces by
  * re-running that one seed:
@@ -209,7 +209,7 @@ type NoteOpPlan =
 	| { kind: "append"; path: string; text: string }
 	| { kind: "mark"; path: string; stale: boolean };
 
-type NoteListVariant = { label: string; prefix: string | null; orderBy: "name" | "created_at" | "updated_at"; order: "ascending" | "descending"; maxResults: number };
+type NoteListVariant = { label: string; pattern: string | null; orderBy: "name" | "created_at" | "updated_at"; order: "ascending" | "descending"; maxResults: number };
 type NoteSearchVariant = { label: string; query: string; prefix: string | null; maxFiles: number; maxMatchesPerFile: number; recentFileFirst: boolean };
 
 type NotesPlan = { seed: number; ops: NoteOpPlan[]; list: NoteListVariant[]; search: NoteSearchVariant[] };
@@ -270,11 +270,14 @@ function notesPlan(seed: number): NotesPlan {
 	if (seed % 3 === 0) ops.push({ kind: "entry", data: { op: "write", path: `legacy/${"p".repeat(40_000)}.md`, text: `${NEEDLE} legacy oversized path`, createdAt: clock, updatedAt: clock } });
 
 	const prefixes = [null, "", "notes", "deep/nested", "unicode-日本語", "absent"];
+	// Literal patterns like "notes" discriminate glob from prefix semantics: they must match
+	// only an exact path, never the directory's children.
+	const patterns = [null, "", "**", "*.md", "**.md", "notes/*", "notes", "deep/**", "deep/nested", "unicode-日本語/*", "checkpoint-*", "absent*", "f?.md"];
 	const list: NoteListVariant[] = [
-		{ label: "all-name-asc", prefix: null, orderBy: "name", order: "ascending", maxResults: 200 },
-		{ label: "paged-name-asc", prefix: null, orderBy: "name", order: "ascending", maxResults: rng.pick([1, 2, 3, 5]) },
-		{ label: "created-desc", prefix: rng.pick(prefixes), orderBy: "created_at", order: "descending", maxResults: rng.pick([1, 3, 7, 200]) },
-		{ label: "updated-asc", prefix: rng.pick(prefixes), orderBy: "updated_at", order: "ascending", maxResults: rng.pick([2, 4, 200]) },
+		{ label: "all-name-asc", pattern: null, orderBy: "name", order: "ascending", maxResults: 200 },
+		{ label: "paged-name-asc", pattern: rng.pick(patterns), orderBy: "name", order: "ascending", maxResults: rng.pick([1, 2, 3, 5]) },
+		{ label: "created-desc", pattern: rng.pick(patterns), orderBy: "created_at", order: "descending", maxResults: rng.pick([1, 3, 7, 200]) },
+		{ label: "updated-asc", pattern: rng.pick(patterns), orderBy: "updated_at", order: "ascending", maxResults: rng.pick([2, 4, 200]) },
 	];
 	const search: NoteSearchVariant[] = [
 		{ label: "needle-all", query: NEEDLE, prefix: null, maxFiles: 200, maxMatchesPerFile: 100, recentFileFirst: false },
@@ -296,16 +299,37 @@ async function materializeNotes(plan: NotesPlan, captured: Captured, ctx: Extens
 
 type StoreNoteFile = { path: string; text: string; stale: boolean; createdAt: number; updatedAt: number };
 
-function storeNoteFiles(ctx: ExtensionContext, prefix: string | null): StoreNoteFile[] {
-	const normalized = prefix ? prefix : undefined;
+/** Test-local reimplementation of the documented glob semantics -- never imported from src. */
+function globMatch(pattern: string, path: string): boolean {
+	let source = "^";
+	for (let index = 0; index < pattern.length; index++) {
+		const char = pattern[index]!;
+		if (char === "*") {
+			if (pattern[index + 1] === "*") {
+				const followedBySlash = pattern[index + 2] === "/";
+				source += followedBySlash ? "(?:[^]*/)?" : "[^]*";
+				index += followedBySlash ? 2 : 1;
+			} else {
+				source += "[^/]*";
+			}
+		} else if (char === "?") {
+			source += "[^/]";
+		} else {
+			source += char.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+		}
+	}
+	return new RegExp(`${source}$`).test(path);
+}
+
+function storeNoteFiles(ctx: ExtensionContext, match: (path: string) => boolean): StoreNoteFile[] {
 	return [...notesFromSession(ctx)]
-		.filter(([path]) => !normalized || path.startsWith(normalized))
+		.filter(([path]) => match(path))
 		.map(([path, file]) => ({ path, text: file.text, stale: file.stale, createdAt: file.createdAt, updatedAt: file.updatedAt }));
 }
 
-/** The documented ordering of notes_list_files_by_prefix, reimplemented over the store. */
+/** The documented ordering of notes_list_files, reimplemented over the store. */
 function expectedNoteOrder(ctx: ExtensionContext, variant: NoteListVariant): StoreNoteFile[] {
-	const files = storeNoteFiles(ctx, variant.prefix);
+	const files = storeNoteFiles(ctx, (path) => !variant.pattern || globMatch(variant.pattern, path));
 	const key = variant.orderBy;
 	files.sort((a, b) => key === "name" ? a.path.localeCompare(b.path) : key === "created_at" ? a.createdAt - b.createdAt : a.updatedAt - b.updatedAt);
 	if (variant.order === "descending") files.reverse();
@@ -314,7 +338,7 @@ function expectedNoteOrder(ctx: ExtensionContext, variant: NoteListVariant): Sto
 
 /** The documented matching/ordering of notes_search_contents, reimplemented over the store. */
 function expectedSearchOrder(ctx: ExtensionContext, variant: NoteSearchVariant): StoreNoteFile[] {
-	const files = storeNoteFiles(ctx, variant.prefix);
+	const files = storeNoteFiles(ctx, (path) => !variant.prefix || path.startsWith(variant.prefix));
 	if (variant.recentFileFirst) files.sort((a, b) => b.createdAt - a.createdAt);
 	return files.filter((file) => file.text.split("\n").some((line) => line.includes(variant.query)));
 }
@@ -500,19 +524,19 @@ test("history_search_contents enumerates every match across seeded session shape
 	});
 });
 
-test("notes_list_files_by_prefix enumerates every note file across seeded mixes", async () => {
-	await runSeeds("notes_list_files_by_prefix", async (seed) => {
+test("notes_list_files enumerates every note file across seeded mixes", async () => {
+	await runSeeds("notes_list_files", async (seed) => {
 		const plan = notesPlan(seed);
 		const session = manager();
 		const captured = makeExtension(session);
 		const ctx = context(session);
 		await materializeNotes(plan, captured, ctx, session);
 		for (const variant of plan.list) {
-			const params = { prefix: variant.prefix, max_results: variant.maxResults, file_order_by: variant.orderBy, file_order: variant.order };
+			const params = { pattern: variant.pattern, max_results: variant.maxResults, file_order_by: variant.orderBy, file_order: variant.order };
 			const expected = expectedNoteOrder(ctx, variant).map((file) => file.path);
-			const label = `notes_list_files_by_prefix seed=${seed} ${variant.label} prefix=${JSON.stringify(variant.prefix)} order_by=${variant.orderBy} order=${variant.order} max_results=${variant.maxResults}`;
+			const label = `notes_list_files seed=${seed} ${variant.label} pattern=${JSON.stringify(variant.pattern)} order_by=${variant.orderBy} order=${variant.order} max_results=${variant.maxResults}`;
 			const pages = await walkPages({
-				captured, ctx, tool: "notes_list_files_by_prefix", params,
+				captured, ctx, tool: "notes_list_files", params,
 				idsOf: (page, cursor) => notePathIdentity(expected, cursor, label, page, "files"),
 				expected,
 				label,

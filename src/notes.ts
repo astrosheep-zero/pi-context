@@ -25,6 +25,42 @@ export function assertVirtualPrefix(value: unknown): string | undefined {
 	return assertVirtualPath(value);
 }
 
+/**
+ * Minimal glob over virtual note paths: `*` matches any run within a segment (never
+ * `/`), `**` matches any run across segments (a leading double-star followed by a
+ * slash also matches zero segments, so it covers the root too), `?` matches exactly
+ * one non-`/` character. Everything else is literal and the match is anchored to the
+ * whole path.
+ */
+export function globToRegExp(pattern: string): RegExp {
+	let source = "^";
+	for (let index = 0; index < pattern.length; index++) {
+		const char = pattern[index]!;
+		if (char === "*") {
+			if (pattern[index + 1] === "*") {
+				const followedBySlash = pattern[index + 2] === "/";
+				source += followedBySlash ? "(?:[^]*\\/)?" : "[^]*";
+				index += followedBySlash ? 2 : 1;
+			} else {
+				source += "[^/]*";
+			}
+		} else if (char === "?") {
+			source += "[^/]";
+		} else {
+			source += char.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+		}
+	}
+	return new RegExp(`${source}$`);
+}
+
+/** Glob patterns are not virtual paths (`*`/`?` are legal), so they get their own guard: no NUL, no backslashes. */
+export function assertGlobPattern(value: unknown): string | undefined {
+	if (value === undefined || value === null || value === "") return undefined;
+	if (typeof value !== "string") throw new Error("glob pattern must be a string");
+	if (value.includes("\0") || value.includes("\\")) throw new Error("glob pattern must not contain NUL or backslashes");
+	return value;
+}
+
 /** Replays only pi-context note operations from session custom entries. */
 function isNoteOperation(data: unknown): data is NoteOperation {
 	if (typeof data !== "object" || data === null) return false;
