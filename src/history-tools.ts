@@ -4,6 +4,24 @@ import { output, page, middleTruncate, withinBudget } from "./tool-output.js";
 import { positiveInteger, recentFirst, nullableString, role, cursor, searchQuery, searchQueries } from "./tool-schema.js";
 import { historyFromSession, filteredItems, visibleItem, allItems } from "./history.js";
 
+/**
+ * Shrink one oversized history item to fit the page budget. The payload is `truncated_content`,
+ * so it is elided first; only when even a marker-only payload cannot fit is `tool_name` elided
+ * too. `item_id`, `window_id`, `role`, and `tool_namespace` are identity or tiny metadata and
+ * are never touched. Both history page tools share this truncator.
+ */
+function truncateHistoryItem<T extends { truncated_content: string; tool_name: string | null }>(item: T, fits: (candidate: T) => boolean): T {
+	const withContent = { ...item, truncated_content: middleTruncate(item.truncated_content, (candidate) => fits({ ...item, truncated_content: candidate })) } as T;
+	if (fits(withContent)) return withContent;
+	if (item.tool_name === null) return withContent;
+	// Content could not help even at marker-only size: tool_name is the oversized field, so
+	// keep the original content and truncate the metadata as the last resort.
+	const withName = { ...item, tool_name: middleTruncate(item.tool_name, (candidate) => fits({ ...item, tool_name: candidate })) } as T;
+	if (fits(withName)) return withName;
+	// Both fields are oversized: dissolve the payload against the truncated metadata.
+	return { ...withName, truncated_content: middleTruncate(item.truncated_content, (candidate) => fits({ ...withName, truncated_content: candidate })) } as T;
+}
+
 export function registerHistoryTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "history_list_windows",
@@ -25,7 +43,7 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 		parameters: Type.Object({ limit: positiveInteger(), cursor: cursor(), recent_first: recentFirst(), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const items = filteredItems(ctx, params).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200));
-			return output(page(items, params.cursor ?? 0, "items", params.limit, (item, fits) => ({ ...item, truncated_content: middleTruncate(item.truncated_content, (candidate) => fits({ ...item, truncated_content: candidate })) })));
+			return output(page(items, params.cursor ?? 0, "items", params.limit, truncateHistoryItem));
 		},
 	}));
 
@@ -56,7 +74,7 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _update, ctx) {
 			const queries = searchQueries(params.query);
 			const matching = filteredItems(ctx, params).filter((item) => queries.some((query) => item.content.includes(query))).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200));
-			return output(page(matching, params.cursor ?? 0, "items", params.limit, (item, fits) => ({ ...item, truncated_content: middleTruncate(item.truncated_content, (candidate) => fits({ ...item, truncated_content: candidate })) })));
+			return output(page(matching, params.cursor ?? 0, "items", params.limit, truncateHistoryItem));
 		},
 	}));
 

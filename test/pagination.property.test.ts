@@ -24,7 +24,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
 import { historyFromSession, notesFromSession } from "../src/index.js";
 import { TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
-import { NOTE_TYPE } from "../src/protocol.js";
+import { NOTE_TYPE, MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
 import { appendText, call, context, makeExtension, manager, resultJson, type Captured } from "./integration.test.js";
 
 const NEEDLE = "PAGE_NEEDLE";
@@ -131,6 +131,11 @@ function historyPlan(seed: number): HistoryPlan {
 			entries.push({ kind: "message", role, toolName: role === "toolResult" ? rng.pick(TOOL_NAMES) : "bash", content: makeContent(rng, rng.bool(0.18)) });
 		}
 	}
+	// Rare pathological shape on a deterministic subset of seeds: a tool result whose 40 KB
+	// tool_name only fits once the metadata is middle-truncated. Inserted at the head so the
+	// oversized item is the first item of its page, and a fixed size keeps later rng draws
+	// (and therefore the filters) unchanged.
+	if (seed % 3 === 0) entries.unshift({ kind: "message", role: "toolResult", toolName: `oversized_${"t".repeat(40_000)}`, content: "oversized tool_name probe" });
 	const windowCount = compactions + 1;
 	const variant = (label: string, query?: string): HistoryVariant => ({
 		label,
@@ -259,6 +264,10 @@ function notesPlan(seed: number): NotesPlan {
 	ops.push({ kind: "entry", data: { op: "write", path: "oversized.md", text: "z".repeat(1_000_001), createdAt: clock, updatedAt: clock } });
 	ops.push({ kind: "entry", data: { op: "write", path: "mark-missing.md", stale: true, createdAt: clock, updatedAt: clock } });
 	ops.push({ kind: "entry", data: { op: "write", path: "bad-time.md", text: "x", createdAt: Number.NaN, updatedAt: clock } });
+	// Rare pathological legacy path on a deterministic subset of seeds: predates the 512-byte
+	// write cap, so it can only enter the store by replaying a persisted op. The list/search
+	// tools must truncate it visibly rather than silently, while replay and reads stay un-capped.
+	if (seed % 3 === 0) ops.push({ kind: "entry", data: { op: "write", path: `legacy/${"p".repeat(40_000)}.md`, text: `${NEEDLE} legacy oversized path`, createdAt: clock, updatedAt: clock } });
 
 	const prefixes = [null, "", "notes", "deep/nested", "unicode-日本語", "absent"];
 	const list: NoteListVariant[] = [
@@ -325,13 +334,16 @@ type PageJson = Record<string, unknown> & { next_cursor: number | null };
 /**
  * Follow next_cursor to the true end, asserting invariants 1-5 for every page.
  * `expected` is the full ordered id sequence the store says the tool must enumerate.
+ * `idsOf` receives the page and the page's starting cursor (its index into the expected
+ * ordered set), so an identity-paginating tool can map a visibly truncated identity back
+ * to the expected one instead of pretending it was never returned.
  */
 async function walkPages(options: {
 	captured: Captured;
 	ctx: ExtensionContext;
 	tool: string;
 	params: Record<string, unknown>;
-	idsOf: (json: PageJson) => string[];
+	idsOf: (json: PageJson, cursor: number) => string[];
 	expected: readonly string[];
 	label: string;
 }): Promise<PageJson[]> {
@@ -351,7 +363,7 @@ async function walkPages(options: {
 		assert.ok(bytes <= TOOL_OUTPUT_MAX_BYTES, `${label} cursor=${cursor}: serialized page is ${bytes} bytes, over the ${TOOL_OUTPUT_MAX_BYTES}-byte budget`);
 		const page = resultJson<PageJson>(result);
 		assert.ok(page.next_cursor === null || Number.isInteger(page.next_cursor), `${label} cursor=${cursor}: next_cursor is an integer or null`);
-		const ids = idsOf(page);
+		const ids = idsOf(page, cursor);
 		for (const id of ids) {
 			assert.equal(seen.has(id), false, `${label} cursor=${cursor}: duplicate id ${id} across pages`);
 			seen.add(id);
@@ -372,6 +384,46 @@ async function walkPages(options: {
 	}
 	assert.deepEqual(collected, [...expected], `${label}: concatenated pages differ from the expected enumeration`);
 	return pages;
+}
+
+const TRUNCATION_MARKER = /^([\s\S]*)…\[truncated \d+ chars\]…([\s\S]*)$/;
+
+/**
+ * A truncated identity is only legitimate when it is visibly a middle-truncation of the
+ * expected store path: same head, same tail, and strictly fewer characters. This is what
+ * keeps `path` from being silently mangled.
+ */
+function assertTruncatedIdentity(expectedPath: string, actual: string, label: string): void {
+	const match = TRUNCATION_MARKER.exec(actual);
+	assert.ok(match, `${label}: truncated path carries the …[truncated N chars]… marker`);
+	const head = match[1] as string;
+	const tail = match[2] as string;
+	const expectedChars = Array.from(expectedPath);
+	const headChars = Array.from(head);
+	const tailChars = Array.from(tail);
+	assert.equal(expectedChars.slice(0, headChars.length).join(""), head, `${label}: truncated path keeps the original head`);
+	assert.equal(expectedChars.slice(expectedChars.length - tailChars.length).join(""), tail, `${label}: truncated path keeps the original tail`);
+	assert.ok(headChars.length + tailChars.length < expectedChars.length, `${label}: truncation actually removes characters`);
+}
+
+/**
+ * Map a notes page entry's path back to the expected store path. A non-truncated path must
+ * equal it; a flagged path must be a visible middle-truncation of a legacy path that the
+ * write cap could never have produced. The expected path is returned either way so the
+ * pagination invariants compare like with like.
+ */
+function notePathIdentity(expectedPaths: readonly string[], cursor: number, label: string, page: PageJson, key: "files"): string[] {
+	return (page[key] as Array<{ path: string; path_truncated?: boolean }>).map((file, index) => {
+		const expectedPath = expectedPaths[cursor + index];
+		assert.ok(expectedPath !== undefined, `${label} cursor=${cursor}: page returned more entries than the store holds`);
+		if (file.path_truncated) {
+			assert.ok(Buffer.byteLength(expectedPath, "utf8") > MAX_NOTE_PATH_BYTES, `${label} cursor=${cursor}: only a legacy path beyond the write cap may be truncated, got ${file.path}`);
+			assertTruncatedIdentity(expectedPath, file.path, `${label} cursor=${cursor}`);
+		} else {
+			assert.equal(file.path, expectedPath, `${label} cursor=${cursor}: path is returned intact when its entry fits`);
+		}
+		return expectedPath;
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -397,6 +449,12 @@ test("generators are deterministic: the same seed replays the same shapes", () =
 	}
 	assert.notDeepEqual(historyPlan(DEFAULT_SEEDS[0]), historyPlan(DEFAULT_SEEDS[1]), "different seeds generate different history shapes");
 	assert.notDeepEqual(notesPlan(DEFAULT_SEEDS[0]), notesPlan(DEFAULT_SEEDS[1]), "different seeds generate different notes shapes");
+	// The rare pathological shapes are reachable from the committed corpus, so the new
+	// truncation paths are actually exercised by the default run rather than only in theory.
+	const historyEntries = DEFAULT_SEEDS.flatMap((seed) => historyPlan(seed).entries);
+	assert.ok(historyEntries.some((entry) => entry.kind === "message" && Buffer.byteLength(entry.toolName, "utf8") > TOOL_OUTPUT_MAX_BYTES), "some committed seed generates an oversized tool_name");
+	const noteOps = DEFAULT_SEEDS.flatMap((seed) => notesPlan(seed).ops);
+	assert.ok(noteOps.some((op) => op.kind === "entry" && typeof op.data === "object" && op.data !== null && typeof (op.data as { path?: unknown }).path === "string" && Buffer.byteLength((op.data as { path: string }).path, "utf8") > MAX_NOTE_PATH_BYTES), "some committed seed generates an oversized legacy note path");
 });
 
 test("history_list_items enumerates every item across seeded session shapes", async () => {
@@ -452,21 +510,24 @@ test("notes_list_files_by_prefix enumerates every note file across seeded mixes"
 		for (const variant of plan.list) {
 			const params = { prefix: variant.prefix, max_results: variant.maxResults, file_order_by: variant.orderBy, file_order: variant.order };
 			const expected = expectedNoteOrder(ctx, variant).map((file) => file.path);
+			const label = `notes_list_files_by_prefix seed=${seed} ${variant.label} prefix=${JSON.stringify(variant.prefix)} order_by=${variant.orderBy} order=${variant.order} max_results=${variant.maxResults}`;
 			const pages = await walkPages({
 				captured, ctx, tool: "notes_list_files_by_prefix", params,
-				idsOf: (page) => (page.files as Array<{ path: string }>).map((file) => file.path),
+				idsOf: (page, cursor) => notePathIdentity(expected, cursor, label, page, "files"),
 				expected,
-				label: `notes_list_files_by_prefix seed=${seed} ${variant.label} prefix=${JSON.stringify(variant.prefix)} order_by=${variant.orderBy} order=${variant.order} max_results=${variant.maxResults}`,
+				label,
 			});
 			// Each listed file must describe the store's file exactly, not a stale or invented one.
+			let flat = 0;
 			for (const page of pages) {
-				for (const file of page.files as Array<{ path: string; size_bytes: number; stale: boolean; created_at: string; updated_at: string }>) {
-					const store = notesFromSession(ctx).get(file.path);
-					assert.ok(store, `notes_list_files_by_prefix seed=${seed} ${variant.label}: listed ${file.path} is not in the note store`);
-					assert.equal(file.size_bytes, Buffer.byteLength(store.text, "utf8"), `notes_list_files_by_prefix seed=${seed} ${variant.label}: size_bytes for ${file.path}`);
-					assert.equal(file.stale, store.stale, `notes_list_files_by_prefix seed=${seed} ${variant.label}: stale for ${file.path}`);
-					assert.equal(Date.parse(file.created_at), store.createdAt, `notes_list_files_by_prefix seed=${seed} ${variant.label}: created_at for ${file.path}`);
-					assert.equal(Date.parse(file.updated_at), store.updatedAt, `notes_list_files_by_prefix seed=${seed} ${variant.label}: updated_at for ${file.path}`);
+				for (const file of page.files as Array<{ path: string; path_truncated?: boolean; size_bytes: number; stale: boolean; created_at: string; updated_at: string }>) {
+					const storePath = expected[flat++]!;
+					const store = notesFromSession(ctx).get(storePath);
+					assert.ok(store, `${label}: listed ${storePath} is not in the note store`);
+					assert.equal(file.size_bytes, Buffer.byteLength(store.text, "utf8"), `${label}: size_bytes for ${storePath}`);
+					assert.equal(file.stale, store.stale, `${label}: stale for ${storePath}`);
+					assert.equal(Date.parse(file.created_at), store.createdAt, `${label}: created_at for ${storePath}`);
+					assert.equal(Date.parse(file.updated_at), store.updatedAt, `${label}: updated_at for ${storePath}`);
 				}
 			}
 		}
@@ -486,21 +547,23 @@ test("notes_search_contents enumerates every matching file across seeded mixes",
 			const label = `notes_search_contents seed=${seed} ${variant.label} query=${JSON.stringify(variant.query)} prefix=${JSON.stringify(variant.prefix)} max_files=${variant.maxFiles} max_matches_per_file=${variant.maxMatchesPerFile} recent_file_first=${variant.recentFileFirst}`;
 			const pages = await walkPages({
 				captured, ctx, tool: "notes_search_contents", params,
-				idsOf: (page) => (page.files as Array<{ path: string }>).map((file) => file.path),
+				idsOf: (page, cursor) => notePathIdentity(expected, cursor, label, page, "files"),
 				expected,
 				label,
 			});
 			// Matches are a prefix of the file's real matching lines (never invented, never reordered).
+			let flat = 0;
 			for (const page of pages) {
-				for (const file of page.files as Array<{ path: string; matches: Array<{ line: number; text: string }> }>) {
-					const store = notesFromSession(ctx).get(file.path);
-					assert.ok(store, `${label}: reported ${file.path} is not in the note store`);
+				for (const file of page.files as Array<{ path: string; path_truncated?: boolean; matches: Array<{ line: number; text: string }> }>) {
+					const storePath = expected[flat++]!;
+					const store = notesFromSession(ctx).get(storePath);
+					assert.ok(store, `${label}: reported ${storePath} is not in the note store`);
 					const lines = store.text.split("\n");
 					const matchingLines = lines.flatMap((line, index) => line.includes(variant.query) ? [index + 1] : []);
-					assert.ok(file.matches.length >= 1, `${label}: ${file.path} reports no matches but appears in the result`);
-					assert.ok(file.matches.length <= Math.min(matchingLines.length, variant.maxMatchesPerFile), `${label}: ${file.path} reports ${file.matches.length} matches beyond its cap`);
-					assert.deepEqual(file.matches.map((match) => match.line), matchingLines.slice(0, file.matches.length), `${label}: ${file.path} match lines are not the first matching lines`);
-					for (const match of file.matches) assert.ok(lines[match.line - 1]?.includes(variant.query), `${label}: ${file.path}:${match.line} does not contain the query`);
+					assert.ok(file.matches.length >= 1, `${label}: ${storePath} reports no matches but appears in the result`);
+					assert.ok(file.matches.length <= Math.min(matchingLines.length, variant.maxMatchesPerFile), `${label}: ${storePath} reports ${file.matches.length} matches beyond its cap`);
+					assert.deepEqual(file.matches.map((match) => match.line), matchingLines.slice(0, file.matches.length), `${label}: ${storePath} match lines are not the first matching lines`);
+					for (const match of file.matches) assert.ok(lines[match.line - 1]?.includes(variant.query), `${label}: ${storePath}:${match.line} does not contain the query`);
 				}
 			}
 		}

@@ -3,7 +3,7 @@ import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { output, page, middleTruncate, withinBudget } from "./tool-output.js";
 import { nullableString, nullableInteger, positiveInteger, cursor, searchQuery, searchQueries } from "./tool-schema.js";
 import { notesFromSession, assertVirtualPath, assertVirtualPrefix, lineRange, localIso, type NoteOperation } from "./notes.js";
-import { NOTE_TYPE, MAX_NOTE_BYTES } from "./protocol.js";
+import { NOTE_TYPE, MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "./protocol.js";
 
 export function registerNoteTools(pi: ExtensionAPI) {
 	const saveNote = (op: NoteOperation) => {
@@ -23,8 +23,15 @@ export function registerNoteTools(pi: ExtensionAPI) {
 			const key = params.file_order_by ?? "name";
 			files.sort(([aPath, a], [bPath, b]) => key === "name" ? aPath.localeCompare(bPath) : (key === "created_at" ? a.createdAt - b.createdAt : a.updatedAt - b.updatedAt));
 			if (params.file_order === "descending") files.reverse();
-			const listed = files.map(([path, file]) => ({ path, size_bytes: Buffer.byteLength(file.text, "utf8"), stale: file.stale, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt) }));
-			return output(page(listed, params.cursor ?? 0, "files", params.max_results, (file, fits) => ({ ...file, path: middleTruncate(file.path, (candidate) => fits({ ...file, path: candidate })) })));
+			const listed: Array<{ path: string; size_bytes: number; stale: boolean; created_at: string; updated_at: string; path_truncated?: boolean }> = files.map(([path, file]) => ({ path, size_bytes: Buffer.byteLength(file.text, "utf8"), stale: file.stale, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt) }));
+			// `path` is the entry's identity: return it intact whenever the entry fits, and only
+			// ever alter it together with a visible `path_truncated: true` flag. A pathological
+			// legacy path predating the write cap is the one case that cannot fit at all.
+			return output(page(listed, params.cursor ?? 0, "files", params.max_results, (file, fits) => {
+				if (fits(file)) return file;
+				const path = middleTruncate(file.path, (candidate) => fits({ ...file, path: candidate, path_truncated: true }));
+				return { ...file, path, path_truncated: true };
+			}));
 		},
 	}));
 
@@ -63,16 +70,22 @@ export function registerNoteTools(pi: ExtensionAPI) {
 			let files = [...notesFromSession(ctx)].filter(([path]) => !prefix || path.startsWith(prefix));
 			if (params.recent_file_first) files.sort((a, b) => b[1].createdAt - a[1].createdAt);
 			const maxPerFile = params.max_matches_per_file ?? Number.POSITIVE_INFINITY;
-			const result = files.map(([path, file]) => ({ path, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt), matches: file.text.split("\n").flatMap((line, index) => queries.some((query) => line.includes(query)) ? [{ line: index + 1, text: line }] : []).slice(0, maxPerFile) })).filter((file) => file.matches.length > 0);
+			const result: Array<{ path: string; created_at: string; updated_at: string; matches: Array<{ line: number; text: string }>; path_truncated?: boolean }> = files.map(([path, file]) => ({ path, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt), matches: file.text.split("\n").flatMap((line, index) => queries.some((query) => line.includes(query)) ? [{ line: index + 1, text: line }] : []).slice(0, maxPerFile) })).filter((file) => file.matches.length > 0);
 			// A file is capped by dropping whole trailing matches, but its last match is never
-			// dropped: one oversized line is middle-truncated so the file still appears.
+			// dropped: one oversized line is middle-truncated so the file still appears. Only when
+			// the entry cannot fit even after that is the identity field itself truncated, and then
+			// only together with a visible `path_truncated: true` flag.
 			const fitFile = (file: (typeof result)[number], fits: (candidate: (typeof result)[number]) => boolean) => {
 				let matches = file.matches;
 				while (matches.length > 1 && !fits({ ...file, matches })) matches = matches.slice(0, -1);
 				const first = matches[0];
-				if (!first) return { ...file, matches };
-				const text = middleTruncate(first.text, (candidate) => fits({ ...file, matches: [{ ...first, text: candidate }, ...matches.slice(1)] }));
-				return { ...file, matches: [{ ...first, text }, ...matches.slice(1)] };
+				let fitted: (typeof result)[number] = !first ? { ...file, matches } : (() => {
+					const text = middleTruncate(first.text, (candidate) => fits({ ...file, matches: [{ ...first, text: candidate }, ...matches.slice(1)] }));
+					return { ...file, matches: [{ ...first, text }, ...matches.slice(1)] };
+				})();
+				if (fits(fitted)) return fitted;
+				const path = middleTruncate(fitted.path, (candidate) => fits({ ...fitted, path: candidate, path_truncated: true }));
+				return { ...fitted, path, path_truncated: true };
 			};
 			return output(page(result, params.cursor ?? 0, "files", params.max_files, fitFile));
 		},
@@ -92,6 +105,11 @@ export function registerNoteTools(pi: ExtensionAPI) {
 			executionMode: "sequential",
 			async execute(_id, params, _signal, _update, ctx) {
 				const path = assertVirtualPath(params.path);
+				const pathBytes = Buffer.byteLength(path, "utf8");
+				// The cap lives here, at the tool boundary, and never in assertVirtualPath: note
+				// replay validates persisted ops through that helper and must keep loading sessions
+				// that already contain a longer legacy path (reads stay un-capped too).
+				if (pathBytes > MAX_NOTE_PATH_BYTES) return output({ error: `note path exceeds ${MAX_NOTE_PATH_BYTES} UTF-8 bytes`, path_bytes: pathBytes });
 				const hasText = params.text !== undefined;
 				const hasStale = params.mark_stale !== undefined;
 				if (!hasText && !hasStale) return output({ error: "provide text, mark_stale, or both", path });

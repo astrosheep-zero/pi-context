@@ -7,6 +7,10 @@ export const RESET_MARKER_TYPE = "pi-context/reset-marker";
 export const CONTINUATION_TYPE = "pi-context/continuation";
 export const RESET_V2 = "reset-v2";
 export const MAX_NOTE_BYTES = 1_000_000;
+// Write-time cap on a virtual note path. Deliberately NOT enforced by assertVirtualPath:
+// notesFromSession replays already-persisted operations, which must keep loading sessions
+// that contain a longer legacy path. Reads and replay stay un-capped.
+export const MAX_NOTE_PATH_BYTES = 512;
 export const CONTEXT_WINDOW_OPEN_TAG = "<context_window>";
 export const CONTEXT_WINDOW_CLOSE_TAG = "</context_window>";
 export const CONTEXT_WINDOW_PROTOCOL_OPEN_TAG = "<context_window_protocol>";

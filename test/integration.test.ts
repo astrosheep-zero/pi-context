@@ -18,7 +18,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import piContext, { historyFromSession, internal, notesFromSession } from "../src/index.js";
 import { middleTruncate, page, TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
-import { NOTE_TYPE } from "../src/protocol.js";
+import { NOTE_TYPE, MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
 
 // Settings fixtures live in temp directories. PI_CODING_AGENT_DIR is redirected for the
 // whole test process so the extension's SettingsManager.create(ctx.cwd, undefined, ...)
@@ -190,6 +190,17 @@ function assertIsoTimestamp(text: string, message: string): string {
 	assert.ok(match, message);
 	assert.equal(Number.isNaN(Date.parse(match[0])), false, `${message}: timestamp parses`);
 	return match[0];
+}
+
+/** Assert `actual` is a middle-truncation of `original`: same head, same tail, strictly fewer characters. */
+function assertTruncationOf(original: string, actual: string): void {
+	const match = actual.match(/^([\s\S]*)…\[truncated \d+ chars\]…([\s\S]*)$/);
+	assert.ok(match, "truncated value carries the middle-truncation marker");
+	const head = match[1] as string;
+	const tail = match[2] as string;
+	assert.ok(original.startsWith(head), "truncation keeps the original head");
+	assert.ok(original.endsWith(tail), "truncation keeps the original tail");
+	assert.ok(head.length + tail.length < original.length, "truncation actually removes characters");
 }
 
 async function runBeforeCompact(
@@ -732,6 +743,106 @@ test("history_read_item middle-truncates one oversized read within budget", asyn
 	assert.match(read.content, /…\[truncated \d+ chars\]…/, "the read carries a middle-truncation marker");
 	assert.ok(read.content.length > 0, "the read is not empty");
 	assert.equal(read.next_offset_chars, 50000, "the cursor advances past the requested window");
+});
+
+test("oversized history tool_name: page stays within budget, item_id intact, metadata visibly truncated", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const hugeToolName = `oversized_${"t".repeat(40_000)}`;
+	const itemId = appendText(session, "toolResult", "tool output line", hugeToolName);
+
+	const listed = resultJson<{ items: Array<{ item_id: string; tool_name: string; truncated_content: string }>; next_cursor: number | null }>(
+		await call(captured, "history_list_items", { recent_first: false, max_chars_per_item: 1200 }, ctx),
+	);
+	const listedBytes = Buffer.byteLength(JSON.stringify(listed), "utf8");
+	console.log(`pathological page bytes: history_list_items tool_name=40KB -> ${listedBytes}`);
+	assert.ok(listedBytes <= TOOL_OUTPUT_MAX_BYTES, `oversized tool_name list page is ${listedBytes} bytes`);
+	assert.equal(listed.items.length, 1);
+	assert.equal(listed.items[0]!.item_id, itemId, "item_id identity is untouched");
+	assert.equal(listed.items[0]!.truncated_content, "tool output line", "the payload is preserved when only metadata is oversized");
+	assert.match(listed.items[0]!.tool_name, /…\[truncated \d+ chars\]…/, "tool_name carries the truncation marker");
+
+	const searched = resultJson<{ items: Array<{ item_id: string; tool_name: string }>; next_cursor: number | null }>(
+		await call(captured, "history_search_contents", { query: "tool output", recent_first: false }, ctx),
+	);
+	const searchedBytes = Buffer.byteLength(JSON.stringify(searched), "utf8");
+	console.log(`pathological page bytes: history_search_contents tool_name=40KB -> ${searchedBytes}`);
+	assert.ok(searchedBytes <= TOOL_OUTPUT_MAX_BYTES, `oversized tool_name search page is ${searchedBytes} bytes`);
+	assert.equal(searched.items.length, 1);
+	assert.equal(searched.items[0]!.item_id, itemId, "search keeps item_id identity");
+	assert.match(searched.items[0]!.tool_name, /…\[truncated \d+ chars\]…/, "search truncates the oversized tool_name visibly");
+});
+
+test("oversized legacy note path: list and search truncate the path only with an explicit flag", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const legacyPath = `legacy/${"p".repeat(40_000)}.md`;
+	// Bypass the write cap the way history does: append the persisted op directly, then replay.
+	session.appendCustomEntry(NOTE_TYPE, { op: "write", path: legacyPath, text: "needle legacy line", createdAt: Date.now(), updatedAt: Date.now() });
+	assert.ok(notesFromSession(ctx).has(legacyPath), "replay accepts a legacy path beyond the write cap");
+
+	const listed = resultJson<{ files: Array<{ path: string; path_truncated?: boolean }>; next_cursor: number | null }>(
+		await call(captured, "notes_list_files_by_prefix", {}, ctx),
+	);
+	const listedBytes = Buffer.byteLength(JSON.stringify(listed), "utf8");
+	console.log(`pathological page bytes: notes_list_files_by_prefix path=40KB -> ${listedBytes}`);
+	assert.ok(listedBytes <= TOOL_OUTPUT_MAX_BYTES, `legacy path list page is ${listedBytes} bytes`);
+	assert.equal(listed.files.length, 1);
+	const listedFile = listed.files[0]!;
+	assert.equal(listedFile.path_truncated, true, "the truncated path is explicitly flagged");
+	assert.match(listedFile.path, /…\[truncated \d+ chars\]…/, "the path carries the truncation marker");
+	assertTruncationOf(legacyPath, listedFile.path);
+
+	const searched = resultJson<{ files: Array<{ path: string; path_truncated?: boolean; matches: Array<{ line: number }> }>; next_cursor: number | null }>(
+		await call(captured, "notes_search_contents", { query: "needle" }, ctx),
+	);
+	const searchedBytes = Buffer.byteLength(JSON.stringify(searched), "utf8");
+	console.log(`pathological page bytes: notes_search_contents path=40KB -> ${searchedBytes}`);
+	assert.ok(searchedBytes <= TOOL_OUTPUT_MAX_BYTES, `legacy path search page is ${searchedBytes} bytes`);
+	assert.equal(searched.files.length, 1);
+	assert.equal(searched.files[0]!.path_truncated, true, "the search result flags the truncated path");
+	assert.match(searched.files[0]!.path, /…\[truncated \d+ chars\]…/);
+	assert.equal(searched.files[0]!.matches[0]!.line, 1, "the matching line number survives the truncation");
+});
+
+test("the 512-byte write-time path cap refuses longer paths while replay and reads stay un-capped", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const acceptedPath = "a".repeat(MAX_NOTE_PATH_BYTES);
+	const rejectedPath = "b".repeat(MAX_NOTE_PATH_BYTES + 1);
+	await call(captured, "notes_write_file", { path: acceptedPath, text: "accepted" }, ctx);
+	assert.equal(notesFromSession(ctx).get(acceptedPath)?.text, "accepted", "a path exactly at the cap is accepted");
+	for (const name of ["notes_write_file", "notes_append_to_file"]) {
+		const refused = resultJson<{ error: string }>(await call(captured, name, { path: rejectedPath, text: "x" }, ctx));
+		assert.match(refused.error, new RegExp(String(MAX_NOTE_PATH_BYTES)), `${name} refuses a path over the cap with a clear error`);
+	}
+	assert.equal(notesFromSession(ctx).has(rejectedPath), false, "a refused path is never persisted");
+
+	// A legacy path longer than the cap was persisted before the cap existed: replay must still
+	// load it, and reads must accept it and return its identity intact. This path is only just
+	// over the cap, so the read result stays within the shared wire budget, unlike the ~40 KB
+	// paths the list/search budget tests exercise.
+	const persisted = manager(true);
+	const legacyPath = `legacy/${"r".repeat(600)}.md`;
+	assert.ok(Buffer.byteLength(legacyPath, "utf8") > MAX_NOTE_PATH_BYTES);
+	persisted.appendCustomEntry(NOTE_TYPE, { op: "write", path: legacyPath, text: "legacy body\nsecond line", createdAt: Date.now(), updatedAt: Date.now() });
+	// SessionManager delays writing a brand-new session until its first assistant entry.
+	appendText(persisted, "assistant", "persist the legacy note");
+	const file = persisted.getSessionFile();
+	assert.ok(file);
+	const restored = SessionManager.create("/private/tmp/pi-context-test", mkdtempSync(join(tmpdir(), "pi-context-legacy-")));
+	restored.setSessionFile(file);
+	const restoredCtx = context(restored);
+	assert.ok(notesFromSession(restoredCtx).has(legacyPath), "the reloaded session still replays the legacy path");
+	const restoredCaptured = makeExtension(restored);
+	const read = resultJson<{ path: string; content: string }>(await call(restoredCaptured, "notes_read_file", { path: legacyPath }, restoredCtx));
+	assert.equal(read.path, legacyPath, "reads are un-capped and return the identity intact");
+	assert.equal(read.content, "legacy body\nsecond line");
+	const refused = resultJson<{ error: string }>(await call(restoredCaptured, "notes_write_file", { path: legacyPath, text: "again" }, restoredCtx));
+	assert.match(refused.error, new RegExp(String(MAX_NOTE_PATH_BYTES)), "the reloaded session still refuses new over-cap writes");
 });
 
 test("page() includes one middle-truncated item and advances the cursor", () => {
