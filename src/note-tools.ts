@@ -15,7 +15,7 @@ export function registerNoteTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_list_files",
 		label: "Notes list files",
-		description: "List persistent, session-scoped virtual note files, optionally filtered by a glob pattern: * matches within a path segment, ** matches across segments (a leading **/ also matches the root), ? matches one character within a segment; an omitted or empty pattern lists every file. The default order is most recently updated first; file_order_by (name, created_at, updated_at) and file_order (ascending, descending) select another. Each entry carries its stale flag, and created_at/updated_at are local-time ISO 8601 strings with an explicit UTC offset.",
+		description: "List note files, optionally filtered by a glob pattern (* within a path segment, ** across segments). The default order is most recently updated first; file_order_by (name, created_at, updated_at) and file_order (ascending, descending) select another. Entries carry each file's stale flag.",
 		parameters: Type.Object({ pattern: nullableString(), max_results: positiveInteger(), cursor: cursor(), file_order_by: Type.Optional(Type.Union([Type.Literal("name"), Type.Literal("created_at"), Type.Literal("updated_at")])), file_order: Type.Optional(Type.Union([Type.Literal("ascending"), Type.Literal("descending")])) }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const pattern = assertGlobPattern(params.pattern);
@@ -48,7 +48,7 @@ export function registerNoteTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_read_file",
 		label: "Notes read file",
-		description: "Read a bounded character window from a virtual note file: offset_chars is the code-point offset to start from (default 0), where a negative value counts back from the end (offset_chars: -2000 reads the last 2000 code points) and the response always echoes the resolved absolute offset, while limit_chars caps the window (default 12000, max 50000). Each response delivers the longest fitting prefix of that window with no marker: next_offset_chars is exactly offset_chars plus the delivered code-point count and is null only once the note ends, so pass it back unchanged and concatenate the pages in order to reconstruct the note exactly. Success results carry created_at and updated_at as local-time ISO 8601 strings with an explicit UTC offset.",
+		description: "Read a character window from a note file: offset_chars is the code-point offset to start from (default 0) — a negative value counts back from the end (offset_chars: -2000 reads the last 2000) and the response echoes the resolved absolute offset — and limit_chars caps the window (default 12000, max 50000). Each response delivers the longest fitting prefix of that window: pass next_offset_chars back unchanged to continue, concatenate pages in order, null only at the end.",
 		parameters: Type.Object({ path: Type.String(), offset_chars: Type.Optional(Type.Integer({ description: "Code-point offset to start from (default 0). A negative value counts back from the end; the response echoes the resolved absolute offset. Pass the previous next_offset_chars back unchanged to continue." })), limit_chars: Type.Optional(Type.Integer({ minimum: 1, maximum: 50000, description: "Largest requested window in code points (default 12000). A window too large for the wire budget is cut short; next_offset_chars names where the next read resumes." })) }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const path = assertVirtualPath(params.path);
@@ -63,7 +63,7 @@ export function registerNoteTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_search_contents",
 		label: "Notes search",
-		description: "Case-sensitive literal substring search over virtual note lines; query accepts one string or an array of strings, a line matches when it contains any of them (OR), and each matched line appears once. No semantic search. Every file entry carries matches_total, its full match count before any capping: when matches are dropped to fit the response budget, matches_total minus matches.length is exactly how many were dropped, never silent. Each match carries line plus offset_chars, that line's file-absolute code-point offset of the earliest match, so notes_read_file at offset_chars shows the query; a match whose line is over budget is a plain prefix and carries truncated plus total_chars (the line's full code-point length), so read the rest at the same offset_chars. Each entry also carries created_at and updated_at as local-time ISO 8601 strings with an explicit UTC offset.",
+		description: "Case-sensitive literal substring search over note lines; query is one string or several (OR), each matched line appears once. No semantic search. Each file entry carries matches_total, its full match count before capping: matches_total minus matches.length is how many were dropped. Each match carries line and offset_chars (the file-absolute code-point offset of the earliest match): notes_read_file at offset_chars shows the query. An over-budget matched line comes back as a prefix with truncated and total_chars; read the rest at the same offset_chars.",
 		parameters: Type.Object({ max_matches_per_file: positiveInteger(), cursor: cursor(), query: searchQuery(), recent_file_first: Type.Optional(Type.Boolean()), max_files: positiveInteger(), path_prefix: nullableString() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const queries = searchQueries(params.query);
@@ -123,8 +123,8 @@ export function registerNoteTools(pi: ExtensionAPI) {
 			name,
 			label: name === "notes_append_to_file" ? "Notes append" : "Notes write",
 			description: name === "notes_append_to_file"
-				? "Append exact text to a persistent virtual note file. Appending suits chronological logs; for current-state notes, replace the whole file with notes_write_file instead. Accepts the same mark_stale flag to close a note."
-				: "Create or replace a persistent virtual note file. Keep notes small and split by topic; replace outdated notes whole. With mark_stale: true, flag the note as stale instead — optionally writing its final content in the same call: stale notes leave the boot index but stay readable and searchable, and rewriting revives them.",
+				? "Append exact text to a note file. Appending suits chronological logs; for current-state notes use notes_write_file instead. mark_stale closes a note."
+				: "Create or replace a note file. Keep notes small and split by topic; replace outdated notes whole. mark_stale: true flags a note stale (optionally with its final content): stale notes leave the boot index but stay readable and searchable; rewriting revives them.",
 			parameters: Type.Object({ text: Type.Optional(Type.String()), path: Type.String(), mark_stale: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
 			// Codex sets supports_parallel_tool_calls = false on notes.write_file/append_to_file.
 			// Pi's per-tool equivalent is executionMode "sequential": a batch containing either

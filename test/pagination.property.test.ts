@@ -312,8 +312,6 @@ function globMatch(pattern: string, path: string): boolean {
 			} else {
 				source += "[^/]*";
 			}
-		} else if (char === "?") {
-			source += "[^/]";
 		} else {
 			source += char.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
 		}

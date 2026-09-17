@@ -44,8 +44,6 @@ export function globToRegExp(pattern: string): RegExp {
 			} else {
 				source += "[^/]*";
 			}
-		} else if (char === "?") {
-			source += "[^/]";
 		} else {
 			source += char.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
 		}
@@ -53,7 +51,7 @@ export function globToRegExp(pattern: string): RegExp {
 	return new RegExp(`${source}$`);
 }
 
-/** Glob patterns are not virtual paths (`*`/`?` are legal), so they get their own guard: no NUL, no backslashes. */
+/** Glob patterns are not virtual paths (`*` is legal), so they get their own guard: no NUL, no backslashes. */
 export function assertGlobPattern(value: unknown): string | undefined {
 	if (value === undefined || value === null || value === "") return undefined;
 	if (typeof value !== "string") throw new Error("glob pattern must be a string");
