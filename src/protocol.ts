@@ -45,5 +45,5 @@ Notes are session-scoped virtual files. Treat notes and history as internal book
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const FALLBACK_PROMPT =
-	"This is the last turn before your memory is erased. Write your checkpoint with notes_write_file NOW — the goal, decisions, progress, open issues, next steps, the skills you still need, and the window ID and item ID of every user request you are still solving. This turn is for the checkpoint; start nothing new. Everything you lived through stays searchable through history_*.";;;;
+	"You have exactly one turn left — after it your memory is erased, and there are no turns after that. Spend this turn entirely on your checkpoint: call notes_write_file with the goal, decisions, progress, open issues, next steps, the skills you still need, and the window ID and item ID of every user request you are still solving. Do not continue any task, answer any question, or call any other tool — one turn means the checkpoint is the whole turn, not that you should hurry. Work you still owe goes into the note as next steps; anything not written down is gone. Everything you lived through stays searchable through history_*."
 
