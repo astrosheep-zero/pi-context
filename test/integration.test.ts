@@ -247,9 +247,15 @@ async function runCommand(captured: Captured, name: string, args: string, ctx: E
 type ContextHookResult = { messages: unknown[] } | undefined;
 
 async function runContextHook(captured: Captured, ctx: ExtensionContext, eventOverride: Record<string, unknown> = {}): Promise<ContextHookResult> {
-	const handler = captured.handlers.get("context")?.[0];
-	assert.ok(handler, "context handler registered");
-	return (await handler({ type: "context", messages: [], ...eventOverride } as never, ctx)) as ContextHookResult;
+	const handlers = captured.handlers.get("context") ?? [];
+	assert.ok(handlers.length > 0, "context handler registered");
+	// Pi invokes every registered context handler in order; budget and warning each own one.
+	let result: ContextHookResult;
+	for (const handler of handlers) {
+		const returned = (await handler({ type: "context", messages: [], ...eventOverride } as never, ctx)) as ContextHookResult;
+		if (returned !== undefined) result = result ? { messages: [...result.messages, ...returned.messages] } : returned;
+	}
+	return result;
 }
 
 export function appendText(sessionManager: SessionManager, role: "user" | "assistant" | "toolResult", text: string, toolName = "bash"): string {
@@ -1302,7 +1308,7 @@ test("low-budget guidance persists once per window with no transient copy", asyn
 	// Below threshold: persist once (hidden from the TUI; the user gets one ephemeral
 	// notify instead, no turn triggered) and return no transient copy — history and
 	// the model's view never diverge on position.
-	const low = context(sessionManager, undefined, { tokens: 190_000, percent: 95, contextWindow: 200_000 });
+	const low = context(sessionManager, undefined, { tokens: 170_000, percent: 85, contextWindow: 200_000 });
 	assert.equal(await runContextHook(captured, low), undefined, "the context hook injects nothing");
 	assert.equal(captured.sent.length, 1, "persisted exactly once");
 	assert.equal(captured.sent[0]?.message.customType, internal.GUIDANCE_TYPE);
@@ -1314,7 +1320,7 @@ test("low-budget guidance persists once per window with no transient copy", asyn
 	);
 	const text = captured.sent[0]?.message.content;
 	assert.ok(typeof text === "string" && text.startsWith(internal.GUIDANCE_OPEN_TAG));
-	assert.match(text, /\b0 tokens\b/, "guidance embeds the measured remaining count");
+	assert.match(text, /\b13616 tokens\b/, "guidance embeds the measured remaining count");
 
 	// Same window: no duplicate persist.
 	assert.equal(await runContextHook(captured, low), undefined);
@@ -1324,12 +1330,12 @@ test("low-budget guidance persists once per window with no transient copy", asyn
 	const before = await runBeforeCompact(captured, low, 190_000);
 	assert.ok(before && "compaction" in before);
 	sessionManager.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 190_000, before.compaction.details, true);
-	const newWindow = context(sessionManager, undefined, { tokens: 196_000, percent: 98, contextWindow: 200_000 });
+	const newWindow = context(sessionManager, undefined, { tokens: 172_000, percent: 86, contextWindow: 200_000 });
 	assert.equal(await runContextHook(captured, newWindow), undefined, "still no injection in the fresh window");
 	assert.equal(captured.sent.length, 2);
 	const newWindowText = captured.sent[1]?.message.content;
 	assert.ok(typeof newWindowText === "string" && newWindowText.startsWith(internal.GUIDANCE_OPEN_TAG));
-	assert.match(newWindowText, /\b0 tokens\b/, "fresh window persists its own measured count");
+	assert.match(newWindowText, /\b11616 tokens\b/, "fresh window persists its own measured count");
 });
 
 test("new_context continues exactly once and cancellation/failure does not fall back or loop", async () => {
@@ -1392,7 +1398,7 @@ test("pi-context command toggles the boot block, guidance, and reset compaction 
 	const sessionManager = manager();
 	appendText(sessionManager, "user", "hello");
 	const captured = makeExtension(sessionManager);
-	const low = context(sessionManager, undefined, { tokens: 190_000, contextWindow: 200_000, percent: 95 });
+	const low = context(sessionManager, undefined, { tokens: 170_000, contextWindow: 200_000, percent: 85 });
 
 	// On by default: session_start persists the root boot block; the low budget persists guidance.
 	runHandlers(captured, "session_start", { reason: "startup" }, low);
@@ -1425,7 +1431,7 @@ test("pi-context command toggles the boot block, guidance, and reset compaction 
 	assert.match(notices[0]?.message ?? "", /on/);
 });
 
-test("compaction paths reset directly or borrow one run, then bake the boot block without extra continuations", async () => {
+test("every compaction path resets instantly for every reason, idle or streaming", async () => {
 	for (const reason of ["manual", "threshold", "overflow"] as const) {
 		for (const idle of [false, true]) {
 			const sm = manager();
@@ -1435,145 +1441,109 @@ test("compaction paths reset directly or borrow one run, then bake the boot bloc
 			const ctx = context(sm, () => { compactions++; }, undefined, idle);
 			assert.equal(captured.handlers.has("input"), false, "no user-input interception");
 			for (let window = 0; window < 2; window++) {
-				let before: CompactionHookResult;
-				if (reason === "manual" || idle) {
-					// Manual resets directly, and an idle automatic crossing resets directly too:
-					// borrowing a turn while idle would start a nested run and break the prompt.
-					before = await runBeforeCompact(captured, ctx, 100, reason);
-					assert.ok(before && "compaction" in before, `${reason}, idle=${idle}: resets directly`);
-					assert.equal(captured.sent.length, 0, `${reason}, idle=${idle}: no borrowed turn`);
-				} else {
-					// Phase 1: the streaming automatic crossing borrows exactly one fallback turn.
-					before = await runBeforeCompact(captured, ctx, 100, reason);
-					assert.deepEqual(before, { cancel: true }, `${reason}, idle=${idle}: first automatic crossing is borrowed`);
-					assert.equal(captured.sent.filter((m) => m.message.customType === internal.FALLBACK_TYPE).length, window + 1, "one fallback steer per window");
-					runHandlers(captured, "agent_end", {}, ctx);
-					// Neither reason guarantees another automatic entry once the run ends.
-					runHandlers(captured, "agent_settled", {}, ctx);
-					assert.equal(compactions, window + 1, `${reason}: ctx.compact() requests the reset`);
-					runHandlers(captured, "agent_settled", {}, ctx);
-					assert.equal(compactions, window + 1, `${reason}: settling twice does not duplicate the reset`);
-					before = await runBeforeCompact(captured, ctx, 100, "manual");
-					assert.ok(before && "compaction" in before, `${reason}, idle=${idle}: the real reset follows the borrowed turn`);
-				}
+				// The warning steer already fired from the context hook, so the compaction
+				// request itself is the wipe: every reason, idle or mid-run, resets on the
+				// spot with no model turn in between and nothing sent.
+				const before = await runBeforeCompact(captured, ctx, 100, reason);
+				assert.ok(before && "compaction" in before, `${reason}, idle=${idle}: resets directly`);
+				assert.equal(captured.sent.length, 0, `${reason}, idle=${idle}: no steer, no continuation`);
 				const details = before.compaction.details as { piContext: string; windowId: string };
 				assert.equal(details.piContext, "reset-v2");
 				assert.match(before.compaction.summary, new RegExp(`Current context window id: ${details.windowId}`));
 				const id = sm.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 100, details, true);
 				const compactionEntry = sm.getEntry(id);
 				assert.ok(compactionEntry && compactionEntry.type === "compaction");
-				const event = { reason: !idle && reason !== "manual" ? "manual" : reason, willRetry: idle && reason === "overflow", compactionEntry };
+				const event = { reason, willRetry: idle && reason === "overflow", compactionEntry };
 				runHandlers(captured, "session_compact", event, ctx);
 				runHandlers(captured, "session_compact", event, ctx);
-				// Extension-requested resets resume after completion; native resets do not.
-				if (reason !== "manual" && !idle) completeRequestedCompaction(ctx);
-				assert.equal(captured.sent.filter((m) => m.message.customType !== internal.FALLBACK_TYPE).length, reason !== "manual" && !idle ? window + 1 : 0);
+				assert.equal(compactions, 0, `${reason}, idle=${idle}: an instant reset never asks ctx.compact()`);
+				runHandlers(captured, "agent_end", {}, ctx);
+				runHandlers(captured, "agent_settled", {}, ctx);
+				assert.equal(compactions, 0, `${reason}, idle=${idle}: settling after an instant reset is a no-op`);
+				assert.equal(captured.sent.length, 0, `${reason}, idle=${idle}: nothing is ever sent`);
 			}
 		}
 	}
 });
 
-test("threshold fallback borrows exactly one turn, then resets once and re-arms per window", async () => {
+test("the warning steer fires once per window at the reserve-plus-warning line, then crossings reset instantly", async () => {
 	const sm = manager();
 	appendText(sm, "user", "long task history");
 	const captured = makeExtension(sm);
 	let compactions = 0;
-	// The fallback turn runs while Pi is streaming; the hook is entered mid-run.
-	const ctx = context(sm, () => { compactions++; }, undefined, false);
-	assert.equal(captured.handlers.has("input"), false, "no user-input interception or replay");
+	// Default thresholds: reserve 16384, the shallow reminder at remaining 40960 and the
+	// warning steer at remaining 24576 (= reserve + 8192).
+	const window = 200_000;
+	const at = (remaining: number, idle = false) => context(sm, () => { compactions++; }, { tokens: window - remaining, percent: 0, contextWindow: window }, idle);
+	const warnings = () => captured.sent.filter((entry) => entry.message.customType === internal.WARNING_TYPE);
+	const reminders = () => captured.sent.filter((entry) => entry.message.customType === internal.GUIDANCE_TYPE);
 
-	// Phase 1: the first automatic threshold crossing is cancelled and a steer is queued.
-	const first = await runBeforeCompact(captured, ctx, 100, "threshold");
-	assert.deepEqual(first, { cancel: true }, "first automatic entry cancels instead of resetting");
-	assert.equal(captured.sent.length, 1, "exactly one fallback steer queued");
-	assert.equal(captured.sent[0]?.message.customType, internal.FALLBACK_TYPE);
-	assert.equal(captured.sent[0]?.options?.triggerTurn, true, "the fallback turn is triggered by Pi, not by input replay");
-	assert.equal(captured.sent[0]?.message.display, true);
-	assert.equal(compactions, 0, "no compaction requested while borrowing the turn");
+	// Above the line the shallow reminder owns the band; no warning is steered.
+	assert.equal(await runContextHook(captured, at(24_577)), undefined);
+	assert.equal(warnings().length, 0, "no warning above the warning line");
+	assert.equal(reminders().length, 1, "the shallow reminder persists instead");
+	// Crossing the line: exactly one warning steer, triggered and visible.
+	const onLine = at(24_576);
+	assert.equal(await runContextHook(captured, onLine), undefined);
+	assert.equal(warnings().length, 1);
+	assert.equal(warnings()[0]?.message.customType, internal.WARNING_TYPE);
+	assert.equal(warnings()[0]?.options?.triggerTurn, true, "the steer reaches the model mid-run");
+	assert.equal(warnings()[0]?.message.display, true);
+	assert.ok(
+		noticesOf(onLine).some((notice) => notice.type === "warning" && notice.message.startsWith("pi-context: context budget critical")),
+		"the user gets one model-invisible notify for the steer",
+	);
+	// Once per window: deeper sampling does not repeat it.
+	assert.equal(await runContextHook(captured, at(4_000)), undefined);
+	assert.equal(warnings().length, 1, "one warning per window, never an unbounded loop");
 
-	// The borrowed turn ends; agent_end only arms the allowance.
-	runHandlers(captured, "agent_end", {}, ctx);
-	assert.equal(compactions, 0, "agent_end does not itself compact");
+	// The model rode on: Pi's automatic crossing resets on the spot — no cancel, no turn.
+	const crossing = await runBeforeCompact(captured, at(1_000), 100, "threshold");
+	assert.ok(crossing && "compaction" in crossing, "the threshold crossing resets for real");
+	assert.equal(warnings().length, 1, "no second steer at the crossing");
+	assert.equal(compactions, 0, "an instant reset never asks ctx.compact()");
+	runHandlers(captured, "agent_end", {}, at(1_000));
+	runHandlers(captured, "agent_settled", {}, at(1_000));
+	runHandlers(captured, "agent_settled", {}, at(1_000));
+	assert.equal(compactions, 0, "agent_end/settled never request a reset for an instant one");
 
-	// Phase 2: the next automatic entry performs the real reset with no second steer.
-	const second = await runBeforeCompact(captured, ctx, 100, "threshold");
-	assert.ok(second && "compaction" in second, "the second entry resets for real");
-	assert.equal(captured.sent.length, 1, "no second fallback turn");
-	const details = second.compaction.details as { piContext: string; windowId: string };
-	assert.equal(details.piContext, "reset-v2");
-	const id = sm.appendCompaction(second.compaction.summary, second.compaction.firstKeptEntryId, 100, details, true);
-	runHandlers(captured, "session_compact", { reason: "threshold", willRetry: false, compactionEntry: sm.getEntry(id) }, ctx);
-	// If another compaction already completed, settling must not request a second one.
-	runHandlers(captured, "agent_settled", {}, ctx);
-	assert.equal(compactions, 0, "no extra ctx.compact() once another compaction reset successfully");
-
-	// A completed reset re-arms the borrowed-turn phase for the next window, not before.
-	const third = await runBeforeCompact(captured, ctx, 100, "threshold");
-	assert.deepEqual(third, { cancel: true }, "the next window borrows one turn again");
-	assert.equal(captured.sent.length, 2, "one fallback per window, never an unbounded loop");
+	// A completed reset re-arms the warning for the next window, not before.
+	const details = crossing.compaction.details as { windowId: string };
+	sm.appendCompaction(crossing.compaction.summary, crossing.compaction.firstKeptEntryId, 100, details, true);
+	assert.equal(await runContextHook(captured, at(30_000)), undefined, "fresh window above the warning line steers no warning");
+	assert.equal(warnings().length, 1);
+	assert.equal(await runContextHook(captured, at(20_000)), undefined, "the fresh window crosses the line again");
+	assert.equal(warnings().length, 2, "the warning re-arms per window");
+	assert.equal(warnings()[1]?.message.customType, internal.WARNING_TYPE);
 });
 
-test("overflow re-triggers the reset through ctx.compact() once, and manual/new_context never cancel", async () => {
+test("overflow resets on the spot, and manual/new_context never cancel", async () => {
 	const sm = manager();
 	appendText(sm, "user", "long task history");
 	const captured = makeExtension(sm);
 	let compactions = 0;
 	const ctx = context(sm, () => { compactions++; }, undefined, false);
 
-	// Overflow phase 1: cancel + steer.
-	const first = await runBeforeCompact(captured, ctx, 100, "overflow");
-	assert.deepEqual(first, { cancel: true }, "overflow also borrows a turn first");
-	assert.equal(captured.sent.length, 1);
-	assert.equal(captured.sent[0]?.message.customType, internal.FALLBACK_TYPE);
-	runHandlers(captured, "agent_end", {}, ctx);
-	assert.equal(compactions, 0, "agent_end alone does not re-trigger");
-
-	// Pi's overflow guard blocks an automatic re-entry, so settling asks exactly once.
-	runHandlers(captured, "agent_settled", {}, ctx);
-	assert.equal(compactions, 1, "ctx.compact() re-triggers the reset after the fallback turn settles");
-	runHandlers(captured, "agent_settled", {}, ctx);
-	assert.equal(compactions, 1, "settling again does not double-request the reset");
-
-	// The extension-requested compaction is allowed through without another steer.
-	const second = await runBeforeCompact(captured, ctx, 100, "manual");
-	assert.ok(second && "compaction" in second, "the requested reset performs the real compaction");
-	assert.equal(captured.sent.length, 1, "no extra fallback steer");
-	const details = second.compaction.details as { piContext: string; windowId: string };
-	const id = sm.appendCompaction(second.compaction.summary, second.compaction.firstKeptEntryId, 100, details, true);
-	runHandlers(captured, "session_compact", { reason: "manual", willRetry: false, compactionEntry: sm.getEntry(id) }, ctx);
-	completeRequestedCompaction(ctx);
-	assert.equal(captured.sent.length, 2, "fallback reset resumes with one continuation");
+	// Overflow resets immediately, exactly like the threshold crossing.
+	const overflow = await runBeforeCompact(captured, ctx, 100, "overflow");
+	assert.ok(overflow && "compaction" in overflow, "overflow resets on the spot");
+	assert.equal(captured.sent.length, 0, "no steer at the crossing");
 
 	// User /compact resets directly.
 	const manual = await runBeforeCompact(captured, ctx, 100, "manual");
 	assert.ok(manual && "compaction" in manual, "manual compaction is never intercepted");
-	assert.equal(captured.sent.length, 2, "manual compaction sends nothing");
+	assert.equal(captured.sent.length, 0, "manual compaction sends nothing");
 
 	// new_context requests its reset after the run settles.
 	await call(captured, "new_context", {}, ctx);
 	runHandlers(captured, "agent_end", {}, ctx);
-	assert.equal(compactions, 1, "new_context waits for settled");
+	assert.equal(compactions, 0, "new_context waits for settled");
 	runHandlers(captured, "agent_settled", {}, ctx);
-	assert.equal(compactions, 2, "new_context still compacts through ctx.compact()");
+	runHandlers(captured, "agent_settled", {}, ctx);
+	assert.equal(compactions, 1, "new_context still compacts through ctx.compact()");
 	const explicit = await runBeforeCompact(captured, ctx, 100, "manual");
 	assert.ok(explicit && "compaction" in explicit, "new_context reset is allowed");
-	assert.equal(captured.sent.length, 2, "new_context never cancels or emits a fallback steer");
-});
-
-test("an idle pre-prompt automatic crossing resets directly instead of starting a nested run", async () => {
-	// Pi's AgentSession.prompt() runs _checkCompaction() while idle, before submitting the
-	// user's prompt. Borrowing a turn there would call sendCustomMessage -> _runAgentPrompt,
-	// whose activeRun makes the pending Agent.prompt() reject with "Agent is already
-	// processing a prompt". The extension must therefore never cancel an idle crossing.
-	const sm = manager();
-	appendText(sm, "user", "long task history");
-	const captured = makeExtension(sm);
-	const idle = context(sm, undefined, undefined, true);
-	for (const reason of ["threshold", "overflow"] as const) {
-		const result = await runBeforeCompact(captured, idle, 100, reason);
-		assert.ok(result && "compaction" in result, `${reason}: idle crossing resets directly`);
-	}
-	assert.equal(captured.sent.length, 0, "no steer is queued while idle, so no nested run races the prompt");
+	assert.equal(captured.sent.length, 0, "new_context never cancels or emits a steer");
 });
 
 test("remaining budget excludes the effective reserve, clamps at zero, and preserves unknown usage", async () => {
@@ -1583,6 +1553,7 @@ test("remaining budget excludes the effective reserve, clamps at zero, and prese
 	});
 	const sm = manager();
 	const captured = makeExtension(sm);
+	runHandlers(captured, "session_tree", {}, context(sm, undefined, undefined, true, fixture.cwd, true));
 	const readBudget = async (tokens: number | null, trusted = true) => {
 		const ctx = context(sm, undefined, { tokens, contextWindow: 200_000, percent: tokens === null ? null : tokens / 2000 }, true, fixture.cwd, trusted);
 		return resultJson<{ remaining_tokens: number | null }>(await call(captured, "get_context_remaining", {}, ctx)).remaining_tokens;
@@ -1606,10 +1577,13 @@ test("the reminder threshold derives from compaction.reserveTokens plus the pi-c
 	});
 	const sm = manager();
 	const captured = makeExtension(sm);
+	// Thresholds are resolved once per session and cached; branch navigation clears the
+	// cache without emitting a boot block, so the next read uses this fixture.
+	runHandlers(captured, "session_tree", {}, context(sm, undefined, undefined, true, fixture.cwd));
 	const window = 300_000;
 	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
 
-	// reminder = 100000 + 30000. The borrowed automatic fallback has no token threshold of its own.
+	// reminder = 100000 + 30000.
 	assert.equal(await runContextHook(captured, at(130_001)), undefined, "nothing injected above the derived reminder");
 	assert.equal(captured.sent.length, 0, "no guidance above the derived reminder");
 	assert.equal(await runContextHook(captured, at(130_000)), undefined, "derived reminder crossing persists only");
@@ -1628,6 +1602,9 @@ test("absent pi-context key or margins reproduce the default reminder threshold 
 		const fixture = settingsFixture(options);
 		const sm = manager();
 		const captured = makeExtension(sm);
+		// Thresholds are resolved once per session and cached; branch navigation clears the
+		// cache without emitting a boot block, so the next read uses this fixture.
+		runHandlers(captured, "session_tree", {}, context(sm, undefined, undefined, true, fixture.cwd));
 		const window = 200_000;
 		const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
 		const first = at(40_961);
@@ -1649,6 +1626,7 @@ test("project pi-context reminder margin and reserve override global per key", a
 	// Project reserve wins: reminder = 50000 + 40000 (project margin).
 	const sm = manager();
 	const captured = makeExtension(sm);
+	runHandlers(captured, "session_tree", {}, context(sm, undefined, undefined, true, fixture.cwd));
 	const window = 300_000;
 	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
 	assert.equal(await runContextHook(captured, at(90_001)), undefined, "nothing injected above the project-derived reminder");
@@ -1664,6 +1642,7 @@ test("an untrusted project is ignored, so global pi-context margins apply", asyn
 	});
 	const sm = manager();
 	const captured = makeExtension(sm);
+	runHandlers(captured, "session_tree", {}, context(sm, undefined, undefined, true, fixture.cwd, false));
 	const window = 100_000;
 	// Global reminder = 16384 + 30000 = 46384, not the project's 56384.
 	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd, false);
@@ -1718,48 +1697,51 @@ test("the old threshold flags are no longer registered", () => {
 	assert.deepEqual(captured.flags, []);
 });
 
-test("the removed pre-prompt/turn_end fallback no longer exists; only session_before_compact borrows a turn", async () => {
+test("the removed pre-prompt/turn_end hooks stay gone; the context hook owns the only steer", async () => {
 	const sm = manager();
 	const captured = makeExtension(sm);
-	// The old graceful-fallback path registered both hooks and fired on a token threshold of its
-	// own. It is gone: no fallback can be sent outside Pi's automatic compaction request.
-	assert.equal(captured.handlers.has("before_agent_start"), false, "before_agent_start fallback removed");
-	assert.equal(captured.handlers.has("turn_end"), false, "turn_end fallback removed");
+	// The old pre-prompt/turn_end paths registered hooks and fired on a token threshold
+	// of their own. They are gone: nothing fires outside the context hook and
+	// session_before_compact.
+	assert.equal(captured.handlers.has("before_agent_start"), false, "before_agent_start hook removed");
+	assert.equal(captured.handlers.has("turn_end"), false, "turn_end hook removed");
 	assert.equal(captured.handlers.has("input"), false, "no input copy/replay special case");
-	assert.equal(captured.handlers.has("session_before_compact"), true, "session_before_compact is the sole entry point");
+	assert.equal(captured.handlers.has("session_before_compact"), true, "session_before_compact is the sole compaction entry point");
 
-	// Even deep inside the old fallback band, nothing is sent until compaction is requested.
+	// Deep in the warning band the context hook steers the warning; the shallow
+	// guidance is superseded, not stacked on top of it.
 	const window = 200_000;
 	const ctx = context(sm, undefined, { tokens: window - 24_576, percent: 0, contextWindow: window }, false);
-	assert.equal(captured.sent.length, 0, "no fallback is sent before a compaction request");
-	const before = await runBeforeCompact(captured, ctx, 100, "threshold");
-	assert.deepEqual(before, { cancel: true }, "the automatic crossing borrows exactly one turn");
+	assert.equal(captured.sent.length, 0, "nothing before the hook runs");
+	assert.equal(await runContextHook(captured, ctx), undefined);
 	assert.equal(captured.sent.length, 1);
-	assert.equal(captured.sent[0]?.message.customType, internal.FALLBACK_TYPE);
+	assert.equal(captured.sent[0]?.message.customType, internal.WARNING_TYPE);
 	assert.equal(captured.sent[0]?.options?.triggerTurn, true);
 
-	// The borrowed turn ends, and the next request performs the real reset without a second steer.
-	runHandlers(captured, "agent_end", {}, ctx);
-	const second = await runBeforeCompact(captured, ctx, 100, "threshold");
-	assert.ok(second && "compaction" in second, "the second entry resets for real");
-	assert.equal(captured.sent.length, 1, "one cancel, one steer, one real compaction");
+	// The compaction request that follows is the wipe itself: instant reset, no cancel.
+	const before = await runBeforeCompact(captured, ctx, 100, "threshold");
+	assert.ok(before && "compaction" in before, "the crossing resets for real");
+	assert.equal(captured.sent.length, 1, "one steer, one real compaction");
 });
 
-test("ordinary new_context and calls inside fallback request one reset and start a fresh run", async () => {
+test("ordinary new_context after an automatic crossing still requests one reset and starts a fresh run", async () => {
 	for (const reason of [undefined, "threshold", "overflow"] as const) {
 		const sm = manager();
 		appendText(sm, "user", "work to continue after reset");
 		const captured = makeExtension(sm);
 		let compactions = 0;
 		const ctx = context(sm, () => { compactions++; }, undefined, false);
-		if (reason) assert.deepEqual(await runBeforeCompact(captured, ctx, 100, reason), { cancel: true });
+		if (reason) {
+			const crossing = await runBeforeCompact(captured, ctx, 100, reason);
+			assert.ok(crossing && "compaction" in crossing, `${reason}: the crossing already reset on the spot`);
+		}
 		const request = await call(captured, "new_context", {}, ctx);
 		assert.equal(request.terminate, true, "end the current tool loop before reset");
 		runHandlers(captured, "agent_end", {}, ctx);
 		assert.equal(compactions, 0, "no request before settled");
 		runHandlers(captured, "agent_settled", {}, ctx);
 		runHandlers(captured, "agent_settled", {}, ctx);
-		assert.equal(compactions, 1, "explicit reset consumes the fallback allowance");
+		assert.equal(compactions, 1, "explicit reset consumes the request");
 		const before = await runBeforeCompact(captured, ctx, 100, "manual");
 		assert.ok(before && "compaction" in before);
 		const id = sm.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 100, before.compaction.details, true);
@@ -1769,9 +1751,8 @@ test("ordinary new_context and calls inside fallback request one reset and start
 		runHandlers(captured, "agent_settled", {}, ctx);
 		assert.equal(compactions, 1, "no second reset after success");
 		completeRequestedCompaction(ctx);
-		const continuations = captured.sent.filter((sent) => sent.message.customType !== internal.FALLBACK_TYPE);
-		assert.equal(continuations.length, 1, "explicit request still owns exactly one continuation");
-		const continuation = continuations[0]!;
+		assert.equal(captured.sent.length, 1, "explicit request still owns exactly one continuation");
+		const continuation = captured.sent[0]!;
 		assert.equal(continuation.options?.triggerTurn, true);
 		// Exercise Pi's real custom-message routing after the old run has settled.
 		// The prompt endpoint is stubbed; no provider request is made.
@@ -1817,7 +1798,7 @@ test("boot and guidance deduplicate across extension reload while a new branch c
 	const sm = manager();
 	appendText(sm, "user", "branch anchor");
 	const anchor = sm.getLeafId()!;
-	const ctx = context(sm, undefined, { tokens: 190_000, percent: 95, contextWindow: 200_000 });
+	const ctx = context(sm, undefined, { tokens: 170_000, percent: 85, contextWindow: 200_000 });
 	const first = makeExtension(sm);
 	runHandlers(first, "session_start", {}, ctx);
 	runHandlers(first, "context", {}, ctx);
@@ -1854,7 +1835,7 @@ test("malformed persisted note timestamps are ignored without poisoning valid no
 test("JSONL reload retains once-per-window boot and reminder without runtime memory", () => {
 	const sm = manager(true);
 	const first = makeExtension(sm);
-	const usage = { tokens: 190_000, percent: 95, contextWindow: 200_000 };
+	const usage = { tokens: 170_000, percent: 85, contextWindow: 200_000 };
 	const ctx = context(sm, undefined, usage);
 	runHandlers(first, "session_start", {}, ctx);
 	runHandlers(first, "context", {}, ctx);
@@ -1874,39 +1855,39 @@ test("JSONL reload retains once-per-window boot and reminder without runtime mem
 });
 
 
-test("fallback guidance supersedes the early reminder when usage jumps across both thresholds", async () => {
+test("the warning supersedes the early reminder when usage jumps across both thresholds", async () => {
 	const sm = manager();
 	appendText(sm, "user", "ongoing work");
 	const captured = makeExtension(sm);
 	const ctx = context(sm, undefined, { tokens: 199_000, percent: 99.5, contextWindow: 200_000 }, false);
-	assert.deepEqual(await runBeforeCompact(captured, ctx, 199_000, "threshold"), { cancel: true });
-	runHandlers(captured, "context", {}, ctx);
-	assert.deepEqual(captured.sent.map((entry) => entry.message.customType), [internal.FALLBACK_TYPE]);
+	assert.equal(await runContextHook(captured, ctx), undefined);
+	assert.deepEqual(captured.sent.map((entry) => entry.message.customType), [internal.WARNING_TYPE]);
 	const reloaded = makeExtension(sm);
 	runHandlers(reloaded, "context", {}, ctx);
-	assert.equal(reloaded.sent.length, 0, "persisted fallback also suppresses a late reminder after reload");
+	assert.equal(reloaded.sent.length, 0, "persisted warning also suppresses a late reminder after reload");
 });
 
 
-test("fallback suppression is branch-local and survives toggling without becoming permanent", async () => {
+test("warning suppression is branch-local and survives toggling without becoming permanent", async () => {
 	const sm = manager();
 	appendText(sm, "user", "branch anchor");
 	const anchor = sm.getLeafId()!;
 	const captured = makeExtension(sm);
 	const ctx = context(sm, undefined, { tokens: 199_000, percent: 99.5, contextWindow: 200_000 }, false);
-	await runBeforeCompact(captured, ctx, 199_000, "threshold");
-	const fallbackLeaf = sm.getLeafId()!;
+	await runContextHook(captured, ctx);
+	assert.equal(captured.sent.length, 1);
+	const warnedLeaf = sm.getLeafId()!;
 	await runCommand(captured, "pi-context", "off", ctx);
 	await runCommand(captured, "pi-context", "on", ctx);
 	runHandlers(captured, "context", {}, ctx);
-	assert.equal(captured.sent.length, 1, "toggle does not revive an obsolete reminder");
+	assert.equal(captured.sent.length, 1, "toggle does not revive the steer");
 	sm.branch(anchor);
 	runHandlers(captured, "session_tree", {}, ctx);
 	runHandlers(captured, "context", {}, ctx);
 	assert.equal(captured.sent.length, 2);
-	assert.equal(captured.sent[1].message.customType, internal.GUIDANCE_TYPE, "sibling without fallback still needs its early reminder");
-	sm.branch(fallbackLeaf);
+	assert.equal(captured.sent[1].message.customType, internal.WARNING_TYPE, "sibling without the warning still gets its own steer");
+	sm.branch(warnedLeaf);
 	runHandlers(captured, "session_tree", {}, ctx);
 	runHandlers(captured, "context", {}, ctx);
-	assert.equal(captured.sent.length, 2, "returning to fallback branch remains suppressed");
+	assert.equal(captured.sent.length, 2, "returning to the warned branch stays suppressed");
 });

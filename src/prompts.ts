@@ -65,6 +65,6 @@ export function bootBlock(ctx: ExtensionContext, currentId: string, previousId: 
  * at write time; get_context_remaining remains the live source for the current figure.
  */
 export function tokenBudgetGuidance(remaining: number): string {
-	return `${GUIDANCE_OPEN_TAG}\nYour brain is almost out of room — ${remaining} tokens left, then your memory gets wiped. Grab the notebook: write your checkpoint — the goal, decisions, progress, open issues, next steps, the skills you still need, the window ID and item ID of every user request you are still solving, and any actions or tool calls worth finding again. Replacing an older checkpoint? Mark that one stale in the same sitting. Then end the window yourself and wake clean — everything you do after the checkpoint isn't in it. The automatic reset may not leave you another turn.\n${GUIDANCE_CLOSE_TAG}`;
+	return `${GUIDANCE_OPEN_TAG}\nYour brain is almost out of room — ${remaining} tokens left, and then your memory gets wiped. The wipe is automatic: there is no final turn to write then. Grab the notebook now — the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. Replacing an older checkpoint? Mark it stale. Then end the window yourself — anything you do after the checkpoint isn't in it.\n${GUIDANCE_CLOSE_TAG}`;
 }
 

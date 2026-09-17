@@ -28,7 +28,6 @@ function harness() {
 		sendMessage: (message: { customType: string }) => messages.push(message.customType),
 	} as unknown as ExtensionAPI, {
 		isEnabled: () => enabled,
-		fallback: { customType: "fallback", content: "save notes", display: true },
 		continuation: { customType: "continue", content: "resume", display: false },
 		buildReset: () => ({ compaction: { summary: "reset", firstKeptEntryId: "marker", tokensBefore: 100, details: {} } }),
 		isCurrentReset: (id) => id === currentReset,
@@ -45,10 +44,6 @@ function harness() {
 		disable: () => { enabled = false; lifecycle.clear(); },
 		enable: () => { enabled = true; },
 		before: (reason = "threshold") => emit("session_before_compact", { reason, signal: new AbortController().signal }),
-		borrow: () => {
-			idle = false;
-			assert.deepEqual(emit("session_before_compact", { reason: "threshold", signal: new AbortController().signal }), { cancel: true });
-		},
 		settle: () => { emit("agent_end"); idle = true; emit("agent_settled"); },
 		success: (id = "reset", willRetry = false) => {
 			currentReset = id;
@@ -60,7 +55,6 @@ function harness() {
 
 test("reset completion, duplicate callbacks, and duplicate tools cannot launch duplicate runs", () => {
 	const h = harness();
-	h.borrow();
 	assert.equal(h.lifecycle.request(), "rollover_requested");
 	assert.equal(h.lifecycle.request(), "rollover_already_pending");
 	h.settle();
@@ -68,37 +62,32 @@ test("reset completion, duplicate callbacks, and duplicate tools cannot launch d
 	assert.equal(h.requests.length, 1);
 	h.success();
 	h.success();
-	assert.deepEqual(h.messages, ["fallback"], "nothing starts inside session_compact");
+	assert.deepEqual(h.messages, [], "nothing starts inside session_compact");
 	h.complete();
 	h.complete();
 	h.emit("agent_settled");
-	assert.deepEqual(h.messages, ["fallback", "continue"]);
+	assert.deepEqual(h.messages, ["continue"]);
 	assert.equal(h.requests.length, 1);
 });
 
-test("fallback alone resumes after its extension-requested reset", () => {
+test("automatic threshold compactions reset on the spot, with no steer and no model turn", () => {
 	const h = harness();
-	h.borrow();
-	h.settle();
-	h.success();
-	h.complete();
-	assert.deepEqual(h.messages, ["fallback", "continue"]);
+	assert.ok(h.before().compaction, "the native attempt becomes our reset immediately");
+	assert.deepEqual(h.messages, [], "nothing is sent to the model");
 });
 
-test("a borrowed-turn cancellation is not treated as failure of an explicit reset", () => {
+test("a native compaction failure is not treated as failure of an explicit reset", () => {
 	const h = harness();
-	h.borrow();
 	h.emit("session_compact_failed", { reason: "threshold", aborted: true });
 	h.lifecycle.request();
 	h.settle();
 	h.success();
 	h.complete();
-	assert.deepEqual(h.messages, ["fallback", "continue"]);
+	assert.deepEqual(h.messages, ["continue"]);
 });
 
-test("failed resets release the request, retain history, and do not retry or borrow indefinitely", () => {
+test("failed resets release the request, retain history, and do not retry", () => {
 	const h = harness();
-	h.borrow();
 	h.lifecycle.request();
 	h.settle();
 	h.emit("session_compact_failed", { reason: "manual", aborted: false });
@@ -108,15 +97,15 @@ test("failed resets release the request, retain history, and do not retry or bor
 	h.emit("agent_settled");
 	assert.equal(h.requests.length, 1);
 	assert.equal(h.notices.length, 1);
-	assert.deepEqual(h.messages, ["fallback"]);
+	assert.deepEqual(h.messages, []);
 	h.setIdle(false);
-	assert.ok(h.before().compaction, "the next native attempt resets without borrowing again");
+	assert.ok(h.before().compaction, "the next native attempt resets directly");
 	assert.equal(h.lifecycle.request(), "rollover_requested", "explicit retry is possible");
 	h.settle();
 	assert.equal(h.requests.length, 2);
 	h.success();
 	h.complete(1);
-	assert.deepEqual(h.messages, ["fallback", "continue"]);
+	assert.deepEqual(h.messages, ["continue"]);
 });
 
 test("synchronous compact errors cannot leave a permanent in-flight request", () => {
@@ -129,16 +118,13 @@ test("synchronous compact errors cannot leave a permanent in-flight request", ()
 	assert.equal(h.lifecycle.request(), "rollover_requested");
 });
 
-test("user abort ends both explicit and fallback work without resurrecting the run", () => {
-	for (const borrow of [false, true]) {
-		const h = harness();
-		if (borrow) h.borrow();
-		h.lifecycle.request();
-		h.setSignal(AbortSignal.abort());
-		h.settle();
-		assert.equal(h.requests.length, 0);
-		assert.equal(h.messages.includes("continue"), false);
-	}
+test("user abort ends explicit work without resurrecting the run", () => {
+	const h = harness();
+	h.lifecycle.request();
+	h.setSignal(AbortSignal.abort());
+	h.settle();
+	assert.equal(h.requests.length, 0);
+	assert.equal(h.messages.includes("continue"), false);
 });
 
 test("shutdown, restart, tree navigation and toggling off invalidate late callbacks", () => {
@@ -197,13 +183,4 @@ test("do not interrupt another active run or duplicate a queued user prompt", ()
 	queued.lifecycle.request(); queued.settle(); queued.success();
 	queued.setPending(true); queued.complete();
 	assert.deepEqual(queued.messages, [], "do not add a competing prompt");
-});
-
-test("foreign or unconfirmed reset events cannot trigger a successful continuation", () => {
-	const h = harness();
-	h.lifecycle.request(); h.settle();
-	h.emit("session_compact", { compactionEntry: { id: "foreign" }, willRetry: false });
-	h.complete();
-	assert.deepEqual(h.messages, []);
-	assert.equal(h.lifecycle.request(), "rollover_requested");
 });

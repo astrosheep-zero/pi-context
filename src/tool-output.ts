@@ -125,7 +125,7 @@ export type ItemTruncator<T> = (item: T, fits: (candidate: T) => boolean) => T;
  * Build a page without ever adding an item that would exceed the wire budget.
  *
  * A single item that cannot fit is middle-truncated through the optional `truncate`
- * callback and still included, with `next_cursor` advanced past it. Without that fallback
+ * callback and still included, with `next_cursor` advanced past it. Without that treatment
  * an oversized item would yield an empty page forever: the cursor would keep pointing back
  * at the same index.
  */

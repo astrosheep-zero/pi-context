@@ -7,26 +7,22 @@ type ResetResult = { cancel: true } | {
 /** A reset request is session-local. Only this module schedules compaction/continuation. */
 export function registerResetLifecycle(pi: ExtensionAPI, options: {
 	isEnabled: () => boolean;
-	fallback: Parameters<ExtensionAPI["sendMessage"]>[0];
 	continuation: Parameters<ExtensionAPI["sendMessage"]>[0];
 	buildReset: (event: SessionBeforeCompactEvent, ctx: ExtensionContext, explicit: boolean) => ResetResult;
 	isCurrentReset: (entryId: string, ctx: ExtensionContext) => boolean;
 	onReset: (entryId: string) => void;
 }) {
-	type Fallback = "available" | "borrowed" | "ready" | "spent";
 	type Attempt = { completed: boolean; sessionId: string; explicit: boolean };
 	type Request =
 		| { phase: "idle" }
 		| { phase: "requested" }
 		| { phase: "compacting"; attempt: Attempt };
 	let state: Request = { phase: "idle" };
-	let fallback: Fallback = "available";
 	let handledEntry: string | undefined;
 	let active = true;
 
 	const clear = () => {
 		state = { phase: "idle" };
-		fallback = "available";
 		handledEntry = undefined;
 	};
 	const valid = (request: Attempt, ctx: ExtensionContext) =>
@@ -43,25 +39,22 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: {
 		if (ctx.signal?.aborted) {
 			// Esc cancels the user's run. Do not reset or resurrect it at settled.
 			state = { phase: "idle" };
-			if (fallback !== "available") fallback = "spent";
 			return;
 		}
-		if (fallback === "borrowed") fallback = "ready";
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
 		if (!active || !options.isEnabled() || state.phase === "compacting" || !ctx.isIdle()) return;
-		if (state.phase !== "requested" && fallback !== "ready") return;
-		// One owner for explicit and fallback resets. Consume the request before any
-		// external call; repeated settled events and reentrant callbacks are harmless.
-		const request: Attempt = { completed: false, sessionId: ctx.sessionManager.getSessionId(), explicit: state.phase === "requested" };
+		if (state.phase !== "requested") return;
+		// One owner for requested resets. Consume the request before any external call;
+		// repeated settled events and reentrant callbacks are harmless.
+		const request: Attempt = { completed: false, sessionId: ctx.sessionManager.getSessionId(), explicit: true };
 		state = { phase: "compacting", attempt: request };
-		if (fallback !== "available") fallback = "spent";
 		const onError = (error: Error) => {
 			if (!valid(request, ctx)) return;
 			state = { phase: "idle" };
 			// Do not retry from settled in a tight loop. A later prompt may trigger a
-			// native reset or explicitly request one; the borrowed allowance stays spent.
+			// native reset or explicitly request one.
 			ctx.ui.notify(`pi-context: reset did not complete (${error.message}). The conversation is retained; resume with another prompt.`, "warning");
 		};
 		try {
@@ -86,16 +79,11 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: {
 	pi.on("session_before_compact", (event, ctx) => {
 		if (!active || !options.isEnabled()) return undefined;
 		if (event.signal.aborted) return { cancel: true };
-		const automatic = event.reason === "threshold" || event.reason === "overflow";
-		if (automatic && state.phase === "idle" && fallback === "available" && !ctx.isIdle()) {
-			// Pi routes triggerTurn to steer during a run. Idle calls would start a
-			// nested prompt, so pre-prompt automatic compactions always reset directly.
-			fallback = "borrowed";
-			pi.sendMessage(options.fallback, { triggerTurn: true });
-			return { cancel: true };
-		}
+		// Automatic threshold/overflow compactions reset on the spot — no model turn.
+		// The warning steer fired earlier (see warning.ts); what crosses the reserve
+		// line now is the wipe itself.
 		try {
-			return options.buildReset(event, ctx, state.phase === "requested" || (state.phase === "compacting" && state.attempt.explicit));
+			return options.buildReset(event, ctx, state.phase === "requested");
 		} catch (error) {
 			ctx.ui.notify(`pi-context: could not build reset (${String(error)}).`, "warning");
 			return { cancel: true }; // Never fall through to a generated default summary.
@@ -106,7 +94,6 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: {
 		if (!active || !options.isEnabled() || handledEntry === event.compactionEntry.id) return;
 		if (!options.isCurrentReset(event.compactionEntry.id, ctx)) return;
 		handledEntry = event.compactionEntry.id;
-		fallback = "available";
 		if (state.phase === "compacting") state.attempt.completed = !event.willRetry;
 		else state = { phase: "idle" };
 		// A native compaction (including overflow retry) owns its own scheduling.
