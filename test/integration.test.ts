@@ -290,6 +290,41 @@ test("schemas cover the nine History/Notes actions plus reset controls", () => {
 		const schema = captured.tools.get(name)?.parameters as { properties?: Record<string, { description?: string }> } | undefined;
 		assert.equal(schema?.properties?.recent_first?.description?.includes("Defaults to true."), true, `${name} documents the recent_first default`);
 	}
+	// The notes list surface documents its default ordering, both axes, and the pagination caveat.
+	const listDescription = captured.tools.get("notes_list_files")?.description ?? "";
+	for (const axis of ["name", "created_at", "updated_at"]) assert.ok(listDescription.includes(axis), `notes_list_files names the ${axis} axis`);
+	assert.ok(listDescription.includes("default updated_at"), "notes_list_files names the default axis");
+	assert.ok(listDescription.includes("ascending") && listDescription.includes("descending"), "notes_list_files names both directions");
+	assert.match(listDescription, /reshuffle between pages/, "notes_list_files documents the live-pagination caveat");
+});
+
+test("notes_list_files defaults to freshest-first and keeps per-axis natural directions", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	// Persisted ops carry exact timestamps, so the total order is pinned without wall-clock races.
+	const base = 1_700_000_000_000;
+	for (const entry of [
+		{ path: "b.md", createdAt: base + 1, updatedAt: base + 10 },
+		{ path: "a.md", createdAt: base + 2, updatedAt: base + 10 },
+		{ path: "c.md", createdAt: base + 3, updatedAt: base + 5 },
+		{ path: "d.md", createdAt: base + 3, updatedAt: base + 5 },
+		{ path: "e.md", createdAt: base + 4, updatedAt: base + 10 },
+	]) {
+		session.appendCustomEntry(NOTE_TYPE, { op: "write", path: entry.path, text: entry.path, createdAt: entry.createdAt, updatedAt: entry.updatedAt });
+	}
+	const paths = async (params: Record<string, unknown>) =>
+		resultJson<{ files: Array<{ path: string }> }>(await call(captured, "notes_list_files", params, ctx)).files.map((file) => file.path);
+	// A bare call is freshest-first: updated_at descending, then created_at descending, then path descending.
+	assert.deepEqual(await paths({}), ["e.md", "a.md", "b.md", "d.md", "c.md"], "a bare call is updated_at descending with the (created_at, path) tiebreaks");
+	// An explicit axis without an explicit direction takes that axis's natural direction.
+	assert.deepEqual(await paths({ file_order_by: "name" }), ["a.md", "b.md", "c.md", "d.md", "e.md"], "name is naturally ascending");
+	assert.deepEqual(await paths({ file_order_by: "created_at" }), ["e.md", "d.md", "c.md", "a.md", "b.md"], "created_at is naturally descending");
+	// file_order alone keeps the default axis and overrides its natural direction.
+	assert.deepEqual(await paths({ file_order: "ascending" }), ["c.md", "d.md", "b.md", "a.md", "e.md"], "an explicit ascending flips the updated_at default");
+	// An explicit file_order always beats the axis's natural direction.
+	assert.deepEqual(await paths({ file_order_by: "name", file_order: "descending" }), ["e.md", "d.md", "c.md", "b.md", "a.md"], "an explicit descending beats the name axis's natural ascending");
+	assert.deepEqual(await paths({ file_order_by: "updated_at", file_order: "ascending" }), ["c.md", "d.md", "b.md", "a.md", "e.md"], "an explicit ascending beats the updated_at axis's natural descending");
 });
 
 test("persisted note operations restore, are Unicode byte-limited, and use safe virtual paths", async () => {
@@ -496,7 +531,7 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	let listOffset = 0;
 	let listNext: number | null = 0;
 	while (listNext !== null) {
-		const result = resultJson<{ files: Array<{ path: string }>; next_cursor: number | null }>(await call(captured, "notes_list_files", { pattern: null, max_results: 300, cursor: listOffset }, ctx));
+		const result = resultJson<{ files: Array<{ path: string }>; next_cursor: number | null }>(await call(captured, "notes_list_files", { pattern: null, file_order_by: "name", file_order: "ascending", max_results: 300, cursor: listOffset }, ctx));
 		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
 		listPages.push(...result.files.map((file) => file.path)); listNext = result.next_cursor; if (listNext !== null) listOffset = listNext;
 	}

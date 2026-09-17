@@ -327,11 +327,17 @@ function storeNoteFiles(ctx: ExtensionContext, match: (path: string) => boolean)
 		.map(([path, file]) => ({ path, text: file.text, stale: file.stale, createdAt: file.createdAt, updatedAt: file.updatedAt }));
 }
 
-/** The documented ordering of notes_list_files, reimplemented over the store. */
+/** The documented ordering of notes_list_files, reimplemented over the store: the total order
+ * (axis key, createdAt, path) ascending, then the whole comparator reversed for descending. */
 function expectedNoteOrder(ctx: ExtensionContext, variant: NoteListVariant): StoreNoteFile[] {
 	const files = storeNoteFiles(ctx, (path) => !variant.pattern || globMatch(variant.pattern, path));
 	const key = variant.orderBy;
-	files.sort((a, b) => key === "name" ? a.path.localeCompare(b.path) : key === "created_at" ? a.createdAt - b.createdAt : a.updatedAt - b.updatedAt);
+	files.sort((a, b) => {
+		const primary = key === "name" ? a.path.localeCompare(b.path) : key === "created_at" ? a.createdAt - b.createdAt : a.updatedAt - b.updatedAt;
+		if (primary !== 0) return primary;
+		if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+		return a.path.localeCompare(b.path);
+	});
 	if (variant.order === "descending") files.reverse();
 	return files;
 }

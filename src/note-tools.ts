@@ -15,15 +15,24 @@ export function registerNoteTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_list_files",
 		label: "Notes list files",
-		description: "List persistent, session-scoped virtual note files, optionally filtered by a glob pattern: * matches within a path segment, ** matches across segments (a leading **/ also matches the root), ? matches one character within a segment; an omitted or empty pattern lists every file. Each entry carries its stale flag. created_at and updated_at are local-time ISO 8601 strings with an explicit UTC offset.",
+		description: "List persistent, session-scoped virtual note files, optionally filtered by a glob pattern: * matches within a path segment, ** matches across segments (a leading **/ also matches the root), ? matches one character within a segment; an omitted or empty pattern lists every file. Ordering: file_order_by is name, created_at, or updated_at (default updated_at) and file_order is ascending or descending; each axis has a natural direction — descending for updated_at and created_at, ascending for name — used when file_order is omitted, and an explicit file_order always wins. Ties break by created_at then path, so the order is total. A store written to while it is being paged can reshuffle between pages (single-page shelves are unaffected). Each entry carries its stale flag. created_at and updated_at are local-time ISO 8601 strings with an explicit UTC offset.",
 		parameters: Type.Object({ pattern: nullableString(), max_results: positiveInteger(), cursor: cursor(), file_order_by: Type.Optional(Type.Union([Type.Literal("name"), Type.Literal("created_at"), Type.Literal("updated_at")])), file_order: Type.Optional(Type.Union([Type.Literal("ascending"), Type.Literal("descending")])) }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const pattern = assertGlobPattern(params.pattern);
 			const matcher = pattern ? globToRegExp(pattern) : undefined;
 			let files = [...notesFromSession(ctx)].filter(([path]) => !matcher || matcher.test(path));
-			const key = params.file_order_by ?? "name";
-			files.sort(([aPath, a], [bPath, b]) => key === "name" ? aPath.localeCompare(bPath) : (key === "created_at" ? a.createdAt - b.createdAt : a.updatedAt - b.updatedAt));
-			if (params.file_order === "descending") files.reverse();
+			const key = params.file_order_by ?? "updated_at";
+			// Deterministic total order: (axis key, createdAt, path) ascending. Paths are unique, so
+			// this never depends on map iteration order; descending reverses the whole comparator.
+			files.sort(([aPath, a], [bPath, b]) => {
+				const primary = key === "name" ? aPath.localeCompare(bPath) : key === "created_at" ? a.createdAt - b.createdAt : a.updatedAt - b.updatedAt;
+				if (primary !== 0) return primary;
+				if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+				return aPath.localeCompare(bPath);
+			});
+			// An explicit file_order always wins; otherwise the axis's natural direction applies
+			// (descending for the time axes, ascending for name).
+			if (params.file_order ? params.file_order === "descending" : key !== "name") files.reverse();
 			const listed: Array<{ path: string; size_bytes: number; stale: boolean; created_at: string; updated_at: string; path_truncated?: boolean }> = files.map(([path, file]) => ({ path, size_bytes: Buffer.byteLength(file.text, "utf8"), stale: file.stale, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt) }));
 			// `path` is the entry's identity: return it intact whenever the entry fits, and only
 			// ever alter it together with a visible `path_truncated: true` flag. A pathological
