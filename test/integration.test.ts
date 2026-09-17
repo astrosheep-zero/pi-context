@@ -567,7 +567,7 @@ test("the boot block is persisted at the root and baked into every reset summary
 	assert.equal(captured.sent.length, 1);
 	const rootBoot = captured.sent[0];
 	assert.equal(rootBoot?.message.customType, internal.BOOT_TYPE);
-	assert.equal(rootBoot?.message.display, true, "boot block lands in the TUI");
+	assert.equal(rootBoot?.message.display, false, "boot block stays out of the TUI");
 	assert.equal(rootBoot?.options?.triggerTurn, false);
 	const rootText = typeof rootBoot?.message.content === "string" ? rootBoot.message.content : "";
 	assert.ok(rootText.startsWith(internal.CONTEXT_WINDOW_OPEN_TAG), "root block omits the reset line");
@@ -687,14 +687,19 @@ test("low-budget guidance persists once per window with no transient copy", asyn
 	const unknown = context(sessionManager, undefined, { tokens: null, percent: null, contextWindow: 200_000 });
 	assert.equal(await runContextHook(captured, unknown), undefined);
 
-	// Below threshold: persist once (TUI-visible, no turn triggered) and return no
-	// transient copy — history and the model's view never diverge on position.
+	// Below threshold: persist once (hidden from the TUI; the user gets one ephemeral
+	// notify instead, no turn triggered) and return no transient copy — history and
+	// the model's view never diverge on position.
 	const low = context(sessionManager, undefined, { tokens: 190_000, percent: 95, contextWindow: 200_000 });
 	assert.equal(await runContextHook(captured, low), undefined, "the context hook injects nothing");
 	assert.equal(captured.sent.length, 1, "persisted exactly once");
 	assert.equal(captured.sent[0]?.message.customType, internal.GUIDANCE_TYPE);
-	assert.equal(captured.sent[0]?.message.display, true, "guidance lands in the TUI");
+	assert.equal(captured.sent[0]?.message.display, false, "guidance stays out of the TUI");
 	assert.equal(captured.sent[0]?.options?.triggerTurn, false, "never triggers an extra turn");
+	assert.ok(
+		noticesOf(low).some((notice) => notice.type === "warning" && notice.message.startsWith("pi-context: context budget low")),
+		"the user gets one model-invisible notify instead",
+	);
 	const text = captured.sent[0]?.message.content;
 	assert.ok(typeof text === "string" && text.startsWith(internal.GUIDANCE_OPEN_TAG));
 	assert.match(text, /\b0 tokens\b/, "guidance embeds the measured remaining count");

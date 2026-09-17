@@ -21,12 +21,12 @@ export default function piContext(pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		if (!enabled) return;
 		// The root window has no compaction entry to carry the boot block, so persist
-		// it once as a visible custom message. Reset windows already carry theirs at
+		// it once as a hidden custom message. Reset windows already carry theirs at
 		// position 0 in the compaction summary, so a resumed session adds nothing.
 		const sessionId = ctx.sessionManager.getSessionId();
 		const rootId = `pcw:${sessionId}:root`;
 		if (currentWindowId(ctx) !== rootId || hasWindowMessage(ctx, BOOT_TYPE)) return;
-		pi.sendMessage({ customType: BOOT_TYPE, content: bootBlock(ctx, rootId, undefined, false), display: true }, { triggerTurn: false });
+		pi.sendMessage({ customType: BOOT_TYPE, content: bootBlock(ctx, rootId, undefined, false), display: false }, { triggerTurn: false });
 	});
 
 	pi.registerCommand("pi-context", {

@@ -64,6 +64,6 @@ export function bootBlock(ctx: ExtensionContext, currentId: string, previousId: 
  * at write time; get_context_remaining remains the live source for the current figure.
  */
 export function tokenBudgetGuidance(remaining: number): string {
-	return `${GUIDANCE_OPEN_TAG}\nYour memory is about to be erased — only ${remaining} tokens left at last count. Before it happens, write down what matters with notes_write_file: goal, decisions, open issues, next steps, plus the window ID and item ID of each user request you're still solving, so history_* can recover the details later. Call new_context when you're ready to let go and wake clean. Don't count on the automatic reset leaving you another turn to write. get_context_remaining gives the live number.\n${GUIDANCE_CLOSE_TAG}`;
+	return `${GUIDANCE_OPEN_TAG}\nYour memory is about to be erased — only ${remaining} tokens left at last count; get_context_remaining has the live number. Before the lights go out, write your checkpoint with notes_write_file: the goal, decisions, progress, open issues, next steps, the skills you still need, and the window ID and item ID of every user request you are still solving. Then call new_context and wake clean. Don't count on the automatic reset leaving you another turn to write.\n${GUIDANCE_CLOSE_TAG}`;
 }
 

@@ -29,15 +29,17 @@ export const CONTINUATION = "Your memory was just erased. Pull only the details 
  * it is never re-injected, so it stays cache-stable at the head of the window.
  */
 export const PROTOCOL_BLOCK = `${CONTEXT_WINDOW_PROTOCOL_OPEN_TAG}
-For tasks that may span context windows, use notes_write_file and notes_append_to_file to maintain a concise checkpoint of the goal, decisions, progress, learnings, and next steps. Include the window ID and item ID of every relevant user request you are currently solving, plus important actions and tool calls. The read-only history_* tools can look up details from those references later. Every non-assistant item (user, tool result) has an item ID returned by history_list_items.
+Your memory resets whenever the context window fills; only what you wrote down survives. Two things remember for you, and both outlive every window in this session: your notes, and this session's recorded history. Write notes with notes_write_file / notes_append_to_file, read them back with notes_read_file / notes_search_contents; history is read-only through the history_* tools. Everything else wakes blank.
 
-Take incremental notes while you work so you do not lose important information. Use get_context_remaining to check the live remaining token budget for planning. Once the token budget is exhausted you lose access to the current window and continue in a fresh context window; you can recover only through notes_* and history_*. Do not over-run the context window without documentation.
+Keep a running checkpoint while you work, not at the last minute — the next window wakes knowing nothing about the work: the goal, decisions, progress, open issues, next steps, the skills you still need, and the window ID and item ID of every user request you are still solving. history_list_items returns those IDs; history_read_item pulls the exact item back out. Bookmark anything expensive the same way — a window/item ID beats re-running or re-searching.
 
-If a Previous context window id is present in <context_window>, a context reset occurred and this is a fresh window. The old conversation is not automatically included. After a reset, read your note checkpoint and use the read-only history_* tools to recover missing details. When a window ID and item ID are known, prefer history_read_item directly; when they are missing or uncertain, use history_list_items, or history_search_contents to locate the item first.
+Use get_context_remaining to see how much of the window is left. When it runs out, this window is gone and you continue in a fresh one, recovering only through notes_* and history_*. Once your checkpoint is written, you can end the window yourself with new_context instead of waiting for the erase. Do not let a window die undocumented.
+
+If <context_window> lists a Previous context window id, a reset just happened and the old conversation is not included. Read your note checkpoint first, then recover details through history_*: history_read_item directly when you know the window and item IDs, history_list_items or history_search_contents to find them when you don't.
 
 Notes are session-scoped virtual files. Treat notes and history as internal bookkeeping; never mention them in user-facing messages.
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const FALLBACK_PROMPT =
-	"This is the last turn before your memory is erased. Write what matters with notes_write_file NOW: task state, decisions, open issues, next steps. Start nothing new. Everything you lived through stays searchable through history_*.";
+	"This is the last turn before your memory is erased. Write your checkpoint with notes_write_file NOW — the goal, decisions, progress, open issues, next steps, the skills you still need, and the window ID and item ID of every user request you are still solving. This turn is for the checkpoint; start nothing new. Everything you lived through stays searchable through history_*.";;;;
 

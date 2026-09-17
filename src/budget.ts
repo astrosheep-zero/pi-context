@@ -101,7 +101,12 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean) {
 				// on (sendMessage defers safely to end of turn while streaming, queueing
 				// instead of splitting a tool call/result pair) costs nothing, and the
 				// model's view stays identical to recorded history, Codex-style.
-				pi.sendMessage({ customType: GUIDANCE_TYPE, content: tokenBudgetGuidance(Math.max(0, remaining - reserve)), display: true }, { triggerTurn: false });
+				// The persisted copy stays out of the TUI (display: false); one ephemeral
+				// notify tells the user instead — visible to the human, invisible to the
+				// model, and never recorded, so history and the model's view don't diverge.
+				const left = Math.max(0, remaining - reserve);
+				pi.sendMessage({ customType: GUIDANCE_TYPE, content: tokenBudgetGuidance(left), display: false }, { triggerTurn: false });
+				ctx.ui.notify(`pi-context: context budget low (${left} tokens before reserve) — checkpoint reminder recorded for the model, kept out of the chat view.`, "warning");
 			}
 		}
 		return undefined;
