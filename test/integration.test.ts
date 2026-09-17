@@ -17,7 +17,7 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import piContext, { historyFromSession, internal, notesFromSession } from "../src/index.js";
-import { TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
+import { middleTruncate, page, TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
 import { NOTE_TYPE } from "../src/protocol.js";
 
 // Settings fixtures live in temp directories. PI_CODING_AGENT_DIR is redirected for the
@@ -392,6 +392,94 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	}
 	assert.equal(noteParts.join("\n"), Array.from({ length: 1000 }, (_, line) => `needle ${line} ${"z".repeat(30)}`).join("\n"));
 	assert.equal(noteNext, null);
+});
+
+test("a single oversized note line is middle-truncated and the cursor still advances", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const huge = `H${"x".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}`;
+	await call(captured, "notes_write_file", { path: "huge.md", text: `${huge}\ntail line` }, ctx);
+	const first = resultJson<{ path: string; start_line: number; stop_line: number; content: string; total_lines: number; next_start_line: number | null }>(
+		await call(captured, "notes_read_file", { path: "huge.md", start_line: 1 }, ctx),
+	);
+	assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "single oversized line stays within budget");
+	assert.ok(first.content.length > 0, "the page is not empty");
+	assert.match(first.content, /…\[truncated \d+ chars\]…/, "the oversized line carries a middle-truncation marker");
+	assert.equal(first.total_lines, 2);
+	assert.equal(first.next_start_line, 2, "the cursor advances past the oversized line instead of looping");
+	const second = resultJson<{ content: string; next_start_line: number | null }>(
+		await call(captured, "notes_read_file", { path: "huge.md", start_line: first.next_start_line as number }, ctx),
+	);
+	assert.equal(second.content, "tail line", "the following page resumes after the truncated line");
+	assert.equal(second.next_start_line, null, "pagination terminates");
+});
+
+test("an oversized note search match is truncated, not silently dropped", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	// A fitting file sorts before the oversized one, so the oversized match starts on a later page.
+	await call(captured, "notes_write_file", { path: "a.md", text: "needle small" }, ctx);
+	await call(captured, "notes_write_file", { path: "search.md", text: `needle ${"y".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}` }, ctx);
+	const pages: Array<{ path: string; matches: Array<{ line: number; text: string }> }> = [];
+	let offset = 0;
+	let next: number | null = 0;
+	while (next !== null) {
+		const found = resultJson<{ files: Array<{ path: string; matches: Array<{ line: number; text: string }> }>; next_offset: number | null }>(
+			await call(captured, "notes_search_contents", { query: "needle", offset }, ctx),
+		);
+		assert.ok(Buffer.byteLength(JSON.stringify(found), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "match result stays within budget");
+		pages.push(...found.files);
+		next = found.next_offset;
+		if (next !== null) offset = next;
+	}
+	assert.deepEqual(pages.map((file) => file.path), ["a.md", "search.md"], "pagination reaches the oversized file instead of looping");
+	const oversized = pages[1]!;
+	assert.equal(oversized.matches.length, 1);
+	assert.match(oversized.matches[0]!.text, /…\[truncated \d+ chars\]…/, "the oversized match line is middle-truncated");
+});
+
+test("history_read_item middle-truncates one oversized read within budget", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const id = appendText(session, "user", "z".repeat(TOOL_OUTPUT_MAX_BYTES * 3));
+	const read = resultJson<{ content: string; total_chars: number; next_offset_chars: number | null }>(
+		await call(captured, "history_read_item", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: id, limit_chars: 50000 }, ctx),
+	);
+	assert.ok(Buffer.byteLength(JSON.stringify(read), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "single call stays within budget");
+	assert.match(read.content, /…\[truncated \d+ chars\]…/, "the read carries a middle-truncation marker");
+	assert.ok(read.content.length > 0, "the read is not empty");
+	assert.equal(read.next_offset_chars, 50000, "the cursor advances past the requested window");
+});
+
+test("page() includes one middle-truncated item and advances the cursor", () => {
+	const truncate = <T extends { text: string }>(item: T, fits: (candidate: T) => boolean): T => ({ ...item, text: middleTruncate(item.text, (candidate) => fits({ ...item, text: candidate })) });
+	const first = page([{ text: "a".repeat(TOOL_OUTPUT_MAX_BYTES * 2) }, { text: "b" }], 0, "items", undefined, truncate) as { items: Array<{ text: string }>; next_offset: number | null };
+	assert.equal(first.items.length, 1, "the oversized item is included, not skipped");
+	assert.match(first.items[0]!.text, /…\[truncated \d+ chars\]…/);
+	assert.equal(first.next_offset, 1, "the cursor advances past the truncated item");
+	assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
+	const last = page([{ text: "a".repeat(TOOL_OUTPUT_MAX_BYTES * 2) }], 0, "items", undefined, truncate) as { items: Array<{ text: string }>; next_offset: number | null };
+	assert.equal(last.items.length, 1);
+	assert.equal(last.next_offset, null, "the final oversized item terminates pagination");
+	// An oversized item behind a fitting one must not stall: the next page starts on it.
+	const behind = page([{ text: "small" }, { text: "c".repeat(TOOL_OUTPUT_MAX_BYTES * 2) }, { text: "tail" }], 0, "items", undefined, truncate) as { items: Array<{ text: string }>; next_offset: number | null };
+	assert.equal(behind.items.length, 1);
+	assert.equal(behind.next_offset, 1);
+	const resumed = page([{ text: "small" }, { text: "c".repeat(TOOL_OUTPUT_MAX_BYTES * 2) }, { text: "tail" }], 1, "items", undefined, truncate) as { items: Array<{ text: string }>; next_offset: number | null };
+	assert.equal(resumed.items.length, 1, "the resumed page carries the truncated item");
+	assert.match(resumed.items[0]!.text, /…\[truncated \d+ chars\]…/);
+	assert.equal(resumed.next_offset, 2, "pagination advances toward the remaining item");
+});
+
+test("note write tools run sequentially so a parallel batch cannot race the note store", () => {
+	const captured = makeExtension(manager());
+	for (const name of ["notes_write_file", "notes_append_to_file"]) {
+		assert.equal(captured.tools.get(name)?.executionMode, "sequential", `${name} forbids parallel execution`);
+	}
+	assert.equal(captured.tools.get("notes_read_file")?.executionMode, undefined, "read-only note tools keep the default mode");
 });
 
 test("custom reset boundary removes old provider context but history remains searchable", async () => {

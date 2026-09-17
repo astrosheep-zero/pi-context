@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { output, page, TOOL_OUTPUT_MAX_BYTES } from "./tool-output.js";
+import { output, page, middleTruncate, withinBudget } from "./tool-output.js";
 import { nullableString, nullableInteger, positiveInteger } from "./tool-schema.js";
 import { notesFromSession, assertVirtualPath, assertVirtualPrefix, lineRange, localIso, type NoteOperation } from "./notes.js";
 import { NOTE_TYPE, MAX_NOTE_BYTES } from "./protocol.js";
@@ -24,7 +24,7 @@ export function registerNoteTools(pi: ExtensionAPI) {
 			files.sort(([aPath, a], [bPath, b]) => key === "name" ? aPath.localeCompare(bPath) : (key === "created_at" ? a.createdAt - b.createdAt : a.updatedAt - b.updatedAt));
 			if (params.file_order === "descending") files.reverse();
 			const listed = files.map(([path, file]) => ({ path, size_bytes: Buffer.byteLength(file.text, "utf8"), created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt) }));
-			return output(page(listed, params.offset ?? 0, "files", params.max_results));
+			return output(page(listed, params.offset ?? 0, "files", params.max_results, (file, fits) => ({ ...file, path: middleTruncate(file.path, (candidate) => fits({ ...file, path: candidate })) })));
 		},
 	}));
 
@@ -39,9 +39,16 @@ export function registerNoteTools(pi: ExtensionAPI) {
 			if (!file) return output({ error: "note file not found", path });
 			const range = lineRange(file.text, params.start_line, params.stop_line);
 			const lines = range.content ? range.content.split("\n") : [];
+			const totalLines = file.text.split("\n").length;
+			const result = (content: string, count: number) => ({ path, start_line: range.start_line, stop_line: range.start_line + count - 1, content, total_lines: totalLines, next_start_line: range.start_line + count <= range.stop_line ? range.start_line + count : null, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt) });
 			let count = lines.length;
-			while (count > 0 && Buffer.byteLength(JSON.stringify({ path, ...range, content: lines.slice(0, count).join("\n"), total_lines: file.text.split("\n").length, next_start_line: range.start_line + count < range.stop_line ? range.start_line + count : null, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt) }), "utf8") > TOOL_OUTPUT_MAX_BYTES) count--;
-			return output({ path, start_line: range.start_line, stop_line: range.start_line + count - 1, content: lines.slice(0, count).join("\n"), total_lines: file.text.split("\n").length, next_start_line: range.start_line + count < range.stop_line ? range.start_line + count : null, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt) });
+			while (count > 0 && !withinBudget(result(lines.slice(0, count).join("\n"), count))) count--;
+			if (count === 0 && lines.length > 0) {
+				// One indivisible line is larger than the whole budget: return it middle-truncated and
+				// advance past it instead of looping on an empty page whose cursor never moves.
+				return output(result(middleTruncate(lines[0], (candidate) => withinBudget(result(candidate, 1))), 1));
+			}
+			return output(result(lines.slice(0, count).join("\n"), count));
 		},
 	}));
 
@@ -55,11 +62,18 @@ export function registerNoteTools(pi: ExtensionAPI) {
 			let files = [...notesFromSession(ctx)].filter(([path]) => !prefix || path.startsWith(prefix));
 			if (params.recent_file_first) files.sort((a, b) => b[1].createdAt - a[1].createdAt);
 			const maxPerFile = params.max_matches_per_file ?? Number.POSITIVE_INFINITY;
-			const result = files.map(([path, file]) => ({ path, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt), matches: file.text.split("\n").flatMap((line, index) => line.includes(params.query) ? [{ line: index + 1, text: line }] : []).slice(0, maxPerFile) })).filter((file) => file.matches.length > 0).map((file) => {
-				while (file.matches.length > 0 && Buffer.byteLength(JSON.stringify({ files: [file] }), "utf8") > TOOL_OUTPUT_MAX_BYTES) file.matches.pop();
-				return file;
-			}).filter((file) => file.matches.length > 0);
-			return output(page(result.slice(0, params.max_files ?? result.length), params.offset ?? 0, "files"));
+			const result = files.map(([path, file]) => ({ path, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt), matches: file.text.split("\n").flatMap((line, index) => line.includes(params.query) ? [{ line: index + 1, text: line }] : []).slice(0, maxPerFile) })).filter((file) => file.matches.length > 0);
+			// A file is capped by dropping whole trailing matches, but its last match is never
+			// dropped: one oversized line is middle-truncated so the file still appears.
+			const fitFile = (file: (typeof result)[number], fits: (candidate: (typeof result)[number]) => boolean) => {
+				let matches = file.matches;
+				while (matches.length > 1 && !fits({ ...file, matches })) matches = matches.slice(0, -1);
+				const first = matches[0];
+				if (!first) return { ...file, matches };
+				const text = middleTruncate(first.text, (candidate) => fits({ ...file, matches: [{ ...first, text: candidate }, ...matches.slice(1)] }));
+				return { ...file, matches: [{ ...first, text }, ...matches.slice(1)] };
+			};
+			return output(page(result.slice(0, params.max_files ?? result.length), params.offset ?? 0, "files", undefined, fitFile));
 		},
 	}));
 
@@ -69,6 +83,10 @@ export function registerNoteTools(pi: ExtensionAPI) {
 			label: name === "notes_append_to_file" ? "Notes append" : "Notes write",
 			description: name === "notes_append_to_file" ? "Append exact text to a persistent virtual note file." : "Create or replace a persistent virtual note file.",
 			parameters: Type.Object({ text: Type.String(), path: Type.String() }, { additionalProperties: false }),
+			// Codex sets supports_parallel_tool_calls = false on notes.write_file/append_to_file.
+			// Pi's per-tool equivalent is executionMode "sequential": a batch containing either
+			// tool runs its calls one at a time, so note read-modify-write cannot race.
+			executionMode: "sequential",
 			async execute(_id, params, _signal, _update, ctx) {
 				const path = assertVirtualPath(params.path);
 				const old = notesFromSession(ctx).get(path);

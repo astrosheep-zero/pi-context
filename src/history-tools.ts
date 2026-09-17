@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { output, page, TOOL_OUTPUT_MAX_BYTES } from "./tool-output.js";
+import { output, page, middleTruncate, withinBudget } from "./tool-output.js";
 import { positiveInteger, recentFirst, nullableString, role } from "./tool-schema.js";
 import { historyFromSession, filteredItems, visibleItem, allItems } from "./history.js";
 
@@ -25,7 +25,7 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 		parameters: Type.Object({ limit: positiveInteger(), offset: Type.Optional(Type.Integer({ minimum: 0 })), recent_first: recentFirst(), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const items = filteredItems(ctx, params).slice(0, params.limit ?? Number.POSITIVE_INFINITY).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200));
-			return output(page(items, params.offset ?? 0, "items"));
+			return output(page(items, params.offset ?? 0, "items", undefined, (item, fits) => ({ ...item, truncated_content: middleTruncate(item.truncated_content, (candidate) => fits({ ...item, truncated_content: candidate })) })));
 		},
 	}));
 
@@ -40,10 +40,11 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 			const chars = Array.from(item.content);
 			const offset = params.offset_chars ?? 0;
 			const limit = Math.min(params.limit_chars ?? 12000, 50000);
-			let content = chars.slice(offset, offset + limit).join("");
-			const result = () => ({ window_id: item.windowId, item_id: item.itemId, offset_chars: offset, content, total_chars: chars.length, next_offset_chars: offset + Array.from(content).length < chars.length ? offset + Array.from(content).length : null });
-			while (Buffer.byteLength(JSON.stringify(result()), "utf8") > TOOL_OUTPUT_MAX_BYTES && content.length > 0) content = Array.from(content).slice(0, Math.floor(Array.from(content).length * 0.9)).join("");
-			return output(result());
+			const result = (content: string) => ({ window_id: item.windowId, item_id: item.itemId, offset_chars: offset, content, total_chars: chars.length, next_offset_chars: offset + limit < chars.length ? offset + limit : null });
+			// One clean middle-truncation replaces the old 0.9 shrink loop: a requested window larger
+			// than the budget comes back with its middle elided, never empty, and the cursor advances.
+			const content = middleTruncate(chars.slice(offset, offset + limit).join(""), (candidate) => withinBudget(result(candidate)));
+			return output(result(content));
 		},
 	}));
 
@@ -54,7 +55,7 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 		parameters: Type.Object({ limit: positiveInteger(), offset: Type.Optional(Type.Integer({ minimum: 0 })), query: Type.String(), recent_first: recentFirst(), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const matching = filteredItems(ctx, params).filter((item) => item.content.includes(params.query)).slice(0, params.limit ?? Number.POSITIVE_INFINITY).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200));
-			return output(page(matching, params.offset ?? 0, "items"));
+			return output(page(matching, params.offset ?? 0, "items", undefined, (item, fits) => ({ ...item, truncated_content: middleTruncate(item.truncated_content, (candidate) => fits({ ...item, truncated_content: candidate })) })));
 		},
 	}));
 
