@@ -1,8 +1,8 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { output, page, middleTruncate, prefixFit, withinBudget } from "./tool-output.js";
-import { nullableString, nullableInteger, positiveInteger, cursor, searchQuery, searchQueries } from "./tool-schema.js";
-import { notesFromSession, assertVirtualPath, assertVirtualPrefix, assertGlobPattern, globToRegExp, lineRange, localIso, type NoteOperation } from "./notes.js";
+import { output, page, middleTruncate, prefixFit, earliestMatchOffsetChars, readCharacterWindow } from "./tool-output.js";
+import { nullableString, positiveInteger, cursor, searchQuery, searchQueries } from "./tool-schema.js";
+import { notesFromSession, assertVirtualPath, assertVirtualPrefix, assertGlobPattern, globToRegExp, localIso, type NoteOperation } from "./notes.js";
 import { NOTE_TYPE, MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "./protocol.js";
 
 export function registerNoteTools(pi: ExtensionAPI) {
@@ -15,7 +15,7 @@ export function registerNoteTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_list_files",
 		label: "Notes list files",
-		description: "List persistent, session-scoped virtual note files, optionally filtered by a glob pattern: * matches within a path segment, ** matches across segments (a leading **/ also matches the root), ? matches one character within a segment; an omitted or empty pattern lists every file. Ordering: file_order_by is name, created_at, or updated_at (default updated_at) and file_order is ascending or descending; each axis has a natural direction — descending for updated_at and created_at, ascending for name — used when file_order is omitted, and an explicit file_order always wins. Ties break by created_at then path, so the order is total. A store written to while it is being paged can reshuffle between pages (single-page shelves are unaffected). Each entry carries its stale flag. created_at and updated_at are local-time ISO 8601 strings with an explicit UTC offset.",
+		description: "List persistent, session-scoped virtual note files, optionally filtered by a glob pattern: * matches within a path segment, ** matches across segments (a leading **/ also matches the root), ? matches one character within a segment; an omitted or empty pattern lists every file. The default order is most recently updated first; file_order_by (name, created_at, updated_at) and file_order (ascending, descending) select another. Each entry carries its stale flag, and created_at/updated_at are local-time ISO 8601 strings with an explicit UTC offset.",
 		parameters: Type.Object({ pattern: nullableString(), max_results: positiveInteger(), cursor: cursor(), file_order_by: Type.Optional(Type.Union([Type.Literal("name"), Type.Literal("created_at"), Type.Literal("updated_at")])), file_order: Type.Optional(Type.Union([Type.Literal("ascending"), Type.Literal("descending")])) }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const pattern = assertGlobPattern(params.pattern);
@@ -48,88 +48,22 @@ export function registerNoteTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_read_file",
 		label: "Notes read file",
-		description: "Read a virtual note file, optionally by inclusive 1-based line range; negative lines count from the end. Whole lines are delivered while they fit the wire budget; a line too large comes back as a plain prefix, and start_char (a code-point offset within start_line, default 0) resumes it. next_start_line/next_start_char address the next undelivered character: next_start_char is 0 when it begins a new line, so pages reconstruct exactly (insert a newline between pages only when next_start_char is 0). next_start_line is null only when the requested range is fully delivered, and stop_line is never less than start_line. Success results carry created_at and updated_at as local-time ISO 8601 strings with an explicit UTC offset.",
-		parameters: Type.Object({ path: Type.String(), start_line: nullableInteger(), stop_line: nullableInteger(), start_char: Type.Optional(Type.Integer({ minimum: 0, description: "Code-point offset within start_line to resume from (default 0). Pass the previous next_start_char back unchanged when next_start_line has not advanced." })) }, { additionalProperties: false }),
+		description: "Read a bounded character window from a virtual note file: offset_chars is the code-point offset to start from (default 0), where a negative value counts back from the end (offset_chars: -2000 reads the last 2000 code points) and the response always echoes the resolved absolute offset, while limit_chars caps the window (default 12000, max 50000). Each response delivers the longest fitting prefix of that window with no marker: next_offset_chars is exactly offset_chars plus the delivered code-point count and is null only once the note ends, so pass it back unchanged and concatenate the pages in order to reconstruct the note exactly. Success results carry created_at and updated_at as local-time ISO 8601 strings with an explicit UTC offset.",
+		parameters: Type.Object({ path: Type.String(), offset_chars: Type.Optional(Type.Integer({ description: "Code-point offset to start from (default 0). A negative value counts back from the end; the response echoes the resolved absolute offset. Pass the previous next_offset_chars back unchanged to continue." })), limit_chars: Type.Optional(Type.Integer({ minimum: 1, maximum: 50000, description: "Largest requested window in code points (default 12000). A window too large for the wire budget is cut short; next_offset_chars names where the next read resumes." })) }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const path = assertVirtualPath(params.path);
 			const file = notesFromSession(ctx).get(path);
 			if (!file) return output({ error: "note file not found", path });
-			const allLines = file.text.split("\n");
-			const totalLines = allLines.length;
-			const range = lineRange(file.text, params.start_line, params.stop_line);
-			let startLine = range.start_line;
-			let stopLine = Math.max(startLine, range.stop_line);
-			let startChar = params.start_char ?? 0;
-			const lineChars = (line: number) => Array.from(allLines[line - 1]!);
-			const response = (content: string, pageStopLine: number, nextLine: number | null, nextChar: number) => ({
-				path, start_line: startLine, stop_line: pageStopLine, content, total_lines: totalLines,
-				next_start_line: nextLine, next_start_char: nextChar,
-				created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt),
-			});
-			// Beyond the file, or an explicitly inverted range: nothing to deliver, but the range
-			// contract still holds and the cursor terminates instead of self-feeding.
-			if (range.start_line > range.stop_line || startLine > totalLines) {
-				return output(response("", startLine, null, 0));
-			}
-			// A cursor always lands inside a line; a non-zero start_char at or past its end belongs
-			// to the next line. An empty line at offset 0 is its own delivery, not a skip.
-			while (startLine <= stopLine && startChar > 0 && startChar >= lineChars(startLine).length) {
-				startChar = 0;
-				startLine += 1;
-			}
-			if (startLine > stopLine) return output(response("", startLine, null, 0));
-			const totalContentChars = (() => {
-				let total = 0;
-				for (let line = startLine; line <= stopLine; line++) {
-					if (line > startLine) total += 1; // the newline joining two delivered lines
-					total += lineChars(line).length - (line === startLine ? startChar : 0);
-				}
-				return total;
-			})();
-			// Deliver the first `budget` content characters as whole lines plus at most one prefix.
-			// The join convention is the cursor's: a separator is only charged when a line is added,
-			// and never trailing. Serialized size is non-decreasing in `budget`, so the largest
-			// fitting page is one monotone binary search instead of the old line-count shrink loop.
-			const deliver = (budget: number) => {
-				const chunks: string[] = [];
-				let line = startLine;
-				let char = startChar;
-				let remaining = budget;
-				let lastLine = startLine;
-				while (line <= stopLine && remaining > 0) {
-					const chars = lineChars(line);
-					const available = chars.length - char;
-					if (chunks.length > 0) {
-						if (remaining < (available > 0 ? 2 : 1)) break; // separator plus at least one character
-						remaining -= 1;
-					}
-					const take = Math.min(available, remaining);
-					chunks.push(chars.slice(char, char + take).join(""));
-					remaining -= take;
-					char += take;
-					lastLine = line;
-					if (char === chars.length) { line += 1; char = 0; }
-				}
-				return { content: chunks.join("\n"), stopLine: chunks.length > 0 ? lastLine : startLine, line, char };
-			};
-			const render = (page: ReturnType<typeof deliver>, complete: boolean) => response(page.content, page.stopLine, complete ? null : page.line, complete ? 0 : page.char);
-			const full = render(deliver(totalContentChars), true);
-			if (withinBudget(full)) return output(full);
-			let low = 0;
-			let high = totalContentChars - 1;
-			while (low < high) {
-				const mid = Math.ceil((low + high) / 2);
-				if (withinBudget(render(deliver(mid), false))) low = mid;
-				else high = mid - 1;
-			}
-			return output(render(deliver(low), false));
+			const created_at = localIso(file.createdAt);
+			const updated_at = localIso(file.updatedAt);
+			return output(readCharacterWindow(file.text, params.offset_chars, params.limit_chars, (window) => ({ path, ...window, created_at, updated_at })));
 		},
 	}));
 
 	pi.registerTool(defineTool({
 		name: "notes_search_contents",
 		label: "Notes search",
-		description: "Case-sensitive literal substring search over virtual note lines; query accepts one string or an array of strings, a line matches when it contains any of them (OR), and each matched line appears once. No semantic search. Every file entry carries matches_total, its full match count before any capping: when matches are dropped to fit the response budget, matches_total minus matches.length is exactly how many were dropped, never silent. A match whose line is over budget is a plain prefix and carries truncated plus total_chars (the line's full code-point length); read the rest with notes_read_file at that line. Each entry also carries created_at and updated_at as local-time ISO 8601 strings with an explicit UTC offset.",
+		description: "Case-sensitive literal substring search over virtual note lines; query accepts one string or an array of strings, a line matches when it contains any of them (OR), and each matched line appears once. No semantic search. Every file entry carries matches_total, its full match count before any capping: when matches are dropped to fit the response budget, matches_total minus matches.length is exactly how many were dropped, never silent. Each match carries line plus offset_chars, that line's file-absolute code-point offset of the earliest match, so notes_read_file at offset_chars shows the query; a match whose line is over budget is a plain prefix and carries truncated plus total_chars (the line's full code-point length), so read the rest at the same offset_chars. Each entry also carries created_at and updated_at as local-time ISO 8601 strings with an explicit UTC offset.",
 		parameters: Type.Object({ max_matches_per_file: positiveInteger(), cursor: cursor(), query: searchQuery(), recent_file_first: Type.Optional(Type.Boolean()), max_files: positiveInteger(), path_prefix: nullableString() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const queries = searchQueries(params.query);
@@ -137,9 +71,19 @@ export function registerNoteTools(pi: ExtensionAPI) {
 			let files = [...notesFromSession(ctx)].filter(([path]) => !prefix || path.startsWith(prefix));
 			if (params.recent_file_first) files.sort((a, b) => b[1].createdAt - a[1].createdAt);
 			const maxPerFile = params.max_matches_per_file ?? Number.POSITIVE_INFINITY;
-			const result: Array<{ path: string; created_at: string; updated_at: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number }>; path_truncated?: boolean }> = files
+			const result: Array<{ path: string; created_at: string; updated_at: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number; offset_chars: number }>; path_truncated?: boolean }> = files
 				.map(([path, file]) => {
-					const allMatches = file.text.split("\n").flatMap((line, index) => queries.some((query) => line.includes(query)) ? [{ line: index + 1, text: line, truncated: false, total_chars: Array.from(line).length }] : []);
+					// A match's offset_chars is file-absolute: the code points before its line, plus the
+					// earliest occurrence of any query inside that line. Search then composes with
+					// notes_read_file exactly like history_search_contents composes with history_read_item.
+					let baseChars = 0;
+					const allMatches = file.text.split("\n").flatMap((line, index) => {
+						const match = queries.some((query) => line.includes(query))
+							? [{ line: index + 1, text: line, truncated: false, total_chars: Array.from(line).length, offset_chars: baseChars + earliestMatchOffsetChars(line, queries) }]
+							: [];
+						baseChars += Array.from(line).length + 1;
+						return match;
+					});
 					return { path, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt), matches_total: allMatches.length, matches: allMatches.slice(0, maxPerFile) };
 				})
 				.filter((file) => file.matches.length > 0);

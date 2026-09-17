@@ -99,19 +99,6 @@ export function notesFromSession(ctx: SessionReader): Map<string, NoteFile> {
 	return files;
 }
 
-export function lineRange(text: string, startValue: unknown, stopValue: unknown) {
-	const lines = text.split("\n");
-	const resolve = (value: unknown, fallback: number) => {
-		if (value === undefined || value === null) return fallback;
-		if (!Number.isInteger(value) || value === 0) throw new Error("line numbers must be non-zero integers; negative values count from the end");
-		const line = value as number;
-		return line > 0 ? line : lines.length + line + 1;
-	};
-	const start = Math.max(1, resolve(startValue, 1));
-	const stop = Math.min(lines.length, resolve(stopValue, lines.length));
-	return { start_line: start, stop_line: stop, content: start > stop ? "" : lines.slice(start - 1, stop).join("\n") };
-}
-
 const pad2 = (value: number) => String(value).padStart(2, "0");
 
 /**

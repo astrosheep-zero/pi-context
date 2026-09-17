@@ -290,12 +290,24 @@ test("schemas cover the nine History/Notes actions plus reset controls", () => {
 		const schema = captured.tools.get(name)?.parameters as { properties?: Record<string, { description?: string }> } | undefined;
 		assert.equal(schema?.properties?.recent_first?.description?.includes("Defaults to true."), true, `${name} documents the recent_first default`);
 	}
-	// The notes list surface documents its default ordering, both axes, and the pagination caveat.
+	// The notes list surface is usage-shaped: its default order in one sentence, both axes named,
+	// and none of the ordering algebra left in the prose.
 	const listDescription = captured.tools.get("notes_list_files")?.description ?? "";
 	for (const axis of ["name", "created_at", "updated_at"]) assert.ok(listDescription.includes(axis), `notes_list_files names the ${axis} axis`);
-	assert.ok(listDescription.includes("default updated_at"), "notes_list_files names the default axis");
-	assert.ok(listDescription.includes("ascending") && listDescription.includes("descending"), "notes_list_files names both directions");
-	assert.match(listDescription, /reshuffle between pages/, "notes_list_files documents the live-pagination caveat");
+	assert.match(listDescription, /most recently updated first/, "notes_list_files states its default order in one sentence");
+	assert.equal(/natural direction|Ties break|reshuffle between pages/.test(listDescription), false, "notes_list_files prose carries no ordering algebra");
+
+	// Both read tools are the same character window: identical params, one offset sugar, no line surface.
+	for (const name of ["notes_read_file", "history_read_item"]) {
+		const schema = captured.tools.get(name)?.parameters as { properties?: Record<string, { minimum?: number; maximum?: number }> } | undefined;
+		assert.ok(schema?.properties?.offset_chars, `${name} exposes offset_chars`);
+		assert.ok(schema?.properties?.limit_chars, `${name} exposes limit_chars`);
+		assert.equal(schema?.properties?.offset_chars?.minimum, undefined, `${name} accepts negative offset_chars`);
+		assert.equal(schema?.properties?.limit_chars?.maximum, 50000, `${name} caps limit_chars at 50000`);
+	}
+	const noteReadSchema = captured.tools.get("notes_read_file")?.parameters as { properties?: Record<string, unknown> } | undefined;
+	assert.deepEqual(Object.keys(noteReadSchema?.properties ?? {}).sort(), ["limit_chars", "offset_chars", "path"], "notes_read_file exposes exactly the character-window params");
+	assert.equal(/start_|stop_line|total_lines/.test(captured.tools.get("notes_read_file")?.description ?? ""), false, "notes_read_file prose carries no line surface");
 });
 
 test("notes_list_files defaults to freshest-first and keeps per-axis natural directions", async () => {
@@ -345,13 +357,15 @@ test("persisted note operations restore, are Unicode byte-limited, and use safe 
 	assert.equal(notesFromSession(restoredCtx).get("checkpoint/进度.txt")?.text, "第一行\nneedle Café\n最后一行");
 	const noteMeta = notesFromSession(ctx).get("checkpoint/进度.txt");
 	assert.ok(noteMeta);
-	const read = resultJson<{ path: string; start_line: number; stop_line: number; content: string; created_at: unknown; updated_at: unknown }>(
-		await call(captured, "notes_read_file", { path: "checkpoint/进度.txt", start_line: -1, stop_line: -1 }, ctx),
+	const checkpointText = "第一行\nneedle Café\n最后一行";
+	const read = resultJson<{ path: string; offset_chars: number; content: string; total_chars: number; next_offset_chars: number | null; created_at: unknown; updated_at: unknown }>(
+		await call(captured, "notes_read_file", { path: "checkpoint/进度.txt", offset_chars: -4 }, ctx),
 	);
 	assert.equal(read.path, "checkpoint/进度.txt");
-	assert.equal(read.start_line, 3);
-	assert.equal(read.stop_line, 3);
-	assert.equal(read.content, "最后一行");
+	assert.equal(read.offset_chars, Array.from(checkpointText).length - 4, "a negative offset echoes the resolved absolute offset");
+	assert.equal(read.content, "最后一行", "a negative offset reads the tail in one call");
+	assert.equal(read.total_chars, Array.from(checkpointText).length);
+	assert.equal(read.next_offset_chars, null, "a tail read reaches the end");
 	assertLocalIso(read.created_at, noteMeta.createdAt, "notes_read_file created_at");
 	assertLocalIso(read.updated_at, noteMeta.updatedAt, "notes_read_file updated_at");
 	const searched = resultJson<{ files: Array<{ path: string; matches: Array<{ line: number }>; created_at: unknown; updated_at: unknown }> }>(
@@ -547,17 +561,16 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	}
 	assert.equal(searchFiles.length, 100); assert.equal(notesSearchNext, null);
 	const noteParts: string[] = [];
-	let noteStart: number | null = 1;
-	let noteChar = 0;
-	while (noteStart !== null) {
-		const result: { content: string; total_lines: number; next_start_line: number | null; next_start_char: number } = resultJson<{ content: string; total_lines: number; next_start_line: number | null; next_start_char: number }>(await call(captured, "notes_read_file", { path: `page-${"x".repeat(300)}-0.md`, start_line: noteStart, start_char: noteChar }, ctx));
+	let noteOffset = 0;
+	let noteNext: number | null = 0;
+	while (noteNext !== null) {
+		const result = resultJson<{ content: string; total_chars: number; offset_chars: number; next_offset_chars: number | null }>(await call(captured, "notes_read_file", { path: `page-${"x".repeat(300)}-0.md`, offset_chars: noteOffset }, ctx));
 		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
-		// A page at offset 0 starts a new line, so the pages join with a newline there and only there.
-		if (noteParts.length > 0 && noteChar === 0) noteParts.push("\n");
-		noteParts.push(result.content); noteStart = result.next_start_line; noteChar = result.next_start_char;
+		// The window is a plain prefix of the note, so the pages join by plain concatenation.
+		noteParts.push(result.content); noteNext = result.next_offset_chars; if (noteNext !== null) noteOffset = noteNext;
 	}
 	assert.equal(noteParts.join(""), Array.from({ length: 1000 }, (_, line) => `needle ${line} ${"z".repeat(30)}`).join("\n"));
-	assert.equal(noteStart, null);
+	assert.equal(noteNext, null);
 });
 
 test("a page cap limits the page, not the enumerable set: cursors stay truthful past the cap", async () => {
@@ -729,52 +742,56 @@ test("history multi-query search composes with role, tool_name, and window filte
 	assert.deepEqual(await searchIds({ window_id: "pcw:test:second" }), [nextId], "the second window's matches are addressable");
 });
 
-test("an over-budget note line is delivered as a prefix and resumed by start_char", async () => {
+test("an over-budget note is delivered as a prefix and resumed by next_offset_chars", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	const huge = `H${"x".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}`;
-	await call(captured, "notes_write_file", { path: "huge.md", text: `${huge}\ntail line` }, ctx);
-	const first = resultJson<{ path: string; start_line: number; stop_line: number; content: string; total_lines: number; next_start_line: number | null; next_start_char: number }>(
-		await call(captured, "notes_read_file", { path: "huge.md", start_line: 1 }, ctx),
+	const text = `${huge}\ntail line`;
+	await call(captured, "notes_write_file", { path: "huge.md", text }, ctx);
+	const first = resultJson<{ path: string; offset_chars: number; content: string; total_chars: number; next_offset_chars: number | null }>(
+		await call(captured, "notes_read_file", { path: "huge.md" }, ctx),
 	);
-	assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "single oversized line stays within budget");
+	assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "single oversized note stays within budget");
 	assert.ok(first.content.length > 0, "the page is not empty");
 	assert.equal(first.content.includes("…"), false, "the payload is a plain prefix with no marker");
-	assert.ok(huge.startsWith(first.content), "the delivered text is a prefix of the line");
-	assert.equal(first.total_lines, 2);
-	assert.equal(first.stop_line, 1, "stop_line names the line the page was reading");
-	assert.equal(first.next_start_line, 1, "the cursor continues the same line");
-	assert.equal(first.next_start_char, Array.from(first.content).length, "next_start_char is the delivered code-point count");
-	// Following the cursor reconstructs the huge line and then the tail line.
+	assert.ok(text.startsWith(first.content), "the delivered text is a prefix of the note");
+	assert.deepEqual(Object.keys(first), ["path", "offset_chars", "content", "total_chars", "next_offset_chars", "created_at", "updated_at"], "notes_read_file success carries exactly identity, the character window, and timestamps");
+	assert.equal(first.offset_chars, 0, "the default window starts at the resolved offset 0");
+	assert.equal(first.total_chars, Array.from(text).length, "total_chars names the note's full code-point length");
+	assert.equal(first.next_offset_chars, Array.from(first.content).length, "next_offset_chars is offset plus delivered code points");
+	// Following the cursor reconstructs the whole note by plain concatenation.
 	const parts = [first.content];
-	let line: number | null = first.next_start_line;
-	let char = first.next_start_char;
-	while (line !== null) {
-		if (parts.length > 0 && char === 0) parts.push("\n");
-		const page: { content: string; next_start_line: number | null; next_start_char: number } = resultJson<{ content: string; next_start_line: number | null; next_start_char: number }>(
-			await call(captured, "notes_read_file", { path: "huge.md", start_line: line, start_char: char }, ctx),
+	let offset: number | null = first.next_offset_chars;
+	while (offset !== null) {
+		const chunk: { content: string; offset_chars: number; total_chars: number; next_offset_chars: number | null } = resultJson<{ content: string; offset_chars: number; total_chars: number; next_offset_chars: number | null }>(
+			await call(captured, "notes_read_file", { path: "huge.md", offset_chars: offset }, ctx),
 		);
-		parts.push(page.content);
-		line = page.next_start_line;
-		char = page.next_start_char;
+		assert.equal(chunk.offset_chars, offset, "the response echoes the resolved absolute offset");
+		parts.push(chunk.content);
+		offset = chunk.next_offset_chars;
 	}
-	assert.equal(parts.join(""), `${huge}\ntail line`, "the cursors reconstruct the file exactly");
+	assert.equal(parts.join(""), text, "the cursors reconstruct the note exactly");
+
+	// A success carries timestamps; an error carries only identity and no timestamps.
+	const missing = resultJson<Record<string, unknown>>(await call(captured, "notes_read_file", { path: "no-such.md" }, ctx));
+	assert.deepEqual(Object.keys(missing).sort(), ["error", "path"], "the read error carries exactly error and path");
 });
 
-test("an over-budget note search match is a named prefix, readable at its line", async () => {
+test("an over-budget note search match is a named prefix, readable at its offset_chars", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	// A fitting file sorts before the oversized one, so the oversized match starts on a later page.
-	const hugeLine = `needle ${"y".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}`;
+	// The query sits behind a prefix, so its address is a real file-absolute offset, not line 1.
+	const hugeLine = `${'p'.repeat(500)}needle ${"y".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}`;
 	await call(captured, "notes_write_file", { path: "a.md", text: "needle small" }, ctx);
 	await call(captured, "notes_write_file", { path: "search.md", text: hugeLine }, ctx);
-	const pages: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number }> }> = [];
+	const pages: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number; offset_chars: number }> }> = [];
 	let cursor = 0;
 	let next: number | null = 0;
 	while (next !== null) {
-		const found = resultJson<{ files: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number }> }>; next_cursor: number | null }>(
+		const found = resultJson<{ files: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number; offset_chars: number }> }>; next_cursor: number | null }>(
 			await call(captured, "notes_search_contents", { query: "needle", cursor }, ctx),
 		);
 		assert.ok(Buffer.byteLength(JSON.stringify(found), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "match result stays within budget");
@@ -791,17 +808,21 @@ test("an over-budget note search match is a named prefix, readable at its line",
 	assert.equal(match.total_chars, Array.from(hugeLine).length, "total_chars names the full line length");
 	assert.ok(hugeLine.startsWith(match.text), "the match text is a plain prefix of the line");
 	assert.equal(match.text.includes("…"), false, "no marker is appended to the match text");
-	// The named cursor reaches the rest of the line (the file is a single line, so no separators).
+	assert.equal(match.offset_chars, 500, "the match carries the file-absolute offset of the query");
+	assert.equal(match.line, 1, "the informational line number survives");
+	// The address resolves: the query is visible at the match's offset_chars.
+	const at = resultJson<{ content: string; offset_chars: number }>(await call(captured, "notes_read_file", { path: "search.md", offset_chars: match.offset_chars, limit_chars: 6 }, ctx));
+	assert.equal(at.content, "needle", "the match's offset_chars resolves to the query through notes_read_file");
+	assert.equal(at.offset_chars, match.offset_chars, "the read echoes the resolved address");
+	// The window cursor reaches the rest of the line (the file is a single line, so no separators).
 	const parts = [match.text];
-	let line: number | null = match.line;
-	let char = Array.from(match.text).length;
-	while (line !== null) {
-		const page: { content: string; next_start_line: number | null; next_start_char: number } = resultJson<{ content: string; next_start_line: number | null; next_start_char: number }>(
-			await call(captured, "notes_read_file", { path: "search.md", start_line: line, start_char: char }, ctx),
+	let offset: number | null = Array.from(match.text).length;
+	while (offset !== null) {
+		const chunk: { content: string; next_offset_chars: number | null } = resultJson<{ content: string; next_offset_chars: number | null }>(
+			await call(captured, "notes_read_file", { path: "search.md", offset_chars: offset }, ctx),
 		);
-		parts.push(page.content);
-		line = page.next_start_line;
-		char = page.next_start_char;
+		parts.push(chunk.content);
+		offset = chunk.next_offset_chars;
 	}
 	assert.equal(parts.join(""), hugeLine, "resuming at the delivered prefix reconstructs the matched line");
 });
@@ -838,25 +859,25 @@ test("history_read_item delivers a prefix and next_offset_chars names the delive
 	assert.equal(parts.join(""), original, "the cursors reconstruct the item exactly");
 });
 
-test("the empty note terminates and every read keeps stop_line >= start_line", async () => {
+test("the empty note terminates and every note read is a character window", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	await call(captured, "notes_write_file", { path: "empty.md", text: "" }, ctx);
-	const empty = resultJson<{ start_line: number; stop_line: number; content: string; total_lines: number; next_start_line: number | null; next_start_char: number }>(
+	const empty = resultJson<{ offset_chars: number; content: string; total_chars: number; next_offset_chars: number | null }>(
 		await call(captured, "notes_read_file", { path: "empty.md" }, ctx),
 	);
-	assert.equal(empty.stop_line >= empty.start_line, true, "the empty note keeps stop_line >= start_line");
-	assert.equal(empty.next_start_line, null, "the empty note is exhausted instead of self-feeding");
-	assert.equal(empty.next_start_char, 0);
+	assert.equal(empty.offset_chars, 0);
 	assert.equal(empty.content, "");
-	assert.equal(empty.total_lines, 1);
-	// A range beyond the file is exhausted, not looped, and still satisfies the range contract.
-	const beyond = resultJson<{ start_line: number; stop_line: number; next_start_line: number | null }>(
-		await call(captured, "notes_read_file", { path: "empty.md", start_line: 9 }, ctx),
+	assert.equal(empty.total_chars, 0);
+	assert.equal(empty.next_offset_chars, null, "the empty note is exhausted instead of self-feeding");
+	// An offset beyond the file is exhausted, not looped, and still echoes its resolved offset.
+	const beyond = resultJson<{ offset_chars: number; content: string; next_offset_chars: number | null }>(
+		await call(captured, "notes_read_file", { path: "empty.md", offset_chars: 9 }, ctx),
 	);
-	assert.equal(beyond.stop_line >= beyond.start_line, true, "a beyond-the-file read keeps stop_line >= start_line");
-	assert.equal(beyond.next_start_line, null, "a beyond-the-file read terminates");
+	assert.equal(beyond.offset_chars, 9, "a positive offset past the end is echoed as resolved");
+	assert.equal(beyond.content, "");
+	assert.equal(beyond.next_offset_chars, null, "a beyond-the-file read terminates");
 });
 
 test("history items carry honest truncated/total_chars and max_chars_per_item:1 addresses them", async () => {

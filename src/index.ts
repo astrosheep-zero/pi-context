@@ -5,7 +5,7 @@ import { output } from "./tool-output.js";
 export { deriveThresholds, mergePiContextSettings } from "./budget.js";
 import { STATE_TYPE, NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, FALLBACK_TYPE, RESET_MARKER_TYPE, CONTINUATION_TYPE, RESET_V2, MAX_NOTE_BYTES, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, RESET_SUMMARY, CONTINUATION, FALLBACK_PROMPT } from "./protocol.js";
 import { historyFromSession, hasWindowMessage, currentWindowId, resetV2WindowId } from "./history.js";
-import { assertVirtualPath, lineRange } from "./notes.js";
+import { assertVirtualPath } from "./notes.js";
 import { bootBlock } from "./prompts.js";
 export { historyFromSession } from "./history.js";
 export { notesFromSession } from "./notes.js";
@@ -96,4 +96,4 @@ export default function piContext(pi: ExtensionAPI) {
 	});
 }
 
-export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, FALLBACK_TYPE, FALLBACK_PROMPT, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, deriveThresholds, mergePiContextSettings, lineRange, assertVirtualPath };
+export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, FALLBACK_TYPE, FALLBACK_PROMPT, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, deriveThresholds, mergePiContextSettings, assertVirtualPath };

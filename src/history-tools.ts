@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { output, page, middleTruncate, prefixFit, withinBudget } from "./tool-output.js";
+import { output, page, middleTruncate, prefixFit, earliestMatchOffsetChars, readCharacterWindow } from "./tool-output.js";
 import { positiveInteger, recentFirst, nullableString, role, cursor, searchQuery, searchQueries } from "./tool-schema.js";
 import { historyFromSession, filteredItems, visibleItem, allItems } from "./history.js";
 
@@ -27,17 +27,6 @@ function truncateHistoryItem<T extends { truncated_content: string; truncated: b
 	if (fits(withName)) return withName;
 	// Both fields are oversized: dissolve the payload against the truncated metadata.
 	return shrinkContent(withName);
-}
-
-/** Code-point offset of the earliest occurrence of any query literal in the full content. */
-function earliestMatchOffset(content: string, queries: string[]): number {
-	let earliest = -1;
-	for (const query of queries) {
-		const index = content.indexOf(query);
-		if (index < 0) continue;
-		if (earliest < 0 || index < earliest) earliest = index;
-	}
-	return earliest <= 0 ? 0 : Array.from(content.slice(0, earliest)).length;
 }
 
 export function registerHistoryTools(pi: ExtensionAPI) {
@@ -68,24 +57,12 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "history_read_item",
 		label: "History read item",
-		description: "Read a bounded character range from one durable session item. Each response delivers the longest contiguous prefix of the requested window that fits the wire budget, so content is always a plain prefix with no marker. next_offset_chars is exactly offset_chars plus the delivered code-point count, and is null only once the item ends: follow it to reconstruct the item exactly. Offsets and counts are code points (an emoji or CJK character counts as one).",
-		parameters: Type.Object({ item_id: Type.String(), offset_chars: Type.Optional(Type.Integer({ minimum: 0, description: "Code-point offset to start from. Pass the previous next_offset_chars back unchanged." })), limit_chars: Type.Optional(Type.Integer({ minimum: 1, maximum: 50000, description: "Largest requested window in code points (default 12000). A window too large for the wire budget is cut short; next_offset_chars names where the next read resumes." })), window_id: Type.String() }, { additionalProperties: false }),
+		description: "Read a bounded character range from one durable session item. Each response delivers the longest contiguous prefix of the requested window that fits the wire budget, so content is always a plain prefix with no marker. next_offset_chars is exactly offset_chars plus the delivered code-point count, and is null only once the item ends: follow it to reconstruct the item exactly. A negative offset_chars counts back from the item's end, while the response always echoes the resolved absolute offset. Offsets and counts are code points (an emoji or CJK character counts as one).",
+		parameters: Type.Object({ item_id: Type.String(), offset_chars: Type.Optional(Type.Integer({ description: "Code-point offset to start from. A negative value counts back from the end; the response echoes the resolved absolute offset. Pass the previous next_offset_chars back unchanged to continue." })), limit_chars: Type.Optional(Type.Integer({ minimum: 1, maximum: 50000, description: "Largest requested window in code points (default 12000). A window too large for the wire budget is cut short; next_offset_chars names where the next read resumes." })), window_id: Type.String() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const item = allItems(ctx).find((candidate) => candidate.windowId === params.window_id && candidate.itemId === params.item_id);
 			if (!item) return output({ error: "unknown item_id or window_id" });
-			const chars = Array.from(item.content);
-			const offset = Math.max(0, params.offset_chars ?? 0);
-			const limit = Math.min(params.limit_chars ?? 12000, 50000);
-			const windowChars = chars.slice(offset, offset + limit);
-			const result = (content: string) => {
-				const next = offset + Array.from(content).length;
-				return { window_id: item.windowId, item_id: item.itemId, offset_chars: offset, content, total_chars: chars.length, next_offset_chars: next < chars.length ? next : null };
-			};
-			// One monotone binary search for the longest prefix that fits: no shrink loop, no
-			// middle-truncation. A middle-elided payload could never name the skipped range with a
-			// cursor, which is the whole point of the cursor law.
-			const content = prefixFit(windowChars.join(""), (candidate) => withinBudget(result(candidate)));
-			return output(result(content));
+			return output(readCharacterWindow(item.content, params.offset_chars, params.limit_chars, (window) => ({ window_id: item.windowId, item_id: item.itemId, ...window })));
 		},
 	}));
 
@@ -98,7 +75,7 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 			const queries = searchQueries(params.query);
 			const matching = filteredItems(ctx, params)
 				.filter((item) => queries.some((query) => item.content.includes(query)))
-				.map((item) => ({ ...visibleItem(item, params.max_chars_per_item ?? 1200), match_offset_chars: earliestMatchOffset(item.content, queries) }));
+				.map((item) => ({ ...visibleItem(item, params.max_chars_per_item ?? 1200), match_offset_chars: earliestMatchOffsetChars(item.content, queries) }));
 			return output(page(matching, params.cursor ?? 0, "items", params.limit, truncateHistoryItem));
 		},
 	}));

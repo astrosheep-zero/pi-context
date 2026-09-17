@@ -68,6 +68,56 @@ export function prefixFit(text: string, fits: (content: string) => boolean): str
 	return chars.slice(0, low).join("");
 }
 
+/**
+ * Fields every character-window read returns; each tool adds its own identity and metadata.
+ * `offset_chars` is always the resolved absolute offset, and `next_offset_chars` is exactly
+ * that offset plus the delivered code-point count, null only at the text's true end.
+ */
+export type CharacterWindow = {
+	offset_chars: number;
+	content: string;
+	total_chars: number;
+	next_offset_chars: number | null;
+};
+
+/**
+ * Read one character window of `text`: the longest contiguous prefix of
+ * `chars[resolved, resolved + limit)` that fits the wire budget.
+ *
+ * `offsetChars` is a code-point offset. A negative value counts back from the end and
+ * resolves to `max(0, total_chars + offsetChars)`, so `-N` reaches the tail and any
+ * `N >= total_chars` reads from the start; the resolved absolute offset is always echoed.
+ * Following `next_offset_chars` reconstructs `text` by plain concatenation, because the
+ * payload is always a plain prefix with no marker. `render` builds the exact response for
+ * a candidate window, so the budget is measured on the bytes that go on the wire.
+ */
+export function readCharacterWindow<T>(text: string, offsetChars: number | undefined, limitChars: number | undefined, render: (window: CharacterWindow) => T): T {
+	const chars = Array.from(text);
+	const requested = offsetChars ?? 0;
+	const resolved = requested < 0 ? Math.max(0, chars.length + requested) : Math.max(0, requested);
+	const windowChars = chars.slice(resolved, resolved + Math.min(limitChars ?? 12000, 50000));
+	const build = (content: string): CharacterWindow => {
+		const next = resolved + Array.from(content).length;
+		return { offset_chars: resolved, content, total_chars: chars.length, next_offset_chars: next < chars.length ? next : null };
+	};
+	const content = prefixFit(windowChars.join(""), (candidate) => withinBudget(render(build(candidate))));
+	return render(build(content));
+}
+
+/**
+ * Code-point offset of the earliest occurrence of any of `queries` in `text`, or 0 when
+ * none occurs. Shared by the two search tools so a match address is computed identically.
+ */
+export function earliestMatchOffsetChars(text: string, queries: string[]): number {
+	let earliest = -1;
+	for (const query of queries) {
+		const index = text.indexOf(query);
+		if (index < 0) continue;
+		if (earliest < 0 || index < earliest) earliest = index;
+	}
+	return earliest <= 0 ? 0 : Array.from(text.slice(0, earliest)).length;
+}
+
 /** Shrink a single page item to fit; only invoked when that item alone exceeds the budget. */
 export type ItemTruncator<T> = (item: T, fits: (candidate: T) => boolean) => T;
 

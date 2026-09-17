@@ -584,7 +584,7 @@ test("notes_search_contents enumerates every matching file across seeded mixes",
 			// Matches are a prefix of the file's real matching lines (never invented, never reordered).
 			let flat = 0;
 			for (const page of pages) {
-				for (const file of page.files as Array<{ path: string; path_truncated?: boolean; matches: Array<{ line: number; text: string }> }>) {
+				for (const file of page.files as Array<{ path: string; path_truncated?: boolean; matches: Array<{ line: number; text: string; offset_chars: number }> }>) {
 					const storePath = expected[flat++]!;
 					const store = notesFromSession(ctx).get(storePath);
 					assert.ok(store, `${label}: reported ${storePath} is not in the note store`);
@@ -593,7 +593,20 @@ test("notes_search_contents enumerates every matching file across seeded mixes",
 					assert.ok(file.matches.length >= 1, `${label}: ${storePath} reports no matches but appears in the result`);
 					assert.ok(file.matches.length <= Math.min(matchingLines.length, variant.maxMatchesPerFile), `${label}: ${storePath} reports ${file.matches.length} matches beyond its cap`);
 					assert.deepEqual(file.matches.map((match) => match.line), matchingLines.slice(0, file.matches.length), `${label}: ${storePath} match lines are not the first matching lines`);
-					for (const match of file.matches) assert.ok(lines[match.line - 1]?.includes(variant.query), `${label}: ${storePath}:${match.line} does not contain the query`);
+					const lineBase: number[] = [];
+					let lineOffset = 0;
+					for (const text of lines) {
+						lineBase.push(lineOffset);
+						lineOffset += Array.from(text).length + 1;
+					}
+					for (const match of file.matches) {
+						const line = lines[match.line - 1]!;
+						assert.ok(line.includes(variant.query), `${label}: ${storePath}:${match.line} does not contain the query`);
+						// The documented address: file-absolute code points up to the line, plus the query's
+						// earliest occurrence inside it -- so notes_read_file at offset_chars shows the query.
+						const earliest = line.indexOf(variant.query);
+						assert.equal(match.offset_chars, (lineBase[match.line - 1] as number) + Array.from(line.slice(0, earliest)).length, `${label}: ${storePath}:${match.line} offset_chars does not address the query`);
+					}
 				}
 			}
 		}
