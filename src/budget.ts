@@ -51,7 +51,7 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean) {
 	pi.registerTool(defineTool({
 		name: "get_context_remaining",
 		label: "Get context remaining",
-		description: "Return estimated context tokens left before your memory is wiped, clamped to zero; null when Pi cannot estimate usage.",
+		description: "Return estimated context tokens left before your memory is wiped; null when Pi cannot estimate usage.",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_id, _params, _signal, _update, ctx) {
 			const usage = ctx.getContextUsage();
