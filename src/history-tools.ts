@@ -24,8 +24,8 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 		description: "List durable session items, including items before compaction, using opaque item and window IDs.",
 		parameters: Type.Object({ limit: positiveInteger(), offset: Type.Optional(Type.Integer({ minimum: 0 })), recent_first: recentFirst(), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
-			const items = filteredItems(ctx, params).slice(0, params.limit ?? Number.POSITIVE_INFINITY).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200));
-			return output(page(items, params.offset ?? 0, "items", undefined, (item, fits) => ({ ...item, truncated_content: middleTruncate(item.truncated_content, (candidate) => fits({ ...item, truncated_content: candidate })) })));
+			const items = filteredItems(ctx, params).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200));
+			return output(page(items, params.offset ?? 0, "items", params.limit, (item, fits) => ({ ...item, truncated_content: middleTruncate(item.truncated_content, (candidate) => fits({ ...item, truncated_content: candidate })) })));
 		},
 	}));
 
@@ -54,8 +54,8 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 		description: "Case-sensitive literal substring search over durable Pi session history; no semantic search.",
 		parameters: Type.Object({ limit: positiveInteger(), offset: Type.Optional(Type.Integer({ minimum: 0 })), query: Type.String(), recent_first: recentFirst(), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
-			const matching = filteredItems(ctx, params).filter((item) => item.content.includes(params.query)).slice(0, params.limit ?? Number.POSITIVE_INFINITY).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200));
-			return output(page(matching, params.offset ?? 0, "items", undefined, (item, fits) => ({ ...item, truncated_content: middleTruncate(item.truncated_content, (candidate) => fits({ ...item, truncated_content: candidate })) })));
+			const matching = filteredItems(ctx, params).filter((item) => item.content.includes(params.query)).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200));
+			return output(page(matching, params.offset ?? 0, "items", params.limit, (item, fits) => ({ ...item, truncated_content: middleTruncate(item.truncated_content, (candidate) => fits({ ...item, truncated_content: candidate })) })));
 		},
 	}));
 

@@ -505,6 +505,52 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	assert.equal(noteNext, null);
 });
 
+test("a page cap limits the page, not the enumerable set: cursors stay truthful past the cap", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	for (let index = 0; index < 60; index++) {
+		appendText(session, "user", `entry-${index}`);
+		appendText(session, "assistant", `reply-${index}`);
+	}
+
+	// history_list_items: 120 items with limit 50 page as 50/50/20, null only at the true end.
+	const windows = resultJson<{ windows: Array<{ item_count: number }> }>(await call(captured, "history_list_windows", {}, ctx));
+	assert.equal(windows.windows[0]?.item_count, 120);
+	const list = async (params: Record<string, unknown>) => resultJson<{ items: unknown[]; next_offset: number | null }>(await call(captured, "history_list_items", params, ctx));
+	const first = await list({ limit: 50, recent_first: false, max_chars_per_item: 100 });
+	assert.equal(first.items.length, 50);
+	assert.equal(first.next_offset, 50, "limit caps the page, not the enumerable set");
+	const second = await list({ limit: 50, offset: 50, recent_first: false, max_chars_per_item: 100 });
+	assert.equal(second.items.length, 50);
+	assert.equal(second.next_offset, 100);
+	const third = await list({ limit: 50, offset: 100, recent_first: false, max_chars_per_item: 100 });
+	assert.equal(third.items.length, 20);
+	assert.equal(third.next_offset, null, "null only at the true end");
+
+	// history_search_contents: the same contract holds over the matching set.
+	const search = async (params: Record<string, unknown>) => resultJson<{ items: unknown[]; next_offset: number | null }>(await call(captured, "history_search_contents", params, ctx));
+	const searchFirst = await search({ query: "entry-", limit: 50, recent_first: false, max_chars_per_item: 100 });
+	assert.equal(searchFirst.items.length, 50);
+	assert.equal(searchFirst.next_offset, 50);
+	const searchTail = await search({ query: "entry-", limit: 50, offset: 50, recent_first: false, max_chars_per_item: 100 });
+	assert.equal(searchTail.items.length, 10);
+	assert.equal(searchTail.next_offset, null);
+
+	// notes_search_contents: max_files caps the page, not the matched files.
+	for (let index = 0; index < 7; index++) await call(captured, "notes_write_file", { path: `needle-${index}.md`, text: "needle" }, ctx);
+	const notes = async (params: Record<string, unknown>) => resultJson<{ files: unknown[]; next_offset: number | null }>(await call(captured, "notes_search_contents", params, ctx));
+	const notesFirst = await notes({ query: "needle", max_files: 3 });
+	assert.equal(notesFirst.files.length, 3);
+	assert.equal(notesFirst.next_offset, 3);
+	const notesSecond = await notes({ query: "needle", max_files: 3, offset: 3 });
+	assert.equal(notesSecond.files.length, 3);
+	assert.equal(notesSecond.next_offset, 6);
+	const notesTail = await notes({ query: "needle", max_files: 3, offset: 6 });
+	assert.equal(notesTail.files.length, 1);
+	assert.equal(notesTail.next_offset, null);
+});
+
 test("a single oversized note line is middle-truncated and the cursor still advances", async () => {
 	const session = manager();
 	const captured = makeExtension(session);

@@ -73,7 +73,7 @@ export function registerNoteTools(pi: ExtensionAPI) {
 				const text = middleTruncate(first.text, (candidate) => fits({ ...file, matches: [{ ...first, text: candidate }, ...matches.slice(1)] }));
 				return { ...file, matches: [{ ...first, text }, ...matches.slice(1)] };
 			};
-			return output(page(result.slice(0, params.max_files ?? result.length), params.offset ?? 0, "files", undefined, fitFile));
+			return output(page(result, params.offset ?? 0, "files", params.max_files, fitFile));
 		},
 	}));
 
