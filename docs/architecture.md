@@ -8,7 +8,7 @@ pi-context uses Pi's session branch as the durable source of truth. It does not 
 | --- | --- | --- |
 | `index.ts` | Compose features, expose toggle/reset tool, construct reset boundary | Pi extension API |
 | `history.ts` | Project branch entries into windows/items; identify active window | `SessionReader`, read-only branch and session ID |
-| `notes.ts` | Replay note operations, validate paths/timestamps, slice lines | `SessionReader`; no scheduling or writes |
+| `notes.ts` | Replay note operations, validate paths/timestamps | `SessionReader`; no scheduling or writes |
 | `history-tools.ts`, `note-tools.ts` | Public schemas and tool results; append validated note operations | Pi tool API plus read projections |
 | `budget.ts` | Resolve settings, report usable budget, persist guidance once | Pi settings/context hooks |
 | `prompts.ts` | Render static boot block, note index and reminder | Read projections and protocol text |
