@@ -4,11 +4,9 @@ import { thresholdsFor, resetThresholds, type ResolvedThresholds } from "./thres
 import { hasWindowMessage, currentWindowId } from "./history.js";
 
 /**
- * The final checkpoint warning, steered to the model once per window. Trigger timing
- * and delivery are deliberately two small, separately-owned pieces: both have changed
- * before (an earlier shape intercepted the compaction and spent a turn → now a steer
- * at reserve+WARNING_TRIGGER_TOKENS) and will change again. Change them here, not at
- * the call site.
+ * The final checkpoint warning, steered to the model once per window. Like the early
+ * reminder, the steer text is model-facing only (display: false); the human learns
+ * about it from the warning-level notify, not from a chat-visible message.
  */
 
 /** Trigger: does the steer fire at this remaining-token count? Pure. */
@@ -18,7 +16,7 @@ export function warningDue(remaining: number, thresholds: ResolvedThresholds): b
 
 /** Delivery: what happens when it fires. */
 export function steerWarning(pi: ExtensionAPI, ctx: ExtensionContext, thresholds: ResolvedThresholds, remaining: number): void {
-	pi.sendMessage({ customType: WARNING_TYPE, content: `${GUIDANCE_OPEN_TAG}\n${WARNING_PROMPT}\n${GUIDANCE_CLOSE_TAG}`, display: true }, { triggerTurn: true });
+	pi.sendMessage({ customType: WARNING_TYPE, content: `${GUIDANCE_OPEN_TAG}\n${WARNING_PROMPT}\n${GUIDANCE_CLOSE_TAG}`, display: false }, { triggerTurn: true });
 	ctx.ui.notify(`pi-context: context budget critical (${Math.max(0, remaining - thresholds.reserve)} tokens before reserve) — final checkpoint warning steered to the model.`, "warning");
 }
 

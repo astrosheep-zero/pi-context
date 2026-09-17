@@ -1482,13 +1482,13 @@ test("the warning steer fires once per window at the reserve-plus-warning line, 
 	assert.equal(await runContextHook(captured, at(24_577)), undefined);
 	assert.equal(warnings().length, 0, "no warning above the warning line");
 	assert.equal(reminders().length, 1, "the shallow reminder persists instead");
-	// Crossing the line: exactly one warning steer, triggered and visible.
+	// Crossing the line: exactly one warning steer, triggered, hidden from the TUI.
 	const onLine = at(24_576);
 	assert.equal(await runContextHook(captured, onLine), undefined);
 	assert.equal(warnings().length, 1);
 	assert.equal(warnings()[0]?.message.customType, internal.WARNING_TYPE);
 	assert.equal(warnings()[0]?.options?.triggerTurn, true, "the steer reaches the model mid-run");
-	assert.equal(warnings()[0]?.message.display, true);
+	assert.equal(warnings()[0]?.message.display, false, "steer text is model-facing only");
 	assert.ok(
 		noticesOf(onLine).some((notice) => notice.type === "warning" && notice.message.startsWith("pi-context: context budget critical")),
 		"the user gets one model-invisible notify for the steer",
