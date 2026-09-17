@@ -48,17 +48,17 @@ export type ItemTruncator<T> = (item: T, fits: (candidate: T) => boolean) => T;
  * Build a page without ever adding an item that would exceed the wire budget.
  *
  * A single item that cannot fit is middle-truncated through the optional `truncate`
- * callback and still included, with `next_offset` advanced past it. Without that fallback
+ * callback and still included, with `next_cursor` advanced past it. Without that fallback
  * an oversized item would yield an empty page forever: the cursor would keep pointing back
  * at the same index.
  */
-export function page<T>(items: T[], offset: number, key: string, limit?: number, truncate?: ItemTruncator<T>) {
-	const end = Math.min(items.length, offset + (limit ?? items.length));
+export function page<T>(items: T[], cursor: number, key: string, limit?: number, truncate?: ItemTruncator<T>) {
+	const end = Math.min(items.length, cursor + (limit ?? items.length));
 	const selected: T[] = [];
 	let next = end < items.length ? end : null;
-	for (let index = offset; index < end; index++) {
+	for (let index = cursor; index < end; index++) {
 		const candidateNext = index + 1 < end || end < items.length ? index + 1 : null;
-		const fits = (list: T[]) => withinBudget({ [key]: list, next_offset: candidateNext });
+		const fits = (list: T[]) => withinBudget({ [key]: list, next_cursor: candidateNext });
 		if (!fits([...selected, items[index]])) {
 			if (selected.length === 0 && truncate) {
 				selected.push(truncate(items[index], (candidate) => fits([candidate])));
@@ -70,7 +70,7 @@ export function page<T>(items: T[], offset: number, key: string, limit?: number,
 		}
 		selected.push(items[index]);
 	}
-	return { [key]: selected, next_offset: next };
+	return { [key]: selected, next_cursor: next };
 }
 
 /** Encode a result through the common tool result boundary. */

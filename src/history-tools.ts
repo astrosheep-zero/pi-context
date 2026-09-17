@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { output, page, middleTruncate, withinBudget } from "./tool-output.js";
-import { positiveInteger, recentFirst, nullableString, role } from "./tool-schema.js";
+import { positiveInteger, recentFirst, nullableString, role, cursor } from "./tool-schema.js";
 import { historyFromSession, filteredItems, visibleItem, allItems } from "./history.js";
 
 export function registerHistoryTools(pi: ExtensionAPI) {
@@ -22,10 +22,10 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 		name: "history_list_items",
 		label: "History list items",
 		description: "List durable session items, including items before compaction, using opaque item and window IDs.",
-		parameters: Type.Object({ limit: positiveInteger(), offset: Type.Optional(Type.Integer({ minimum: 0 })), recent_first: recentFirst(), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
+		parameters: Type.Object({ limit: positiveInteger(), cursor: cursor(), recent_first: recentFirst(), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const items = filteredItems(ctx, params).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200));
-			return output(page(items, params.offset ?? 0, "items", params.limit, (item, fits) => ({ ...item, truncated_content: middleTruncate(item.truncated_content, (candidate) => fits({ ...item, truncated_content: candidate })) })));
+			return output(page(items, params.cursor ?? 0, "items", params.limit, (item, fits) => ({ ...item, truncated_content: middleTruncate(item.truncated_content, (candidate) => fits({ ...item, truncated_content: candidate })) })));
 		},
 	}));
 
@@ -52,10 +52,10 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 		name: "history_search_contents",
 		label: "History search",
 		description: "Case-sensitive literal substring search over durable Pi session history; no semantic search.",
-		parameters: Type.Object({ limit: positiveInteger(), offset: Type.Optional(Type.Integer({ minimum: 0 })), query: Type.String(), recent_first: recentFirst(), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
+		parameters: Type.Object({ limit: positiveInteger(), cursor: cursor(), query: Type.String(), recent_first: recentFirst(), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const matching = filteredItems(ctx, params).filter((item) => item.content.includes(params.query)).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200));
-			return output(page(matching, params.offset ?? 0, "items", params.limit, (item, fits) => ({ ...item, truncated_content: middleTruncate(item.truncated_content, (candidate) => fits({ ...item, truncated_content: candidate })) })));
+			return output(page(matching, params.cursor ?? 0, "items", params.limit, (item, fits) => ({ ...item, truncated_content: middleTruncate(item.truncated_content, (candidate) => fits({ ...item, truncated_content: candidate })) })));
 		},
 	}));
 

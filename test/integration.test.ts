@@ -442,24 +442,24 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	const historyIds = [appendText(session, "user", historyText), appendText(session, "user", historyText), appendText(session, "user", historyText)];
 	for (let index = 0; index < 10; index++) appendText(session, "user", historyText);
 	const historyPages: Array<{ item_id: string; truncated_content: string }> = [];
-	let offset = 0;
+	let cursor = 0;
 	let next: number | null = 0;
 	while (next !== null) {
-		const result = resultJson<{ items: Array<{ item_id: string; truncated_content: string }>; next_offset: number | null }>(await call(captured, "history_list_items", { recent_first: false, max_chars_per_item: 1200, offset }, ctx));
+		const result = resultJson<{ items: Array<{ item_id: string; truncated_content: string }>; next_cursor: number | null }>(await call(captured, "history_list_items", { recent_first: false, max_chars_per_item: 1200, cursor }, ctx));
 		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
-		historyPages.push(...result.items); next = result.next_offset; if (next !== null) offset = next;
+		historyPages.push(...result.items); next = result.next_cursor; if (next !== null) cursor = next;
 	}
 	assert.deepEqual(historyPages.filter((item) => historyIds.includes(item.item_id)).map((item) => item.item_id), historyIds);
-	const search = resultJson<{ items: Array<unknown>; next_offset: number | null }>(await call(captured, "history_search_contents", { query: "历史内容", recent_first: false, max_chars_per_item: 50_000 }, ctx));
+	const search = resultJson<{ items: Array<unknown>; next_cursor: number | null }>(await call(captured, "history_search_contents", { query: "历史内容", recent_first: false, max_chars_per_item: 50_000 }, ctx));
 	assert.ok(Buffer.byteLength(JSON.stringify(search), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
-	assert.notEqual(search.next_offset, null);
+	assert.notEqual(search.next_cursor, null);
 	const searchPages: Array<{ item_id: string }> = [];
 	let searchOffset = 0;
 	let searchNext: number | null = 0;
 	while (searchNext !== null) {
-		const result = resultJson<{ items: Array<{ item_id: string }>; next_offset: number | null }>(await call(captured, "history_search_contents", { query: "历史内容", recent_first: false, max_chars_per_item: 1200, offset: searchOffset }, ctx));
+		const result = resultJson<{ items: Array<{ item_id: string }>; next_cursor: number | null }>(await call(captured, "history_search_contents", { query: "历史内容", recent_first: false, max_chars_per_item: 1200, cursor: searchOffset }, ctx));
 		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
-		searchPages.push(...result.items); searchNext = result.next_offset; if (searchNext !== null) searchOffset = searchNext;
+		searchPages.push(...result.items); searchNext = result.next_cursor; if (searchNext !== null) searchOffset = searchNext;
 	}
 	assert.equal(searchPages.length, 13);
 	assert.equal(searchNext, null);
@@ -478,9 +478,9 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	let listOffset = 0;
 	let listNext: number | null = 0;
 	while (listNext !== null) {
-		const result = resultJson<{ files: Array<{ path: string }>; next_offset: number | null }>(await call(captured, "notes_list_files_by_prefix", { prefix: null, max_results: 300, offset: listOffset }, ctx));
+		const result = resultJson<{ files: Array<{ path: string }>; next_cursor: number | null }>(await call(captured, "notes_list_files_by_prefix", { prefix: null, max_results: 300, cursor: listOffset }, ctx));
 		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
-		listPages.push(...result.files.map((file) => file.path)); listNext = result.next_offset; if (listNext !== null) listOffset = listNext;
+		listPages.push(...result.files.map((file) => file.path)); listNext = result.next_cursor; if (listNext !== null) listOffset = listNext;
 	}
 	assert.deepEqual(listPages, Array.from({ length: 100 }, (_, index) => `page-${"x".repeat(300)}-${index}.md`).sort((a, b) => a.localeCompare(b)));
 	assert.equal(listNext, null);
@@ -488,9 +488,9 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	let notesSearchOffset = 0;
 	let notesSearchNext: number | null = 0;
 	while (notesSearchNext !== null) {
-		const result = resultJson<{ files: Array<{ path: string; matches: Array<{ line: number; text: string }> }>; next_offset: number | null }>(await call(captured, "notes_search_contents", { query: "needle", max_matches_per_file: 100, max_files: 300, offset: notesSearchOffset }, ctx));
+		const result = resultJson<{ files: Array<{ path: string; matches: Array<{ line: number; text: string }> }>; next_cursor: number | null }>(await call(captured, "notes_search_contents", { query: "needle", max_matches_per_file: 100, max_files: 300, cursor: notesSearchOffset }, ctx));
 		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
-		searchFiles.push(...result.files); notesSearchNext = result.next_offset; if (notesSearchNext !== null) notesSearchOffset = notesSearchNext;
+		searchFiles.push(...result.files); notesSearchNext = result.next_cursor; if (notesSearchNext !== null) notesSearchOffset = notesSearchNext;
 	}
 	assert.equal(searchFiles.length, 100); assert.equal(notesSearchNext, null);
 	const noteParts: string[] = [];
@@ -517,38 +517,38 @@ test("a page cap limits the page, not the enumerable set: cursors stay truthful 
 	// history_list_items: 120 items with limit 50 page as 50/50/20, null only at the true end.
 	const windows = resultJson<{ windows: Array<{ item_count: number }> }>(await call(captured, "history_list_windows", {}, ctx));
 	assert.equal(windows.windows[0]?.item_count, 120);
-	const list = async (params: Record<string, unknown>) => resultJson<{ items: unknown[]; next_offset: number | null }>(await call(captured, "history_list_items", params, ctx));
+	const list = async (params: Record<string, unknown>) => resultJson<{ items: unknown[]; next_cursor: number | null }>(await call(captured, "history_list_items", params, ctx));
 	const first = await list({ limit: 50, recent_first: false, max_chars_per_item: 100 });
 	assert.equal(first.items.length, 50);
-	assert.equal(first.next_offset, 50, "limit caps the page, not the enumerable set");
-	const second = await list({ limit: 50, offset: 50, recent_first: false, max_chars_per_item: 100 });
+	assert.equal(first.next_cursor, 50, "limit caps the page, not the enumerable set");
+	const second = await list({ limit: 50, cursor: 50, recent_first: false, max_chars_per_item: 100 });
 	assert.equal(second.items.length, 50);
-	assert.equal(second.next_offset, 100);
-	const third = await list({ limit: 50, offset: 100, recent_first: false, max_chars_per_item: 100 });
+	assert.equal(second.next_cursor, 100);
+	const third = await list({ limit: 50, cursor: 100, recent_first: false, max_chars_per_item: 100 });
 	assert.equal(third.items.length, 20);
-	assert.equal(third.next_offset, null, "null only at the true end");
+	assert.equal(third.next_cursor, null, "null only at the true end");
 
 	// history_search_contents: the same contract holds over the matching set.
-	const search = async (params: Record<string, unknown>) => resultJson<{ items: unknown[]; next_offset: number | null }>(await call(captured, "history_search_contents", params, ctx));
+	const search = async (params: Record<string, unknown>) => resultJson<{ items: unknown[]; next_cursor: number | null }>(await call(captured, "history_search_contents", params, ctx));
 	const searchFirst = await search({ query: "entry-", limit: 50, recent_first: false, max_chars_per_item: 100 });
 	assert.equal(searchFirst.items.length, 50);
-	assert.equal(searchFirst.next_offset, 50);
-	const searchTail = await search({ query: "entry-", limit: 50, offset: 50, recent_first: false, max_chars_per_item: 100 });
+	assert.equal(searchFirst.next_cursor, 50);
+	const searchTail = await search({ query: "entry-", limit: 50, cursor: 50, recent_first: false, max_chars_per_item: 100 });
 	assert.equal(searchTail.items.length, 10);
-	assert.equal(searchTail.next_offset, null);
+	assert.equal(searchTail.next_cursor, null);
 
 	// notes_search_contents: max_files caps the page, not the matched files.
 	for (let index = 0; index < 7; index++) await call(captured, "notes_write_file", { path: `needle-${index}.md`, text: "needle" }, ctx);
-	const notes = async (params: Record<string, unknown>) => resultJson<{ files: unknown[]; next_offset: number | null }>(await call(captured, "notes_search_contents", params, ctx));
+	const notes = async (params: Record<string, unknown>) => resultJson<{ files: unknown[]; next_cursor: number | null }>(await call(captured, "notes_search_contents", params, ctx));
 	const notesFirst = await notes({ query: "needle", max_files: 3 });
 	assert.equal(notesFirst.files.length, 3);
-	assert.equal(notesFirst.next_offset, 3);
-	const notesSecond = await notes({ query: "needle", max_files: 3, offset: 3 });
+	assert.equal(notesFirst.next_cursor, 3);
+	const notesSecond = await notes({ query: "needle", max_files: 3, cursor: 3 });
 	assert.equal(notesSecond.files.length, 3);
-	assert.equal(notesSecond.next_offset, 6);
-	const notesTail = await notes({ query: "needle", max_files: 3, offset: 6 });
+	assert.equal(notesSecond.next_cursor, 6);
+	const notesTail = await notes({ query: "needle", max_files: 3, cursor: 6 });
 	assert.equal(notesTail.files.length, 1);
-	assert.equal(notesTail.next_offset, null);
+	assert.equal(notesTail.next_cursor, null);
 });
 
 test("a single oversized note line is middle-truncated and the cursor still advances", async () => {
@@ -580,16 +580,16 @@ test("an oversized note search match is truncated, not silently dropped", async 
 	await call(captured, "notes_write_file", { path: "a.md", text: "needle small" }, ctx);
 	await call(captured, "notes_write_file", { path: "search.md", text: `needle ${"y".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}` }, ctx);
 	const pages: Array<{ path: string; matches: Array<{ line: number; text: string }> }> = [];
-	let offset = 0;
+	let cursor = 0;
 	let next: number | null = 0;
 	while (next !== null) {
-		const found = resultJson<{ files: Array<{ path: string; matches: Array<{ line: number; text: string }> }>; next_offset: number | null }>(
-			await call(captured, "notes_search_contents", { query: "needle", offset }, ctx),
+		const found = resultJson<{ files: Array<{ path: string; matches: Array<{ line: number; text: string }> }>; next_cursor: number | null }>(
+			await call(captured, "notes_search_contents", { query: "needle", cursor }, ctx),
 		);
 		assert.ok(Buffer.byteLength(JSON.stringify(found), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "match result stays within budget");
 		pages.push(...found.files);
-		next = found.next_offset;
-		if (next !== null) offset = next;
+		next = found.next_cursor;
+		if (next !== null) cursor = next;
 	}
 	assert.deepEqual(pages.map((file) => file.path), ["a.md", "search.md"], "pagination reaches the oversized file instead of looping");
 	const oversized = pages[1]!;
@@ -613,22 +613,22 @@ test("history_read_item middle-truncates one oversized read within budget", asyn
 
 test("page() includes one middle-truncated item and advances the cursor", () => {
 	const truncate = <T extends { text: string }>(item: T, fits: (candidate: T) => boolean): T => ({ ...item, text: middleTruncate(item.text, (candidate) => fits({ ...item, text: candidate })) });
-	const first = page([{ text: "a".repeat(TOOL_OUTPUT_MAX_BYTES * 2) }, { text: "b" }], 0, "items", undefined, truncate) as { items: Array<{ text: string }>; next_offset: number | null };
+	const first = page([{ text: "a".repeat(TOOL_OUTPUT_MAX_BYTES * 2) }, { text: "b" }], 0, "items", undefined, truncate) as { items: Array<{ text: string }>; next_cursor: number | null };
 	assert.equal(first.items.length, 1, "the oversized item is included, not skipped");
 	assert.match(first.items[0]!.text, /…\[truncated \d+ chars\]…/);
-	assert.equal(first.next_offset, 1, "the cursor advances past the truncated item");
+	assert.equal(first.next_cursor, 1, "the cursor advances past the truncated item");
 	assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
-	const last = page([{ text: "a".repeat(TOOL_OUTPUT_MAX_BYTES * 2) }], 0, "items", undefined, truncate) as { items: Array<{ text: string }>; next_offset: number | null };
+	const last = page([{ text: "a".repeat(TOOL_OUTPUT_MAX_BYTES * 2) }], 0, "items", undefined, truncate) as { items: Array<{ text: string }>; next_cursor: number | null };
 	assert.equal(last.items.length, 1);
-	assert.equal(last.next_offset, null, "the final oversized item terminates pagination");
+	assert.equal(last.next_cursor, null, "the final oversized item terminates pagination");
 	// An oversized item behind a fitting one must not stall: the next page starts on it.
-	const behind = page([{ text: "small" }, { text: "c".repeat(TOOL_OUTPUT_MAX_BYTES * 2) }, { text: "tail" }], 0, "items", undefined, truncate) as { items: Array<{ text: string }>; next_offset: number | null };
+	const behind = page([{ text: "small" }, { text: "c".repeat(TOOL_OUTPUT_MAX_BYTES * 2) }, { text: "tail" }], 0, "items", undefined, truncate) as { items: Array<{ text: string }>; next_cursor: number | null };
 	assert.equal(behind.items.length, 1);
-	assert.equal(behind.next_offset, 1);
-	const resumed = page([{ text: "small" }, { text: "c".repeat(TOOL_OUTPUT_MAX_BYTES * 2) }, { text: "tail" }], 1, "items", undefined, truncate) as { items: Array<{ text: string }>; next_offset: number | null };
+	assert.equal(behind.next_cursor, 1);
+	const resumed = page([{ text: "small" }, { text: "c".repeat(TOOL_OUTPUT_MAX_BYTES * 2) }, { text: "tail" }], 1, "items", undefined, truncate) as { items: Array<{ text: string }>; next_cursor: number | null };
 	assert.equal(resumed.items.length, 1, "the resumed page carries the truncated item");
 	assert.match(resumed.items[0]!.text, /…\[truncated \d+ chars\]…/);
-	assert.equal(resumed.next_offset, 2, "pagination advances toward the remaining item");
+	assert.equal(resumed.next_cursor, 2, "pagination advances toward the remaining item");
 });
 
 test("note write tools run sequentially so a parallel batch cannot race the note store", () => {

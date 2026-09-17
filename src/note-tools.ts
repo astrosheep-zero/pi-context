@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { output, page, middleTruncate, withinBudget } from "./tool-output.js";
-import { nullableString, nullableInteger, positiveInteger } from "./tool-schema.js";
+import { nullableString, nullableInteger, positiveInteger, cursor } from "./tool-schema.js";
 import { notesFromSession, assertVirtualPath, assertVirtualPrefix, lineRange, localIso, type NoteOperation } from "./notes.js";
 import { NOTE_TYPE, MAX_NOTE_BYTES } from "./protocol.js";
 
@@ -16,7 +16,7 @@ export function registerNoteTools(pi: ExtensionAPI) {
 		name: "notes_list_files_by_prefix",
 		label: "Notes list files",
 		description: "List persistent, session-scoped virtual note files. created_at and updated_at are local-time ISO 8601 strings with an explicit UTC offset.",
-		parameters: Type.Object({ prefix: nullableString(), max_results: positiveInteger(), offset: Type.Optional(Type.Integer({ minimum: 0 })), file_order_by: Type.Optional(Type.Union([Type.Literal("name"), Type.Literal("created_at"), Type.Literal("updated_at")])), file_order: Type.Optional(Type.Union([Type.Literal("ascending"), Type.Literal("descending")])) }, { additionalProperties: false }),
+		parameters: Type.Object({ prefix: nullableString(), max_results: positiveInteger(), cursor: cursor(), file_order_by: Type.Optional(Type.Union([Type.Literal("name"), Type.Literal("created_at"), Type.Literal("updated_at")])), file_order: Type.Optional(Type.Union([Type.Literal("ascending"), Type.Literal("descending")])) }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const prefix = assertVirtualPrefix(params.prefix);
 			let files = [...notesFromSession(ctx)].filter(([path]) => !prefix || path.startsWith(prefix));
@@ -24,7 +24,7 @@ export function registerNoteTools(pi: ExtensionAPI) {
 			files.sort(([aPath, a], [bPath, b]) => key === "name" ? aPath.localeCompare(bPath) : (key === "created_at" ? a.createdAt - b.createdAt : a.updatedAt - b.updatedAt));
 			if (params.file_order === "descending") files.reverse();
 			const listed = files.map(([path, file]) => ({ path, size_bytes: Buffer.byteLength(file.text, "utf8"), stale: file.stale, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt) }));
-			return output(page(listed, params.offset ?? 0, "files", params.max_results, (file, fits) => ({ ...file, path: middleTruncate(file.path, (candidate) => fits({ ...file, path: candidate })) })));
+			return output(page(listed, params.cursor ?? 0, "files", params.max_results, (file, fits) => ({ ...file, path: middleTruncate(file.path, (candidate) => fits({ ...file, path: candidate })) })));
 		},
 	}));
 
@@ -56,7 +56,7 @@ export function registerNoteTools(pi: ExtensionAPI) {
 		name: "notes_search_contents",
 		label: "Notes search",
 		description: "Case-sensitive literal substring search over virtual note lines; no semantic search. Each matched file carries created_at and updated_at as local-time ISO 8601 strings with an explicit UTC offset.",
-		parameters: Type.Object({ max_matches_per_file: positiveInteger(), offset: Type.Optional(Type.Integer({ minimum: 0 })), query: Type.String(), recent_file_first: Type.Optional(Type.Boolean()), max_files: positiveInteger(), path_prefix: nullableString() }, { additionalProperties: false }),
+		parameters: Type.Object({ max_matches_per_file: positiveInteger(), cursor: cursor(), query: Type.String(), recent_file_first: Type.Optional(Type.Boolean()), max_files: positiveInteger(), path_prefix: nullableString() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const prefix = assertVirtualPrefix(params.path_prefix);
 			let files = [...notesFromSession(ctx)].filter(([path]) => !prefix || path.startsWith(prefix));
@@ -73,7 +73,7 @@ export function registerNoteTools(pi: ExtensionAPI) {
 				const text = middleTruncate(first.text, (candidate) => fits({ ...file, matches: [{ ...first, text: candidate }, ...matches.slice(1)] }));
 				return { ...file, matches: [{ ...first, text }, ...matches.slice(1)] };
 			};
-			return output(page(result, params.offset ?? 0, "files", params.max_files, fitFile));
+			return output(page(result, params.cursor ?? 0, "files", params.max_files, fitFile));
 		},
 	}));
 
