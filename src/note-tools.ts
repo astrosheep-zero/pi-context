@@ -23,7 +23,7 @@ export function registerNoteTools(pi: ExtensionAPI) {
 			const key = params.file_order_by ?? "name";
 			files.sort(([aPath, a], [bPath, b]) => key === "name" ? aPath.localeCompare(bPath) : (key === "created_at" ? a.createdAt - b.createdAt : a.updatedAt - b.updatedAt));
 			if (params.file_order === "descending") files.reverse();
-			const listed = files.map(([path, file]) => ({ path, size_bytes: Buffer.byteLength(file.text, "utf8"), created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt) }));
+			const listed = files.map(([path, file]) => ({ path, size_bytes: Buffer.byteLength(file.text, "utf8"), stale: file.stale, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt) }));
 			return output(page(listed, params.offset ?? 0, "files", params.max_results, (file, fits) => ({ ...file, path: middleTruncate(file.path, (candidate) => fits({ ...file, path: candidate })) })));
 		},
 	}));
@@ -81,21 +81,30 @@ export function registerNoteTools(pi: ExtensionAPI) {
 		pi.registerTool(defineTool({
 			name,
 			label: name === "notes_append_to_file" ? "Notes append" : "Notes write",
-			description: name === "notes_append_to_file" ? "Append exact text to a persistent virtual note file." : "Create or replace a persistent virtual note file.",
-			parameters: Type.Object({ text: Type.String(), path: Type.String() }, { additionalProperties: false }),
+			description: name === "notes_append_to_file"
+				? "Append exact text to a persistent virtual note file. Appending suits chronological logs; for current-state notes, replace the whole file with notes_write_file instead. Accepts the same mark_stale flag to close a note."
+				: "Create or replace a persistent virtual note file. Keep notes small and split by topic; replace outdated notes whole. With mark_stale: true, flag the note as stale instead — optionally writing its final content in the same call: stale notes leave the boot index but stay readable and searchable, and rewriting revives them.",
+			parameters: Type.Object({ text: Type.Optional(Type.String()), path: Type.String(), mark_stale: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
 			// Codex sets supports_parallel_tool_calls = false on notes.write_file/append_to_file.
 			// Pi's per-tool equivalent is executionMode "sequential": a batch containing either
 			// tool runs its calls one at a time, so note read-modify-write cannot race.
 			executionMode: "sequential",
 			async execute(_id, params, _signal, _update, ctx) {
 				const path = assertVirtualPath(params.path);
+				const hasText = params.text !== undefined;
+				const hasStale = params.mark_stale !== undefined;
+				if (!hasText && !hasStale) return output({ error: "provide text, mark_stale, or both", path });
 				const old = notesFromSession(ctx).get(path);
-				const next = op === "append" ? `${old?.text ?? ""}${params.text}` : params.text;
+				if (!hasText && !old) return output({ error: "note file not found", path });
+				const next = hasText ? (op === "append" ? `${old?.text ?? ""}${params.text}` : params.text as string) : old!.text;
 				const bytes = Buffer.byteLength(next, "utf8");
-				if (bytes > MAX_NOTE_BYTES) return output({ error: `note exceeds ${MAX_NOTE_BYTES} UTF-8 bytes`, path, size_bytes: bytes });
+				if (hasText && bytes > MAX_NOTE_BYTES) return output({ error: `note exceeds ${MAX_NOTE_BYTES} UTF-8 bytes`, path, size_bytes: bytes });
 				const now = Date.now();
-				saveNote({ op, path, text: params.text, createdAt: old?.createdAt ?? now, updatedAt: now });
-				return output({ path, size_bytes: bytes, operation: op });
+				const operation: NoteOperation = { op, path, createdAt: old?.createdAt ?? now, updatedAt: now };
+				if (hasText) operation.text = params.text;
+				if (hasStale) operation.stale = params.mark_stale;
+				saveNote(operation);
+				return output({ path, size_bytes: bytes, operation: op, stale: hasStale ? params.mark_stale : false });
 			},
 		}));
 	}

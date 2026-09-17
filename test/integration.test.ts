@@ -267,7 +267,13 @@ test("schemas cover the nine History/Notes actions plus reset controls", () => {
 		assert.equal(objectSchema(tool)?.type, "object", name);
 	}
 	assert.equal(objectSchema(captured.tools.get("history_read_item"))?.required?.includes("item_id"), true);
-	assert.equal(objectSchema(captured.tools.get("notes_write_file"))?.required?.includes("text"), true);
+	// text is optional so mark_stale-only calls reach the handler; each write/append tool accepts the stale flag.
+	for (const name of ["notes_write_file", "notes_append_to_file"]) {
+		const schema = captured.tools.get(name)?.parameters as { properties?: Record<string, unknown>; required?: string[] } | undefined;
+		assert.ok(schema?.properties?.text, `${name} exposes text`);
+		assert.ok(schema?.properties?.mark_stale, `${name} exposes mark_stale`);
+		assert.equal(schema?.required?.includes("text"), false, `${name} makes text optional for mark-only calls`);
+	}
 	// The history ordering switch is documented as newest-first by default.
 	for (const name of ["history_list_windows", "history_list_items", "history_search_contents"]) {
 		const schema = captured.tools.get(name)?.parameters as { properties?: Record<string, { description?: string }> } | undefined;
@@ -321,6 +327,111 @@ test("persisted note operations restore, are Unicode byte-limited, and use safe 
 		await call(captured, "notes_write_file", { path: "large", text: "é".repeat(500_001) }, ctx),
 	);
 	assert.match(tooLarge.error, /1000000/);
+});
+
+test("stale lifecycle: mark-only, closure, revive, and validation errors", async () => {
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const ctx = context(sm);
+
+	await call(captured, "notes_write_file", { path: "journal.md", text: "log line" }, ctx);
+	assert.equal(notesFromSession(ctx).get("journal.md")?.stale, false, "a fresh write starts not stale");
+
+	// mark-only: content unchanged, flag set
+	const markOnly = resultJson<{ stale: boolean }>(await call(captured, "notes_write_file", { path: "journal.md", mark_stale: true }, ctx));
+	assert.equal(markOnly.stale, true);
+	assert.equal(notesFromSession(ctx).get("journal.md")?.stale, true);
+	assert.equal(notesFromSession(ctx).get("journal.md")?.text, "log line", "mark-only leaves content unchanged");
+
+	// explicit revive without content
+	await call(captured, "notes_write_file", { path: "journal.md", mark_stale: false }, ctx);
+	assert.equal(notesFromSession(ctx).get("journal.md")?.stale, false, "mark_stale:false revives");
+	assert.equal(notesFromSession(ctx).get("journal.md")?.text, "log line", "explicit revive leaves content unchanged");
+
+	// write+mark closure: replace content and flag stale in one call
+	await call(captured, "notes_write_file", { path: "journal.md", text: "final", mark_stale: true }, ctx);
+	assert.equal(notesFromSession(ctx).get("journal.md")?.text, "final");
+	assert.equal(notesFromSession(ctx).get("journal.md")?.stale, true);
+
+	// revive on plain write
+	await call(captured, "notes_write_file", { path: "journal.md", text: "reopened" }, ctx);
+	assert.equal(notesFromSession(ctx).get("journal.md")?.stale, false, "writing without mark_stale revives");
+
+	// append+mark closure, then append mark-only
+	await call(captured, "notes_append_to_file", { path: "journal.md", text: "\nclosed", mark_stale: true }, ctx);
+	const closed = notesFromSession(ctx).get("journal.md");
+	assert.equal(closed?.text, "reopened\nclosed");
+	assert.equal(closed?.stale, true);
+	await call(captured, "notes_append_to_file", { path: "journal.md", mark_stale: false }, ctx);
+	assert.equal(notesFromSession(ctx).get("journal.md")?.stale, false, "append mark_stale:false revives");
+
+	// neither text nor mark_stale is an error on both tools
+	for (const name of ["notes_write_file", "notes_append_to_file"]) {
+		const neither = resultJson<{ error?: string }>(await call(captured, name, { path: "journal.md" }, ctx));
+		assert.equal(typeof neither.error, "string", `${name} rejects a call with neither text nor mark_stale`);
+		// marking a nonexistent path is an error and persists nothing
+		const missing = resultJson<{ error?: string }>(await call(captured, name, { path: "missing.md", mark_stale: true }, ctx));
+		assert.equal(typeof missing.error, "string", `${name} rejects marking a nonexistent path`);
+	}
+	assert.equal(notesFromSession(ctx).has("missing.md"), false, "failed marks leave no phantom note");
+});
+
+test("the boot notes index excludes stale notes while list, read, and search still see them", async () => {
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const ctx = context(sm);
+
+	await call(captured, "notes_write_file", { path: "fresh.md", text: "fresh content" }, ctx);
+	await call(captured, "notes_write_file", { path: "old.md", text: "stale content" }, ctx);
+	await call(captured, "notes_write_file", { path: "old.md", mark_stale: true }, ctx);
+
+	runHandlers(captured, "session_start", {}, ctx);
+	const boot = captured.sent[0];
+	const text = typeof boot?.message.content === "string" ? boot.message.content : "";
+	assert.ok(text.includes("fresh.md"), "the fresh note is indexed");
+	assert.equal(text.includes("old.md"), false, "the stale note leaves the boot index");
+	assert.equal(text.includes("stale content"), false, "the stale preview is not rendered");
+
+	const listed = resultJson<{ files: Array<{ path: string; stale: boolean }> }>(await call(captured, "notes_list_files_by_prefix", {}, ctx));
+	assert.equal(listed.files.find((file) => file.path === "old.md")?.stale, true, "list carries the stale flag");
+	assert.equal(listed.files.find((file) => file.path === "fresh.md")?.stale, false);
+
+	// stale notes are still readable and searchable, unannotated
+	const read = resultJson<{ content: string }>(await call(captured, "notes_read_file", { path: "old.md" }, ctx));
+	assert.equal(read.content, "stale content");
+	const searched = resultJson<{ files: Array<{ path: string }> }>(await call(captured, "notes_search_contents", { query: "stale content" }, ctx));
+	assert.equal(searched.files[0]?.path, "old.md");
+});
+
+test("the boot notes index omits itself when every note is stale", async () => {
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const ctx = context(sm);
+
+	await call(captured, "notes_write_file", { path: "done.md", text: "finished", mark_stale: true }, ctx);
+	runHandlers(captured, "session_start", {}, ctx);
+	const text = typeof captured.sent[0]?.message.content === "string" ? captured.sent[0].message.content : "";
+	assert.equal(text.includes("done.md"), false, "no stale note is indexed");
+	assert.equal(text.includes("finished"), false, "no stale preview is rendered");
+	assert.ok(text.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG), "the rest of the boot block still renders");
+});
+
+test("JSONL reload preserves the stale flag", async () => {
+	const sm = manager(true);
+	const captured = makeExtension(sm);
+	const ctx = context(sm);
+
+	await call(captured, "notes_write_file", { path: "archived.md", text: "keep" }, ctx);
+	await call(captured, "notes_write_file", { path: "archived.md", mark_stale: true }, ctx);
+	// SessionManager intentionally delays writing a brand-new session until its first assistant entry.
+	appendText(sm, "assistant", "persist the append-only session");
+	const file = sm.getSessionFile();
+	assert.ok(file);
+	const restored = manager();
+	restored.setSessionFile(file);
+	const files = notesFromSession(context(restored));
+	assert.equal(files.get("archived.md")?.stale, true, "the stale flag survives JSONL reload");
+	assert.equal(files.get("archived.md")?.text, "keep");
 });
 
 test("paged tool outputs stay bounded and cursors reconstruct history and notes", async () => {

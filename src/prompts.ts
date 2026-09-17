@@ -15,15 +15,16 @@ function identityBlock(agentName: string, firstWindowId: string, currentWindowId
 }
 
 /**
- * Recent-notes index: up to three most-recent notes. Each note shows its path, line count,
- * UTF-8 byte count and local ISO update time, followed by an indented inline preview: the
- * whole text when it fits in NOTE_PREVIEW_CHARS, otherwise its first NOTE_PREVIEW_HEAD_CHARS
- * and last NOTE_PREVIEW_TAIL_CHARS Unicode characters joined by an explicit ellipsis. The
- * two slices never overlap, so the preview never duplicates head content as tail content.
- * Empty when the session has no notes.
+ * Recent-notes index: up to three most-recent fresh (non-stale) notes. Each note shows its
+ * path, line count, UTF-8 byte count and local ISO update time, followed by an indented inline
+ * preview: the whole text when it fits in NOTE_PREVIEW_CHARS, otherwise its first
+ * NOTE_PREVIEW_HEAD_CHARS and last NOTE_PREVIEW_TAIL_CHARS Unicode characters joined by an
+ * explicit ellipsis. The two slices never overlap, so the preview never duplicates head content
+ * as tail content. Stale notes are excluded entirely; empty when no fresh notes remain.
  */
 function notesIndex(ctx: ExtensionContext): string {
 	const recentNotes = [...notesFromSession(ctx)]
+		.filter(([, file]) => !file.stale)
 		.sort((a, b) => b[1].updatedAt - a[1].updatedAt)
 		.slice(0, 3);
 	if (recentNotes.length === 0) return "";

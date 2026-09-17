@@ -1,0 +1,7 @@
+{
+  "worktree": {
+    "create": [
+      { "name": "npm-ci", "argv": ["npm", "ci", "--prefer-offline", "--ignore-scripts"], "timeoutMs": 900000 }
+    ]
+  }
+}
