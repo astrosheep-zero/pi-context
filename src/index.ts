@@ -53,7 +53,7 @@ export default function piContext(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "new_context",
 		label: "New context",
-		description: "Request a reset-style context rollover after this tool result is safely recorded. Call alone in a tool batch.",
+		description: "Clear your mind and start a new context window. Your session, notes, and history survive.",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute() {
 			if (!enabled) return output({ error: "pi-context is off (/pi-context on to enable)" });
