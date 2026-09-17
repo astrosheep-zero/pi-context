@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { output, page, middleTruncate, withinBudget } from "./tool-output.js";
-import { positiveInteger, recentFirst, nullableString, role, cursor } from "./tool-schema.js";
+import { positiveInteger, recentFirst, nullableString, role, cursor, searchQuery, searchQueries } from "./tool-schema.js";
 import { historyFromSession, filteredItems, visibleItem, allItems } from "./history.js";
 
 export function registerHistoryTools(pi: ExtensionAPI) {
@@ -51,10 +51,11 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "history_search_contents",
 		label: "History search",
-		description: "Case-sensitive literal substring search over durable Pi session history; no semantic search.",
-		parameters: Type.Object({ limit: positiveInteger(), cursor: cursor(), query: Type.String(), recent_first: recentFirst(), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
+		description: "Case-sensitive literal substring search over durable Pi session history; query accepts one string or an array of strings, an item matches when it contains any of them (OR), and each item appears once. No semantic search.",
+		parameters: Type.Object({ limit: positiveInteger(), cursor: cursor(), query: searchQuery(), recent_first: recentFirst(), tool_namespace: nullableString(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
-			const matching = filteredItems(ctx, params).filter((item) => item.content.includes(params.query)).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200));
+			const queries = searchQueries(params.query);
+			const matching = filteredItems(ctx, params).filter((item) => queries.some((query) => item.content.includes(query))).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200));
 			return output(page(matching, params.cursor ?? 0, "items", params.limit, (item, fits) => ({ ...item, truncated_content: middleTruncate(item.truncated_content, (candidate) => fits({ ...item, truncated_content: candidate })) })));
 		},
 	}));

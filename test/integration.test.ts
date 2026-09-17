@@ -551,6 +551,129 @@ test("a page cap limits the page, not the enumerable set: cursors stay truthful 
 	assert.equal(notesTail.next_cursor, null);
 });
 
+test("multi-query search: OR semantics, dedupe, and bare-string backward compatibility", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+
+	// One item matches both queries, one only the first, one only the second, one neither.
+	const bothId = appendText(session, "user", "alpha beta together");
+	const alphaId = appendText(session, "user", "alpha only");
+	const betaId = appendText(session, "assistant", "beta only");
+	const noneId = appendText(session, "user", "gamma only");
+	const historyIds = async (params: Record<string, unknown>) =>
+		resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_search_contents", { recent_first: false, ...params }, ctx)).items.map((item) => item.item_id);
+	const orIds = await historyIds({ query: ["alpha", "beta"] });
+	assert.deepEqual(orIds, [bothId, alphaId, betaId], "history: an item matching any query is returned once");
+	assert.equal(orIds.includes(noneId), false, "history: an item matching no query is not returned");
+	assert.deepEqual(await historyIds({ query: ["alpha"] }), [bothId, alphaId], "history: a one-element array searches that literal");
+	assert.deepEqual(await historyIds({ query: "alpha" }), orIds.filter((id) => id !== betaId), "history: a bare string still behaves exactly as before");
+	assert.deepEqual(await historyIds({ query: "alpha" }), await historyIds({ query: ["alpha"] }), "history: bare string equals the single-element list");
+
+	await call(captured, "notes_write_file", { path: "both.md", text: "alpha beta\nunrelated" }, ctx);
+	await call(captured, "notes_write_file", { path: "alpha.md", text: "alpha only" }, ctx);
+	await call(captured, "notes_write_file", { path: "beta.md", text: "beta only" }, ctx);
+	await call(captured, "notes_write_file", { path: "gamma.md", text: "gamma only" }, ctx);
+	const notesSearch = async (params: Record<string, unknown>) =>
+		resultJson<{ files: Array<{ path: string; matches: Array<{ line: number; text: string }> }> }>(await call(captured, "notes_search_contents", params, ctx)).files;
+	const orFiles = await notesSearch({ query: ["alpha", "beta"] });
+	assert.deepEqual(orFiles.map((file) => file.path), ["both.md", "alpha.md", "beta.md"], "notes: a file matching any query is returned once");
+	assert.equal(orFiles[0]?.matches.length, 1, "notes: one line containing both queries is reported once");
+	assert.deepEqual((await notesSearch({ query: ["alpha"] })).map((file) => file.path), ["both.md", "alpha.md"], "notes: a one-element array searches that literal");
+	assert.deepEqual((await notesSearch({ query: "alpha" })).map((file) => file.path), ["both.md", "alpha.md"], "notes: a bare string still behaves exactly as before");
+	assert.deepEqual((await notesSearch({ query: "alpha" })).map((file) => file.path), (await notesSearch({ query: ["alpha"] })).map((file) => file.path), "notes: bare string equals the single-element list");
+	assert.deepEqual((await notesSearch({ query: ["gamma"] })).map((file) => file.path), ["gamma.md"]);
+
+	// An empty array is an argument error, not a silently empty result set.
+	await assert.rejects(() => call(captured, "history_search_contents", { query: [] }, ctx), /non-empty array of strings/, "history: empty query array is refused");
+	await assert.rejects(() => call(captured, "notes_search_contents", { query: [] }, ctx), /non-empty array of strings/, "notes: empty query array is refused");
+	await assert.rejects(() => call(captured, "history_search_contents", { query: ["alpha", 7] }, ctx), /elements must be strings/, "history: non-string query element is refused");
+	await assert.rejects(() => call(captured, "notes_search_contents", { query: ["alpha", 7] }, ctx), /elements must be strings/, "notes: non-string query element is refused");
+});
+
+test("multi-query search paginates over the OR set with no cross-page duplicates", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	for (let index = 0; index < 12; index++) {
+		appendText(session, "user", index % 3 === 0 ? `alpha ${index}` : index % 3 === 1 ? `beta ${index}` : `gamma ${index}`);
+	}
+	const historyPage = async (cursor: number) =>
+		resultJson<{ items: Array<{ item_id: string }>; next_cursor: number | null }>(
+			await call(captured, "history_search_contents", { query: ["alpha", "beta"], recent_first: false, max_chars_per_item: 100, limit: 3, cursor }, ctx),
+		);
+	const historyIds: string[] = [];
+	let historyNext: number | null = 0;
+	let historyCursor = 0;
+	let historyPages = 0;
+	while (historyNext !== null) {
+		const result = await historyPage(historyCursor);
+		assert.ok(result.items.length > 0, "history: a page is never empty");
+		historyIds.push(...result.items.map((item) => item.item_id));
+		historyNext = result.next_cursor;
+		if (historyNext !== null) historyCursor = historyNext;
+		assert.ok(++historyPages < 20, "history: pagination terminates");
+	}
+	assert.equal(historyIds.length, 8, "history: every OR match is reached exactly once across pages");
+	assert.equal(new Set(historyIds).size, historyIds.length, "history: no item repeats across pages");
+	assert.equal(historyNext, null, "history: null only at the true end");
+	assert.equal((await historyPage(0)).next_cursor, 3, "history: next_cursor echoes the next page start");
+	const historyTail = await historyPage(6);
+	assert.equal(historyTail.items.length, 2);
+	assert.equal(historyTail.next_cursor, null, "history: the last page terminates the cursor");
+
+	for (let index = 0; index < 12; index++) {
+		const text = index % 3 === 0 ? `alpha ${index}` : index % 3 === 1 ? `beta ${index}` : `gamma ${index}`;
+		await call(captured, "notes_write_file", { path: `f${index}.md`, text }, ctx);
+	}
+	const notesPage = async (cursor: number) =>
+		resultJson<{ files: Array<{ path: string }>; next_cursor: number | null }>(
+			await call(captured, "notes_search_contents", { query: ["alpha", "beta"], max_files: 3, cursor }, ctx),
+		);
+	const notePaths: string[] = [];
+	let notesNext: number | null = 0;
+	let notesCursor = 0;
+	let notesPages = 0;
+	while (notesNext !== null) {
+		const result = await notesPage(notesCursor);
+		assert.ok(result.files.length > 0, "notes: a page is never empty");
+		notePaths.push(...result.files.map((file) => file.path));
+		notesNext = result.next_cursor;
+		if (notesNext !== null) notesCursor = notesNext;
+		assert.ok(++notesPages < 20, "notes: pagination terminates");
+	}
+	assert.equal(notePaths.length, 8, "notes: every OR match is reached exactly once across pages");
+	assert.equal(new Set(notePaths).size, notePaths.length, "notes: no file repeats across pages");
+	assert.equal(notesNext, null, "notes: null only at the true end");
+	assert.equal((await notesPage(0)).next_cursor, 3, "notes: next_cursor echoes the next page start");
+	const notesLastPage = await notesPage(6);
+	assert.equal(notesLastPage.files.length, 2);
+	assert.equal(notesLastPage.next_cursor, null, "notes: the last page terminates the cursor");
+});
+
+test("history multi-query search composes with role, tool_name, and window filters", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const userId = appendText(session, "user", "alpha root message");
+	const assistantId = appendText(session, "assistant", "beta assistant message");
+	const toolId = appendText(session, "toolResult", "alpha beta bash output");
+	const rootWindow = historyFromSession(ctx)[0]!.windowId;
+	const leaf = session.getLeafId();
+	assert.ok(leaf);
+	session.appendCompaction("window summary without needles", leaf, 100, { piContext: "reset-v2", windowId: "pcw:test:second" }, true);
+	const nextId = appendText(session, "user", "alpha next window");
+
+	const searchIds = async (params: Record<string, unknown>) =>
+		resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_search_contents", { query: ["alpha", "beta"], recent_first: false, ...params }, ctx)).items.map((item) => item.item_id);
+	assert.deepEqual(await searchIds({ role: "user" }), [userId, nextId], "role filter composes with multi-query");
+	assert.deepEqual(await searchIds({ role: "assistant" }), [assistantId], "role filter narrows the OR set");
+	assert.deepEqual(await searchIds({ tool_name: "bash" }), [toolId], "tool_name filter composes with multi-query");
+	assert.deepEqual(await searchIds({ tool_name: "read" }), [], "a non-matching tool_name yields nothing");
+	assert.deepEqual(await searchIds({ window_id: rootWindow }), [userId, assistantId, toolId], "window filter restricts the OR set to that window");
+	assert.deepEqual(await searchIds({ window_id: "pcw:test:second" }), [nextId], "the second window's matches are addressable");
+});
+
 test("a single oversized note line is middle-truncated and the cursor still advances", async () => {
 	const session = manager();
 	const captured = makeExtension(session);

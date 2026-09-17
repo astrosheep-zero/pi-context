@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { output, page, middleTruncate, withinBudget } from "./tool-output.js";
-import { nullableString, nullableInteger, positiveInteger, cursor } from "./tool-schema.js";
+import { nullableString, nullableInteger, positiveInteger, cursor, searchQuery, searchQueries } from "./tool-schema.js";
 import { notesFromSession, assertVirtualPath, assertVirtualPrefix, lineRange, localIso, type NoteOperation } from "./notes.js";
 import { NOTE_TYPE, MAX_NOTE_BYTES } from "./protocol.js";
 
@@ -55,14 +55,15 @@ export function registerNoteTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_search_contents",
 		label: "Notes search",
-		description: "Case-sensitive literal substring search over virtual note lines; no semantic search. Each matched file carries created_at and updated_at as local-time ISO 8601 strings with an explicit UTC offset.",
-		parameters: Type.Object({ max_matches_per_file: positiveInteger(), cursor: cursor(), query: Type.String(), recent_file_first: Type.Optional(Type.Boolean()), max_files: positiveInteger(), path_prefix: nullableString() }, { additionalProperties: false }),
+		description: "Case-sensitive literal substring search over virtual note lines; query accepts one string or an array of strings, a line matches when it contains any of them (OR), and each matched line appears once. No semantic search. Each matched file carries created_at and updated_at as local-time ISO 8601 strings with an explicit UTC offset.",
+		parameters: Type.Object({ max_matches_per_file: positiveInteger(), cursor: cursor(), query: searchQuery(), recent_file_first: Type.Optional(Type.Boolean()), max_files: positiveInteger(), path_prefix: nullableString() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
+			const queries = searchQueries(params.query);
 			const prefix = assertVirtualPrefix(params.path_prefix);
 			let files = [...notesFromSession(ctx)].filter(([path]) => !prefix || path.startsWith(prefix));
 			if (params.recent_file_first) files.sort((a, b) => b[1].createdAt - a[1].createdAt);
 			const maxPerFile = params.max_matches_per_file ?? Number.POSITIVE_INFINITY;
-			const result = files.map(([path, file]) => ({ path, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt), matches: file.text.split("\n").flatMap((line, index) => line.includes(params.query) ? [{ line: index + 1, text: line }] : []).slice(0, maxPerFile) })).filter((file) => file.matches.length > 0);
+			const result = files.map(([path, file]) => ({ path, created_at: localIso(file.createdAt), updated_at: localIso(file.updatedAt), matches: file.text.split("\n").flatMap((line, index) => queries.some((query) => line.includes(query)) ? [{ line: index + 1, text: line }] : []).slice(0, maxPerFile) })).filter((file) => file.matches.length > 0);
 			// A file is capped by dropping whole trailing matches, but its last match is never
 			// dropped: one oversized line is middle-truncated so the file still appears.
 			const fitFile = (file: (typeof result)[number], fits: (candidate: (typeof result)[number]) => boolean) => {
