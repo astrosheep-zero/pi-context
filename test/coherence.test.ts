@@ -76,9 +76,31 @@ function appendText(sessionManager: SessionManager, text: string): string {
 	return sessionManager.appendMessage({ role: "user", content: [{ type: "text" as const, text }], timestamp: Date.now() } as unknown as AppendableMessage);
 }
 
-type ReadResult = { content: string; total_chars: number; offset_chars: number; next_offset_chars: number | null };
+type ReadResult = { header: string; content: string; offset_chars: number; total_chars: number; next_offset_chars: number | null };
 type SearchHit = { item_id: string; truncated: boolean; total_chars: number; truncated_content: string; match_offset_chars: number };
 type Match = { line: number; text: string; truncated: boolean; total_chars: number; offset_chars: number };
+
+/**
+ * Decode a raw read (notes_read_file / history_read_item): a one-line bracketed header, then
+ * the payload verbatim (which may itself contain newlines), so split on the first newline only.
+ */
+function resultRead(result: AgentToolResult<unknown>): ReadResult {
+	const text = result.content[0];
+	assert.ok(text && text.type === "text", "read result carries text");
+	const newline = text.text.indexOf("\n");
+	assert.ok(newline !== -1, "raw read carries a header line and a payload");
+	const header = text.text.slice(0, newline);
+	const content = text.text.slice(newline + 1);
+	assert.match(header, /^\[/, "the header is bracketed");
+	assert.match(header, /\]$/, "the header closes its bracket");
+	const match = header.match(/ · chars (\d+)-(\d+) of (\d+) · (end|continue at offset_chars=(\d+))/);
+	assert.ok(match, `read header names the char range and resume cursor: ${header}`);
+	const offset_chars = Number(match[1]);
+	const total_chars = Number(match[3]);
+	const next_offset_chars = match[4] === "end" ? null : Number(match[5]);
+	assert.equal([...content].length, Number(match[2]) - offset_chars, "the header range matches the delivered payload");
+	return { header, content, offset_chars, total_chars, next_offset_chars };
+}
 
 const PROFILES = [
 	{ name: "cjk", unit: "历" },
@@ -109,7 +131,7 @@ async function walkWindow(captured: Captured, ctx: ExtensionContext, tool: "hist
 		if (options.limitChars !== undefined) params.limit_chars = options.limitChars;
 		const result = await call(captured, tool, params, ctx);
 		assertWithinBudget(result, `${label} offset=${offset}`);
-		const page = resultJson<ReadResult>(result);
+		const page = resultRead(result);
 		total = page.total_chars;
 		const delivered = codePoints(page.content);
 		if (page.offset_chars !== offset) failures.push(`cursor law: ${label} echoed offset_chars=${page.offset_chars} for request offset ${offset}`);
@@ -174,7 +196,7 @@ test("coherence: following the returned cursors reconstructs the original text e
 		const hugeLine = profile.unit.repeat(40_000);
 		const path = `solo-${profile.name}.md`;
 		await call(captured, "notes_write_file", { path, text: hugeLine }, ctx);
-		const first = resultJson<ReadResult>(await call(captured, "notes_read_file", { path }, ctx));
+		const first = resultRead(await call(captured, "notes_read_file", { path }, ctx));
 		const undelivered = codePoints(hugeLine) - codePoints(first.content);
 		report.push(`notes_read_file no trailing newline: ${profile.name} ${codePoints(hugeLine)} chars -> first page delivered ${codePoints(first.content)}, undelivered ${undelivered}, offset_chars=${first.offset_chars}, next_offset_chars=${String(first.next_offset_chars)}, marker=${first.content.includes("[truncated")}`);
 		if (first.offset_chars !== 0) failures.push(`window echo: ${profile.name} first page echoed offset_chars=${first.offset_chars}, expected 0`);
@@ -187,7 +209,7 @@ test("coherence: following the returned cursors reconstructs the original text e
 
 	// --- The empty note must terminate: no self-feeding cursor, and an empty window from 0.
 	await call(captured, "notes_write_file", { path: "empty.md", text: "" }, ctx);
-	const empty = resultJson<ReadResult>(await call(captured, "notes_read_file", { path: "empty.md" }, ctx));
+	const empty = resultRead(await call(captured, "notes_read_file", { path: "empty.md" }, ctx));
 	report.push(`notes_read_file empty note: offset_chars=${empty.offset_chars} total_chars=${empty.total_chars} next_offset_chars=${String(empty.next_offset_chars)} content=${JSON.stringify(empty.content)}`);
 	if (empty.offset_chars !== 0 || empty.total_chars !== 0 || empty.content !== "") failures.push("the empty note is not an empty window from 0");
 	if (empty.next_offset_chars !== null) failures.push("pagination hole: the empty note is never exhausted");
@@ -227,7 +249,7 @@ test("coherence: following the returned cursors reconstructs the original text e
 		if (first.truncated_content.includes("…")) failures.push("history_search_contents appended a marker to the payload");
 		if (!Number.isInteger(first.match_offset_chars)) failures.push("history_search_contents carries no match_offset_chars");
 		else {
-			const at = resultJson<ReadResult>(await call(captured, "history_read_item", { window_id: windowId, item_id: searchItemId, offset_chars: first.match_offset_chars, limit_chars: 8 }, ctx));
+			const at = resultRead(await call(captured, "history_read_item", { window_id: windowId, item_id: searchItemId, offset_chars: first.match_offset_chars, limit_chars: 8 }, ctx));
 			if (!at.content.includes("历史内容")) failures.push(`history_read_item at match_offset_chars=${first.match_offset_chars} does not show the query`);
 		}
 	}
@@ -299,7 +321,7 @@ test("coherence: following the returned cursors reconstructs the original text e
 	if (typeof addressOffset !== "number") failures.push("notes_search_contents carries no offset_chars");
 	else if (addressOffset !== expectedAddress) failures.push(`notes_search_contents offset_chars=${addressOffset}, expected ${expectedAddress} (file-absolute, at the query)`);
 	else {
-		const at = resultJson<ReadResult>(await call(captured, "notes_read_file", { path: "address.md", offset_chars: addressOffset, limit_chars: 32 }, ctx));
+		const at = resultRead(await call(captured, "notes_read_file", { path: "address.md", offset_chars: addressOffset, limit_chars: 32 }, ctx));
 		if (!at.content.startsWith("needle-address")) failures.push(`notes_read_file at a search hit's offset_chars does not start at the query: ${JSON.stringify(at.content)}`);
 		if (!at.content.includes("needle-address")) failures.push("notes_read_file at a search hit's offset_chars does not show the query");
 	}
@@ -319,27 +341,27 @@ test("coherence: following the returned cursors reconstructs the original text e
 		const path = `tail-${profile.name}.md`;
 		await call(captured, "notes_write_file", { path, text: tailText }, ctx);
 		const total = codePoints(tailText);
-		const tail = resultJson<ReadResult>(await call(captured, "notes_read_file", { path, offset_chars: -10 }, ctx));
+		const tail = resultRead(await call(captured, "notes_read_file", { path, offset_chars: -10 }, ctx));
 		report.push(`notes_read_file negative offset: ${profile.name} total=${total} -> offset_chars=${tail.offset_chars} next=${String(tail.next_offset_chars)} content=${JSON.stringify(tail.content)}`);
 		if (tail.offset_chars !== total - 10) failures.push(`negative offset: notes_read_file ${profile.name} echoed ${tail.offset_chars}, expected ${total - 10}`);
 		if (tail.content !== codePointSlice(tailText, total - 10)) failures.push(`negative offset: notes_read_file ${profile.name} did not reach the tail in one call`);
 		if (tail.next_offset_chars !== null) failures.push(`negative offset: notes_read_file ${profile.name} tail read is not exhausted`);
-		const fromStart = resultJson<ReadResult>(await call(captured, "notes_read_file", { path, offset_chars: -(total + 5), limit_chars: 8 }, ctx));
+		const fromStart = resultRead(await call(captured, "notes_read_file", { path, offset_chars: -(total + 5), limit_chars: 8 }, ctx));
 		if (fromStart.offset_chars !== 0) failures.push(`negative offset: notes_read_file ${profile.name} with N >= total_chars echoed ${fromStart.offset_chars}, expected 0`);
 		if (fromStart.content !== codePointSlice(tailText, 0, 8)) failures.push(`negative offset: notes_read_file ${profile.name} with N >= total_chars did not read from the start`);
-		const cut = resultJson<ReadResult>(await call(captured, "notes_read_file", { path, offset_chars: -15, limit_chars: 4 }, ctx));
+		const cut = resultRead(await call(captured, "notes_read_file", { path, offset_chars: -15, limit_chars: 4 }, ctx));
 		if (cut.next_offset_chars !== cut.offset_chars + codePoints(cut.content)) failures.push(`negative offset: notes_read_file ${profile.name} cut a negative-start read off the cursor law`);
-		const resumed = resultJson<ReadResult>(await call(captured, "notes_read_file", { path, offset_chars: cut.next_offset_chars as number }, ctx));
+		const resumed = resultRead(await call(captured, "notes_read_file", { path, offset_chars: cut.next_offset_chars as number }, ctx));
 		if (resumed.offset_chars !== cut.next_offset_chars) failures.push(`negative offset: notes_read_file ${profile.name} resume echoed ${resumed.offset_chars}, expected ${String(cut.next_offset_chars)}`);
 	}
 
 	// history_read_item gains the identical sugar over a durable item.
 	const historyTailText = `${"h".repeat(50)}END`;
 	const historyTailId = appendText(session, historyTailText);
-	const historyTail = resultJson<ReadResult>(await call(captured, "history_read_item", { window_id: windowId, item_id: historyTailId, offset_chars: -3 }, ctx));
+	const historyTail = resultRead(await call(captured, "history_read_item", { window_id: windowId, item_id: historyTailId, offset_chars: -3 }, ctx));
 	report.push(`history_read_item negative offset: offset_chars=${historyTail.offset_chars} next=${String(historyTail.next_offset_chars)} content=${JSON.stringify(historyTail.content)}`);
 	if (historyTail.offset_chars !== 50 || historyTail.content !== "END" || historyTail.next_offset_chars !== null) failures.push(`negative offset: history_read_item returned ${JSON.stringify(historyTail)}`);
-	const historyFromStart = resultJson<ReadResult>(await call(captured, "history_read_item", { window_id: windowId, item_id: historyTailId, offset_chars: -500, limit_chars: 4 }, ctx));
+	const historyFromStart = resultRead(await call(captured, "history_read_item", { window_id: windowId, item_id: historyTailId, offset_chars: -500, limit_chars: 4 }, ctx));
 	if (historyFromStart.offset_chars !== 0 || historyFromStart.content !== "hhhh") failures.push(`negative offset: history_read_item with N >= total_chars returned ${JSON.stringify(historyFromStart)}`);
 
 	console.log(report.map((line) => `  ${line}`).join("\n"));

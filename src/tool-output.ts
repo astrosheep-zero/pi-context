@@ -9,6 +9,11 @@ export function withinBudget(value: unknown, budget = TOOL_OUTPUT_MAX_BYTES): bo
 	return Buffer.byteLength(json(value), "utf8") <= budget;
 }
 
+/** True when `text` fits the wire budget verbatim, for raw payloads with no JSON encoding. */
+export function withinTextBudget(text: string, budget = TOOL_OUTPUT_MAX_BYTES): boolean {
+	return Buffer.byteLength(text, "utf8") <= budget;
+}
+
 /** Marker standing in for characters elided from the middle of an oversized single unit. */
 export function truncationMarker(removedChars: number): string {
 	return `…[truncated ${removedChars} chars]…`;
@@ -89,9 +94,11 @@ export type CharacterWindow = {
  * `N >= total_chars` reads from the start; the resolved absolute offset is always echoed.
  * Following `next_offset_chars` reconstructs `text` by plain concatenation, because the
  * payload is always a plain prefix with no marker. `render` builds the exact response for
- * a candidate window, so the budget is measured on the bytes that go on the wire.
+ * a candidate window, and `measure` decides whether that response fits the wire budget (JSON
+ * serialization by default; raw-text renders pass a verbatim byte measure), so the budget is
+ * always measured on the bytes that go on the wire.
  */
-export function readCharacterWindow<T>(text: string, offsetChars: number | undefined, limitChars: number | undefined, render: (window: CharacterWindow) => T): T {
+export function readCharacterWindow<T>(text: string, offsetChars: number | undefined, limitChars: number | undefined, render: (window: CharacterWindow) => T, measure: (rendered: T) => boolean = withinBudget): T {
 	const chars = Array.from(text);
 	const requested = offsetChars ?? 0;
 	const resolved = requested < 0 ? Math.max(0, chars.length + requested) : Math.max(0, requested);
@@ -100,8 +107,21 @@ export function readCharacterWindow<T>(text: string, offsetChars: number | undef
 		const next = resolved + Array.from(content).length;
 		return { offset_chars: resolved, content, total_chars: chars.length, next_offset_chars: next < chars.length ? next : null };
 	};
-	const content = prefixFit(windowChars.join(""), (candidate) => withinBudget(render(build(candidate))));
+	const content = prefixFit(windowChars.join(""), (candidate) => measure(render(build(candidate))));
 	return render(build(content));
+}
+
+/**
+ * One-line bracketed header preceding a raw character-window payload: the identity, the
+ * delivered char range, and either the resume cursor or `end`. `tail` appends extra
+ * metadata (notes add their timestamps) inside the same brackets.
+ */
+export function characterWindowHeader(identity: string, window: CharacterWindow, tail = ""): string {
+	// The range end is offset + delivered count, never `total_chars`: a read resolved past the
+	// end delivers zero characters there, and the header must not render an inverted range.
+	const end = window.offset_chars + Array.from(window.content).length;
+	const resume = window.next_offset_chars === null ? "end" : `continue at offset_chars=${window.next_offset_chars}`;
+	return `[${identity} · chars ${window.offset_chars}-${end} of ${window.total_chars} · ${resume}${tail}]`;
 }
 
 /**
@@ -150,7 +170,20 @@ export function page<T>(items: T[], cursor: number, key: string, limit?: number,
 	return { [key]: selected, next_cursor: next };
 }
 
-/** Encode a result through the common tool result boundary. */
-export function output(value: unknown, details: unknown = value, terminate = false) {
+/**
+ * Encode a structured result through the common tool result boundary. `details` is slim
+ * metadata for logs/UI (pi convention: never a second copy of the payload) and stays
+ * undefined unless the tool has metadata worth persisting.
+ */
+export function output(value: unknown, details?: unknown, terminate = false) {
 	return { content: [{ type: "text" as const, text: json(value) }], details, terminate };
+}
+
+/**
+ * Encode a prose payload as raw text: a one-line bracketed metadata header, then the payload
+ * verbatim. The model reads the note or history item itself instead of a JSON envelope;
+ * `details` carries the slim metadata object and never duplicates the payload.
+ */
+export function outputRaw(header: string, content: string, details: unknown, terminate = false) {
+	return { content: [{ type: "text" as const, text: `${header}\n${content}` }], details, terminate };
 }

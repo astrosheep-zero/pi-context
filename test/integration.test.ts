@@ -174,6 +174,46 @@ export function resultJson<T>(result: AgentToolResult<unknown>): T {
 	return JSON.parse(text.text) as T;
 }
 
+/** Assert the delivered wire text fits the tool-output budget, header included for raw reads. */
+export function assertWithinBudget(result: AgentToolResult<unknown>, message: string): void {
+	const text = result.content[0];
+	const bytes = text && text.type === "text" ? Buffer.byteLength(text.text, "utf8") : 0;
+	assert.ok(bytes <= TOOL_OUTPUT_MAX_BYTES, `${message}: ${bytes} bytes over the ${TOOL_OUTPUT_MAX_BYTES}-byte budget`);
+}
+
+/** Decoded raw read response: the bracketed metadata header plus the verbatim payload. */
+export type ReadWindow = {
+	header: string;
+	content: string;
+	offset_chars: number;
+	total_chars: number;
+	next_offset_chars: number | null;
+	details: Record<string, unknown>;
+};
+
+/**
+ * Decode a raw read (notes_read_file / history_read_item): a one-line bracketed header, then
+ * the payload verbatim (which may itself contain newlines), so split on the first newline only.
+ */
+export function resultRead(result: AgentToolResult<unknown>): ReadWindow {
+	const text = result.content[0];
+	assert.ok(text && text.type === "text", "read result carries text");
+	const newline = text.text.indexOf("\n");
+	assert.ok(newline !== -1, "raw read carries a header line and a payload");
+	const header = text.text.slice(0, newline);
+	const content = text.text.slice(newline + 1);
+	assert.match(header, /^\[/, "the header is bracketed");
+	assert.match(header, /\]$/, "the header closes its bracket");
+	const match = header.match(/ · chars (\d+)-(\d+) of (\d+) · (end|continue at offset_chars=(\d+))/);
+	assert.ok(match, `read header names the char range and resume cursor: ${header}`);
+	const offset_chars = Number(match[1]);
+	const end = Number(match[2]);
+	const total_chars = Number(match[3]);
+	const next_offset_chars = match[4] === "end" ? null : Number(match[5]);
+	assert.equal(Array.from(content).length, end - offset_chars, "the header range matches the delivered payload");
+	return { header, content, offset_chars, total_chars, next_offset_chars, details: (result.details ?? {}) as Record<string, unknown> };
+}
+
 /**
  * Assert a value is a local-time ISO 8601 string with an explicit numeric offset (never "Z")
  * and that Date.parse restores the stored epoch milliseconds. No time zone is assumed.
@@ -364,16 +404,15 @@ test("persisted note operations restore, are Unicode byte-limited, and use safe 
 	const noteMeta = notesFromSession(ctx).get("checkpoint/进度.txt");
 	assert.ok(noteMeta);
 	const checkpointText = "第一行\nneedle Café\n最后一行";
-	const read = resultJson<{ path: string; offset_chars: number; content: string; total_chars: number; next_offset_chars: number | null; created_at: unknown; updated_at: unknown }>(
-		await call(captured, "notes_read_file", { path: "checkpoint/进度.txt", offset_chars: -4 }, ctx),
-	);
-	assert.equal(read.path, "checkpoint/进度.txt");
+	const rawRead = await call(captured, "notes_read_file", { path: "checkpoint/进度.txt", offset_chars: -4 }, ctx);
+	const read = resultRead(rawRead);
+	assert.equal(read.details.path, "checkpoint/进度.txt");
 	assert.equal(read.offset_chars, Array.from(checkpointText).length - 4, "a negative offset echoes the resolved absolute offset");
 	assert.equal(read.content, "最后一行", "a negative offset reads the tail in one call");
 	assert.equal(read.total_chars, Array.from(checkpointText).length);
 	assert.equal(read.next_offset_chars, null, "a tail read reaches the end");
-	assertLocalIso(read.created_at, noteMeta.createdAt, "notes_read_file created_at");
-	assertLocalIso(read.updated_at, noteMeta.updatedAt, "notes_read_file updated_at");
+	assertLocalIso(read.details.created_at, noteMeta.createdAt, "notes_read_file created_at");
+	assertLocalIso(read.details.updated_at, noteMeta.updatedAt, "notes_read_file updated_at");
 	const searched = resultJson<{ files: Array<{ path: string; matches: Array<{ line: number }>; created_at: unknown; updated_at: unknown }> }>(
 		await call(captured, "notes_search_contents", { query: "Café" }, ctx),
 	);
@@ -411,8 +450,10 @@ test("stale lifecycle: mark-only, closure, revive, and validation errors", async
 	assert.equal(notesFromSession(ctx).get("journal.md")?.stale, false, "a fresh write starts not stale");
 
 	// mark-only: content unchanged, flag set
-	const markOnly = resultJson<{ stale: boolean }>(await call(captured, "notes_write_file", { path: "journal.md", mark_stale: true }, ctx));
+	const markOnlyResult = await call(captured, "notes_write_file", { path: "journal.md", mark_stale: true }, ctx);
+	const markOnly = resultJson<{ stale: boolean }>(markOnlyResult);
 	assert.equal(markOnly.stale, true);
+	assert.equal(markOnlyResult.details, undefined, "a JSON tool result carries no details metadata");
 	assert.equal(notesFromSession(ctx).get("journal.md")?.stale, true);
 	assert.equal(notesFromSession(ctx).get("journal.md")?.text, "log line", "mark-only leaves content unchanged");
 
@@ -470,7 +511,7 @@ test("the boot notes index excludes stale notes while list, read, and search sti
 	assert.equal(listed.files.find((file) => file.path === "fresh.md")?.stale, false);
 
 	// stale notes are still readable and searchable, unannotated
-	const read = resultJson<{ content: string }>(await call(captured, "notes_read_file", { path: "old.md" }, ctx));
+	const read = resultRead(await call(captured, "notes_read_file", { path: "old.md" }, ctx));
 	assert.equal(read.content, "stale content");
 	const searched = resultJson<{ files: Array<{ path: string }> }>(await call(captured, "notes_search_contents", { query: "stale content" }, ctx));
 	assert.equal(searched.files[0]?.path, "old.md");
@@ -540,8 +581,9 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	let readOffset = 0;
 	let readNext: number | null = 0;
 	while (readNext !== null) {
-		const result = resultJson<{ content: string; total_chars: number; next_offset_chars: number | null }>(await call(captured, "history_read_item", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: historyIds[0], offset_chars: readOffset, limit_chars: 12000 }, ctx));
-		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
+		const raw = await call(captured, "history_read_item", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: historyIds[0], offset_chars: readOffset, limit_chars: 12000 }, ctx);
+		assertWithinBudget(raw, `history_read_item page at ${readOffset}`);
+		const result = resultRead(raw);
 		readParts.push(result.content); readNext = result.next_offset_chars; if (readNext !== null) readOffset = readNext;
 	}
 	assert.equal(readParts.join(""), historyText);
@@ -570,8 +612,9 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	let noteOffset = 0;
 	let noteNext: number | null = 0;
 	while (noteNext !== null) {
-		const result = resultJson<{ content: string; total_chars: number; offset_chars: number; next_offset_chars: number | null }>(await call(captured, "notes_read_file", { path: `page-${"x".repeat(300)}-0.md`, offset_chars: noteOffset }, ctx));
-		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
+		const raw = await call(captured, "notes_read_file", { path: `page-${"x".repeat(300)}-0.md`, offset_chars: noteOffset }, ctx);
+		assertWithinBudget(raw, `notes_read_file page at ${noteOffset}`);
+		const result = resultRead(raw);
 		// The window is a plain prefix of the note, so the pages join by plain concatenation.
 		noteParts.push(result.content); noteNext = result.next_offset_chars; if (noteNext !== null) noteOffset = noteNext;
 	}
@@ -755,14 +798,15 @@ test("an over-budget note is delivered as a prefix and resumed by next_offset_ch
 	const huge = `H${"x".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}`;
 	const text = `${huge}\ntail line`;
 	await call(captured, "notes_write_file", { path: "huge.md", text }, ctx);
-	const first = resultJson<{ path: string; offset_chars: number; content: string; total_chars: number; next_offset_chars: number | null }>(
-		await call(captured, "notes_read_file", { path: "huge.md" }, ctx),
-	);
-	assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "single oversized note stays within budget");
+	const rawFirst = await call(captured, "notes_read_file", { path: "huge.md" }, ctx);
+	assertWithinBudget(rawFirst, "single oversized note");
+	const first = resultRead(rawFirst);
 	assert.ok(first.content.length > 0, "the page is not empty");
 	assert.equal(first.content.includes("…"), false, "the payload is a plain prefix with no marker");
 	assert.ok(text.startsWith(first.content), "the delivered text is a prefix of the note");
-	assert.deepEqual(Object.keys(first), ["path", "offset_chars", "content", "total_chars", "next_offset_chars", "created_at", "updated_at"], "notes_read_file success carries exactly identity, the character window, and timestamps");
+	assert.equal(first.header, `[huge.md · chars 0-${first.next_offset_chars} of ${Array.from(text).length} · continue at offset_chars=${first.next_offset_chars} · created ${String(first.details.created_at)} · updated ${String(first.details.updated_at)}]`, "the raw header names the file, the delivered range, the resume cursor and the timestamps");
+	assert.deepEqual(Object.keys(first.details), ["path", "offset_chars", "total_chars", "next_offset_chars", "limit_chars", "created_at", "updated_at"], "notes_read_file details carries exactly the slim window metadata");
+	assert.equal("content" in first.details, false, "details never duplicates the payload");
 	assert.equal(first.offset_chars, 0, "the default window starts at the resolved offset 0");
 	assert.equal(first.total_chars, Array.from(text).length, "total_chars names the note's full code-point length");
 	assert.equal(first.next_offset_chars, Array.from(first.content).length, "next_offset_chars is offset plus delivered code points");
@@ -770,18 +814,20 @@ test("an over-budget note is delivered as a prefix and resumed by next_offset_ch
 	const parts = [first.content];
 	let offset: number | null = first.next_offset_chars;
 	while (offset !== null) {
-		const chunk: { content: string; offset_chars: number; total_chars: number; next_offset_chars: number | null } = resultJson<{ content: string; offset_chars: number; total_chars: number; next_offset_chars: number | null }>(
-			await call(captured, "notes_read_file", { path: "huge.md", offset_chars: offset }, ctx),
-		);
+		const rawChunk = await call(captured, "notes_read_file", { path: "huge.md", offset_chars: offset }, ctx);
+		assertWithinBudget(rawChunk, `huge note chunk at ${offset}`);
+		const chunk = resultRead(rawChunk);
 		assert.equal(chunk.offset_chars, offset, "the response echoes the resolved absolute offset");
 		parts.push(chunk.content);
 		offset = chunk.next_offset_chars;
 	}
 	assert.equal(parts.join(""), text, "the cursors reconstruct the note exactly");
 
-	// A success carries timestamps; an error carries only identity and no timestamps.
-	const missing = resultJson<Record<string, unknown>>(await call(captured, "notes_read_file", { path: "no-such.md" }, ctx));
+	// A success carries structured details; an error stays a JSON envelope with no details.
+	const missingResult = await call(captured, "notes_read_file", { path: "no-such.md" }, ctx);
+	const missing = resultJson<Record<string, unknown>>(missingResult);
 	assert.deepEqual(Object.keys(missing).sort(), ["error", "path"], "the read error carries exactly error and path");
+	assert.equal(missingResult.details, undefined, "a JSON error carries no details metadata");
 });
 
 test("an over-budget note search match is a named prefix, readable at its offset_chars", async () => {
@@ -817,16 +863,16 @@ test("an over-budget note search match is a named prefix, readable at its offset
 	assert.equal(match.offset_chars, 500, "the match carries the file-absolute offset of the query");
 	assert.equal(match.line, 1, "the informational line number survives");
 	// The address resolves: the query is visible at the match's offset_chars.
-	const at = resultJson<{ content: string; offset_chars: number }>(await call(captured, "notes_read_file", { path: "search.md", offset_chars: match.offset_chars, limit_chars: 6 }, ctx));
+	const at = resultRead(await call(captured, "notes_read_file", { path: "search.md", offset_chars: match.offset_chars, limit_chars: 6 }, ctx));
 	assert.equal(at.content, "needle", "the match's offset_chars resolves to the query through notes_read_file");
 	assert.equal(at.offset_chars, match.offset_chars, "the read echoes the resolved address");
 	// The window cursor reaches the rest of the line (the file is a single line, so no separators).
 	const parts = [match.text];
 	let offset: number | null = Array.from(match.text).length;
 	while (offset !== null) {
-		const chunk: { content: string; next_offset_chars: number | null } = resultJson<{ content: string; next_offset_chars: number | null }>(
-			await call(captured, "notes_read_file", { path: "search.md", offset_chars: offset }, ctx),
-		);
+		const rawChunk = await call(captured, "notes_read_file", { path: "search.md", offset_chars: offset }, ctx);
+		assertWithinBudget(rawChunk, `search.md chunk at ${offset}`);
+		const chunk = resultRead(rawChunk);
 		parts.push(chunk.content);
 		offset = chunk.next_offset_chars;
 	}
@@ -839,14 +885,15 @@ test("history_read_item delivers a prefix and next_offset_chars names the delive
 	const ctx = context(session);
 	const original = "z".repeat(TOOL_OUTPUT_MAX_BYTES * 3);
 	const id = appendText(session, "user", original);
-	const read = resultJson<{ content: string; total_chars: number; offset_chars: number; next_offset_chars: number | null }>(
-		await call(captured, "history_read_item", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: id, limit_chars: 50000 }, ctx),
-	);
-	assert.ok(Buffer.byteLength(JSON.stringify(read), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "single call stays within budget");
+	const rawRead = await call(captured, "history_read_item", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: id, limit_chars: 50000 }, ctx);
+	assertWithinBudget(rawRead, "single history_read_item call");
+	const read = resultRead(rawRead);
 	assert.ok(read.content.length > 0, "the read is not empty");
 	assert.equal(read.content.includes("…"), false, "no marker is appended to the payload");
 	assert.ok(original.startsWith(read.content), "the delivered text is a prefix of the item");
 	assert.equal(read.total_chars, original.length);
+	assert.deepEqual(Object.keys(read.details), ["window_id", "item_id", "offset_chars", "total_chars", "next_offset_chars", "limit_chars"], "history_read_item details carries exactly the slim window metadata");
+	assert.equal("content" in read.details, false, "details never duplicates the payload");
 	assert.equal(read.next_offset_chars, read.offset_chars + Array.from(read.content).length, "the cursor is offset plus delivered code points");
 	assert.ok(read.next_offset_chars !== null && read.next_offset_chars < read.total_chars, "the cursor points at the first undelivered character");
 	// Following the cursor reaches the true end and reconstructs the item.
@@ -854,7 +901,7 @@ test("history_read_item delivers a prefix and next_offset_chars names the delive
 	let offset = read.next_offset_chars as number;
 	let next: number | null = offset;
 	while (next !== null) {
-		const page = resultJson<{ content: string; total_chars: number; offset_chars: number; next_offset_chars: number | null }>(
+		const page = resultRead(
 			await call(captured, "history_read_item", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: id, offset_chars: offset, limit_chars: 50000 }, ctx),
 		);
 		assert.equal(page.next_offset_chars, page.offset_chars + Array.from(page.content).length < page.total_chars ? page.offset_chars + Array.from(page.content).length : null, "the cursor is offset plus delivered, null only at item end");
@@ -870,7 +917,7 @@ test("the empty note terminates and every note read is a character window", asyn
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	await call(captured, "notes_write_file", { path: "empty.md", text: "" }, ctx);
-	const empty = resultJson<{ offset_chars: number; content: string; total_chars: number; next_offset_chars: number | null }>(
+	const empty = resultRead(
 		await call(captured, "notes_read_file", { path: "empty.md" }, ctx),
 	);
 	assert.equal(empty.offset_chars, 0);
@@ -878,7 +925,7 @@ test("the empty note terminates and every note read is a character window", asyn
 	assert.equal(empty.total_chars, 0);
 	assert.equal(empty.next_offset_chars, null, "the empty note is exhausted instead of self-feeding");
 	// An offset beyond the file is exhausted, not looped, and still echoes its resolved offset.
-	const beyond = resultJson<{ offset_chars: number; content: string; next_offset_chars: number | null }>(
+	const beyond = resultRead(
 		await call(captured, "notes_read_file", { path: "empty.md", offset_chars: 9 }, ctx),
 	);
 	assert.equal(beyond.offset_chars, 9, "a positive offset past the end is echoed as resolved");
@@ -913,7 +960,7 @@ test("history items carry honest truncated/total_chars and max_chars_per_item:1 
 	assert.equal(Array.from(address.truncated_content).length, 1, "max_chars_per_item:1 delivers one code point");
 	assert.equal(address.truncated, true);
 	assert.equal(address.total_chars, Array.from(content).length);
-	const resolved = resultJson<{ content: string }>(
+	const resolved = resultRead(
 		await call(captured, "history_read_item", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: id, offset_chars: address.match_offset_chars, limit_chars: 6 }, ctx),
 	);
 	assert.ok(resolved.content.includes("NEEDLE"), "the address resolves to the query through history_read_item");
@@ -1032,8 +1079,8 @@ test("the 512-byte write-time path cap refuses longer paths while replay and rea
 	const restoredCtx = context(restored);
 	assert.ok(notesFromSession(restoredCtx).has(legacyPath), "the reloaded session still replays the legacy path");
 	const restoredCaptured = makeExtension(restored);
-	const read = resultJson<{ path: string; content: string }>(await call(restoredCaptured, "notes_read_file", { path: legacyPath }, restoredCtx));
-	assert.equal(read.path, legacyPath, "reads are un-capped and return the identity intact");
+	const read = resultRead(await call(restoredCaptured, "notes_read_file", { path: legacyPath }, restoredCtx));
+	assert.equal(read.details.path, legacyPath, "reads are un-capped and return the identity intact");
 	assert.equal(read.content, "legacy body\nsecond line");
 	const refused = resultJson<{ error: string }>(await call(restoredCaptured, "notes_write_file", { path: legacyPath, text: "again" }, restoredCtx));
 	assert.match(refused.error, new RegExp(String(MAX_NOTE_PATH_BYTES)), "the reloaded session still refuses new over-cap writes");
@@ -1097,7 +1144,7 @@ test("custom reset boundary removes old provider context but history remains sea
 	assert.equal(windows.length, 2);
 	const oldWindow = windows[0]?.windowId;
 	assert.ok(oldWindow);
-	const read = resultJson<{ content: string }>(
+	const read = resultRead(
 		await call(captured, "history_read_item", { window_id: oldWindow, item_id: oldUserId }, ctx),
 	);
 	assert.match(read.content, /OLD-UNIQUE-TRANSCRIPT/);
@@ -1280,11 +1327,11 @@ test("a reset window baked under the older full-session id still projects and re
 	assert.deepEqual(windows.windows.map((window) => window.window_id), [projectedRoot, oldWindowId], "both the short root and the older opaque id project");
 
 	// history_read_item resolves items by the older opaque window id, and by the computed root.
-	const oldRead = resultJson<{ content: string }>(await call(captured, "history_read_item", { window_id: oldWindowId, item_id: compactionId }, ctx));
+	const oldRead = resultRead(await call(captured, "history_read_item", { window_id: oldWindowId, item_id: compactionId }, ctx));
 	assert.equal(oldRead.content, "old reset summary");
-	const oldCurrent = resultJson<{ content: string }>(await call(captured, "history_read_item", { window_id: oldWindowId, item_id: currentItemId }, ctx));
+	const oldCurrent = resultRead(await call(captured, "history_read_item", { window_id: oldWindowId, item_id: currentItemId }, ctx));
 	assert.equal(oldCurrent.content, "message after the old reset");
-	const rootRead = resultJson<{ content: string }>(await call(captured, "history_read_item", { window_id: projectedRoot, item_id: rootItemId }, ctx));
+	const rootRead = resultRead(await call(captured, "history_read_item", { window_id: projectedRoot, item_id: rootItemId }, ctx));
 	assert.equal(rootRead.content, "message before the old reset");
 
 	// No normalization: the read path matches window ids exactly and never rewrites an older spelling.

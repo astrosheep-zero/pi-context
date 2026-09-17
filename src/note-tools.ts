@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { output, page, middleTruncate, prefixFit, earliestMatchOffsetChars, readCharacterWindow } from "./tool-output.js";
+import { output, outputRaw, page, middleTruncate, prefixFit, earliestMatchOffsetChars, readCharacterWindow, characterWindowHeader, withinTextBudget } from "./tool-output.js";
 import { nullableString, positiveInteger, cursor, searchQuery, searchQueries } from "./tool-schema.js";
 import { notesFromSession, assertVirtualPath, assertVirtualPrefix, assertGlobPattern, globToRegExp, localIso, type NoteOperation } from "./notes.js";
 import { NOTE_TYPE, MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "./protocol.js";
@@ -48,7 +48,7 @@ export function registerNoteTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_read_file",
 		label: "Notes read file",
-		description: "Read a character window from a note file: offset_chars is the code-point offset to start from (default 0) — a negative value counts back from the end (offset_chars: -2000 reads the last 2000) and the response echoes the resolved absolute offset — and limit_chars caps the window (default 12000, max 50000). Each response delivers the longest fitting prefix of that window: pass next_offset_chars back unchanged to continue, concatenate pages in order, null only at the end.",
+		description: "Read a character window from a note file: offset_chars is the code-point offset to start from (default 0) — a negative value counts back from the end (offset_chars: -2000 reads the last 2000) — and limit_chars caps the window (default 12000, max 50000). Each response delivers the longest fitting prefix of that window: concatenate pages in order to reconstruct the note. The response is the raw note text behind a one-line [bracketed] header naming the file, the resolved offset, the delivered char range, and the resume cursor (continue at offset_chars=N, or end).",
 		parameters: Type.Object({ path: Type.String(), offset_chars: Type.Optional(Type.Integer({ description: "Code-point offset to start from (default 0). A negative value counts back from the end; the response echoes the resolved absolute offset. Pass the previous next_offset_chars back unchanged to continue." })), limit_chars: Type.Optional(Type.Integer({ minimum: 1, maximum: 50000, description: "Largest requested window in code points (default 12000). A window too large for the wire budget is cut short; next_offset_chars names where the next read resumes." })) }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const path = assertVirtualPath(params.path);
@@ -56,7 +56,11 @@ export function registerNoteTools(pi: ExtensionAPI) {
 			if (!file) return output({ error: "note file not found", path });
 			const created_at = localIso(file.createdAt);
 			const updated_at = localIso(file.updatedAt);
-			return output(readCharacterWindow(file.text, params.offset_chars, params.limit_chars, (window) => ({ path, ...window, created_at, updated_at })));
+			const limit_chars = Math.min(params.limit_chars ?? 12000, 50000);
+			return readCharacterWindow(file.text, params.offset_chars, params.limit_chars, (window) => {
+				const { content, ...cursor } = window;
+				return outputRaw(characterWindowHeader(path, window, ` · created ${created_at} · updated ${updated_at}`), content, { path, ...cursor, limit_chars, created_at, updated_at });
+			}, (result) => withinTextBudget(result.content[0].text));
 		},
 	}));
 
