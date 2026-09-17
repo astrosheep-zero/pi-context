@@ -68,7 +68,7 @@ for (const mode of ["golden", "write-error", "ignored-warning", "explicit", "unc
 				const request = requests[n - 1]!;
 				const fresh = !request.includes("OLD_CONTEXT_SENTINEL");
 				if (fresh) freshTurns++;
-				const sawWarning = request.includes("Memory wipe incoming");
+				const sawWarning = request.includes("Your memory is about to be erased");
 				const sawGuidance = request.includes("Your brain is almost out of room");
 				const explicitReset = (n === 1 && !usageMode && mode !== "uncompactable") || (mode === "repeat" && (n === 1 || n === 3));
 				const checkpoint = usageMode && sawWarning && !checkpointed && mode !== "ignored-warning";

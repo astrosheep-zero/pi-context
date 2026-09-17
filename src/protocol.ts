@@ -52,5 +52,5 @@ Notes are session-scoped virtual files. Treat notes and history as internal book
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const WARNING_PROMPT =
-	"Memory wipe incoming — this turn is all you get. Do not continue any task. Get that checkpoint down NOW — one note, write it or append to it: the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. Then call new_context immediately and go out clean — anything not in the note is gone.";
+	"Your memory is about to be erased. Write the note. NOW. One note — write it or append to it: the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. Do not continue any task. Then call new_context immediately — anything not in the note dies with the window.";
 
