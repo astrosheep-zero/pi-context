@@ -73,7 +73,7 @@ type SentMessage = {
 	options: { triggerTurn?: boolean } | undefined;
 };
 
-type Captured = {
+export type Captured = {
 	tools: Map<string, ToolDefinition>;
 	handlers: Map<string, EventHandler[]>;
 	commands: Map<string, CommandOptions>;
@@ -93,13 +93,13 @@ function objectSchema(tool: ToolDefinition | undefined): { type?: string; requir
 	return tool?.parameters as { type?: string; required?: string[] } | undefined;
 }
 
-function manager(persisted = false): SessionManager {
+export function manager(persisted = false): SessionManager {
 	if (!persisted) return SessionManager.inMemory("/private/tmp/pi-context-test");
 	const dir = mkdtempSync(join(tmpdir(), "pi-context-session-"));
 	return SessionManager.create("/private/tmp/pi-context-test", dir);
 }
 
-function makeExtension(sessionManager: SessionManager): Captured {
+export function makeExtension(sessionManager: SessionManager): Captured {
 	const captured: Captured = { tools: new Map(), handlers: new Map(), commands: new Map(), sent: [], flags: [] };
 	const api = {
 		registerFlag(name: string) {
@@ -129,7 +129,7 @@ function makeExtension(sessionManager: SessionManager): Captured {
 	return captured;
 }
 
-function context(
+export function context(
 	sessionManager: SessionManager,
 	compact?: ExtensionContext["compact"],
 	usage?: ContextUsage,
@@ -157,7 +157,7 @@ function noticesOf(ctx: ExtensionContext): Notice[] {
 	return (ctx as ExtensionContext & { notices: Notice[] }).notices;
 }
 
-async function call(
+export async function call(
 	captured: Captured,
 	name: string,
 	params: Record<string, unknown>,
@@ -168,7 +168,7 @@ async function call(
 	return tool.execute("call-1", params, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
 }
 
-function resultJson<T>(result: AgentToolResult<unknown>): T {
+export function resultJson<T>(result: AgentToolResult<unknown>): T {
 	const text = result.content[0];
 	assert.ok(text && text.type === "text", "tool result carries text");
 	return JSON.parse(text.text) as T;
@@ -241,13 +241,13 @@ async function runContextHook(captured: Captured, ctx: ExtensionContext, eventOv
 	return (await handler({ type: "context", messages: [], ...eventOverride } as never, ctx)) as ContextHookResult;
 }
 
-function appendText(sessionManager: SessionManager, role: "user" | "assistant" | "toolResult", text: string): string {
+export function appendText(sessionManager: SessionManager, role: "user" | "assistant" | "toolResult", text: string, toolName = "bash"): string {
 	const base = {
 		role,
 		content: [{ type: "text" as const, text }],
 		timestamp: Date.now(),
 		...(role === "assistant" ? { stopReason: "stop" } : {}),
-		...(role === "toolResult" ? { toolCallId: "call-1", toolName: "bash", isError: false } : {}),
+		...(role === "toolResult" ? { toolCallId: "call-1", toolName, isError: false } : {}),
 	};
 	// Assistant/toolResult messages carry provider metadata (usage, stopReason, ids)
 	// that SessionManager persists opaquely and the extension never reads, so the
