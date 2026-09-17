@@ -1,5 +1,5 @@
 import { SettingsManager, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, WARNING_TRIGGER_TOKENS } from "./protocol.js";
+import { PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, WARNING_RUNWAY_TOKENS } from "./protocol.js";
 
 export type ResolvedThresholds = { reminder: number; reserve: number; warning: number };
 type PiContextMargins = { reminderMarginTokens?: unknown };
@@ -29,7 +29,7 @@ function validMargin(raw: unknown): number | undefined {
 
 /**
  * Pure derivation of the thresholds from Pi's reserve: the reminder fires at reserve
- * plus the pi-context margin, the warning steer at reserve plus WARNING_TRIGGER_TOKENS.
+ * plus the pi-context margin, the warning steer at reserve plus WARNING_RUNWAY_TOKENS.
  * An invalid margin degrades to the default and reports one warning. Pi's automatic
  * threshold/overflow compaction itself resets immediately, with no model turn.
  */
@@ -45,7 +45,7 @@ export function deriveThresholds(reserveTokens: number, margins: PiContextMargin
 			reminderMargin = DEFAULT_REMINDER_MARGIN_TOKENS;
 		} else reminderMargin = parsed;
 	}
-	return { thresholds: { reminder: reserveTokens + reminderMargin, reserve: reserveTokens, warning: reserveTokens + WARNING_TRIGGER_TOKENS }, warnings };
+	return { thresholds: { reminder: reserveTokens + reminderMargin, reserve: reserveTokens, warning: reserveTokens + WARNING_RUNWAY_TOKENS }, warnings };
 }
 
 let cached: ResolvedThresholds | undefined;
@@ -68,7 +68,7 @@ export function thresholdsFor(ctx: ExtensionContext): ResolvedThresholds {
 		cached = derived.thresholds;
 	} catch (error) {
 		ctx.ui.notify(`pi-context: could not read settings; using defaults (${String(error)}).`, "warning");
-		cached = { reminder: DEFAULT_RESERVE_TOKENS + DEFAULT_REMINDER_MARGIN_TOKENS, reserve: DEFAULT_RESERVE_TOKENS, warning: DEFAULT_RESERVE_TOKENS + WARNING_TRIGGER_TOKENS };
+		cached = { reminder: DEFAULT_RESERVE_TOKENS + DEFAULT_REMINDER_MARGIN_TOKENS, reserve: DEFAULT_RESERVE_TOKENS, warning: DEFAULT_RESERVE_TOKENS + WARNING_RUNWAY_TOKENS };
 	}
 	return cached;
 }

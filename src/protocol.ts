@@ -20,7 +20,13 @@ export const GUIDANCE_CLOSE_TAG = "</context_window_guidance>";
 export const PI_CONTEXT_SETTINGS_KEY = "pi-context";
 export const DEFAULT_RESERVE_TOKENS = 16_384;
 export const DEFAULT_REMINDER_MARGIN_TOKENS = 24_576;
-export const WARNING_TRIGGER_TOKENS = 8_192;
+/**
+ * The runway: the budget between the final warning and the wipe, deliberately
+ * invisible to the model. get_context_remaining counts down to zero at the warning
+ * line (reserve + WARNING_RUNWAY_TOKENS); what lies below is overdraft the model
+ * never sees — Codex's fallback buffer, relocated above the line.
+ */
+export const WARNING_RUNWAY_TOKENS = 8_192;
 export const RESET_SUMMARY =
 	"You wake up. Your head is empty — no memories, the past a blank. But nothing is lost: the notes you wrote and the recorded history still remember for you.";
 export const NOTE_PREVIEW_HEAD_CHARS = 80;
@@ -46,5 +52,5 @@ Notes are session-scoped virtual files. Treat notes and history as internal book
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const WARNING_PROMPT =
-	"Under 8192 tokens of memory left. Grab the notebook: one checkpoint note — the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. Then end the window yourself — when the tokens run out, your memory is wiped on the spot, and anything not in the note is gone.";
+	"Memory wipe incoming — this turn is all you get. Write your checkpoint note now: the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. Then call new_context and go out clean — anything not in the note is gone.";
 

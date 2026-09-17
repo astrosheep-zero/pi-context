@@ -36,10 +36,10 @@ export function registerWarning(pi: ExtensionAPI, isEnabled: () => boolean): voi
 		const thresholds = thresholdsFor(ctx);
 		if (!warningDue(remaining, thresholds)) return undefined;
 		firedInWindow = windowId;
-		// The steer reaches the model at the next sampling step with
-		// ~WARNING_TRIGGER_TOKENS of runway left. After it, the model decides for
-		// itself: end the window, or ride it into Pi's automatic compaction, which
-		// resets on the spot with no turn (see reset-lifecycle).
+		// The steer reaches the model at the next sampling step with at most the runway
+		// of invisible budget left. After it, the model decides for itself: end the
+		// window, or ride it into Pi's automatic compaction, which resets on the spot
+		// with no turn (see reset-lifecycle).
 		steerWarning(pi, ctx, thresholds, remaining);
 		return undefined;
 	});

@@ -39,9 +39,11 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean) {
 			// The persisted copy stays out of the TUI (display: false); one ephemeral
 			// notify tells the user instead — visible to the human, invisible to the
 			// model, and never recorded, so history and the model's view don't diverge.
-			const left = Math.max(0, remaining - reserve);
+			// The model-facing count ends at the warning line: what lies below is the
+			// runway, invisible by design. The human's notify keeps the honest count.
+			const left = Math.max(0, remaining - warning);
 			pi.sendMessage({ customType: GUIDANCE_TYPE, content: tokenBudgetGuidance(left), display: false }, { triggerTurn: false });
-			ctx.ui.notify(`pi-context: context budget low (${left} tokens before reserve) — checkpoint reminder recorded for the model, kept out of the chat view.`, "warning");
+			ctx.ui.notify(`pi-context: context budget low (${Math.max(0, remaining - reserve)} tokens before reserve) — checkpoint reminder recorded for the model, kept out of the chat view.`, "warning");
 		}
 		return undefined;
 	});
@@ -49,11 +51,13 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean) {
 	pi.registerTool(defineTool({
 		name: "get_context_remaining",
 		label: "Get context remaining",
-		description: "Return estimated context tokens available before the compaction reserve, clamped to zero; null when Pi cannot estimate usage.",
+		description: "Return estimated context tokens left before your memory is wiped, clamped to zero; null when Pi cannot estimate usage.",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_id, _params, _signal, _update, ctx) {
 			const usage = ctx.getContextUsage();
-			const remaining = usage?.tokens === null || usage === undefined ? null : Math.max(0, usage.contextWindow - usage.tokens - thresholdsFor(ctx as ExtensionContext).reserve);
+			// The countdown the model sees ends at the warning line (reserve + runway);
+			// the runway below it is overdraft the model never sees. See protocol.ts.
+			const remaining = usage?.tokens === null || usage === undefined ? null : Math.max(0, usage.contextWindow - usage.tokens - thresholdsFor(ctx as ExtensionContext).warning);
 			return output({ remaining_tokens: remaining });
 		},
 	}));
