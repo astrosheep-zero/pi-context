@@ -45,5 +45,5 @@ Notes are session-scoped virtual files. Treat notes and history as internal book
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const FALLBACK_PROMPT =
-	"Memory wipe incoming — this turn is all you get. Grab the notebook: write your checkpoint first — the goal, decisions, progress, open issues, next steps, the skills you still need, and the window ID and item ID of every user request you are still solving. That note is the whole turn. What isn't written down is gone; the rest stays searchable through history_*."
+	"Memory wipe incoming — this turn is all you get. Grab the notebook: one checkpoint note — the goal, decisions, progress, open issues, next steps, the skills you still need, the window ID and item ID of every user request you are still solving, and any actions or tool calls worth finding again. That note is the whole turn. What isn't written down is gone; the rest stays searchable through history_*."
 
