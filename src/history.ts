@@ -39,6 +39,9 @@ function mapRole(role: AgentMessage["role"]): HistoryItem["role"] | undefined {
 	return undefined;
 }
 
+/** This extension's own custom-entry namespace; entries under it are authored by pi-context. */
+const PI_CONTEXT_ENTRY_PREFIX = "pi-context/";
+
 function messageContent(message: AgentMessage): string {
 	switch (message.role) {
 		case "bashExecution":
@@ -83,7 +86,8 @@ export function historyFromSession(ctx: SessionReader): HistoryWindow[] {
 			window.items.push({
 				windowId: window.windowId,
 				itemId: entry.id,
-				role: "system",
+				// A reset-v2 compaction is authored by this extension; a native Pi compaction is not.
+				role: resetV2WindowId(entry.details) === undefined ? "system" : "developer",
 				content: entry.summary,
 				createdAt: entry.timestamp,
 			});
@@ -106,7 +110,8 @@ export function historyFromSession(ctx: SessionReader): HistoryWindow[] {
 			window.items.push({
 				windowId: window.windowId,
 				itemId: entry.id,
-				role: "user",
+				// Only entries this extension wrote are its own; every foreign custom message stays a user turn.
+				role: entry.customType.startsWith(PI_CONTEXT_ENTRY_PREFIX) ? "developer" : "user",
 				content: contentText(entry.content),
 				createdAt: entry.timestamp,
 			});
@@ -117,13 +122,18 @@ export function historyFromSession(ctx: SessionReader): HistoryWindow[] {
 
 export function visibleItem(item: HistoryItem, maxChars = 1200) {
 	const characters = Array.from(item.content);
+	const truncated = characters.length > maxChars;
 	return {
 		window_id: item.windowId,
 		item_id: item.itemId,
 		role: item.role,
 		tool_namespace: item.toolNamespace ?? null,
 		tool_name: item.toolName ?? null,
-		truncated_content: characters.length > maxChars ? `${characters.slice(0, Math.max(0, maxChars - 1)).join("")}…` : item.content,
+		truncated,
+		total_chars: characters.length,
+		// A truncated payload is a plain prefix: no synthetic marker is appended, and
+		// `total_chars` names exactly how many code points were left out.
+		truncated_content: truncated ? characters.slice(0, maxChars).join("") : item.content,
 	};
 }
 

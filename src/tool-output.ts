@@ -41,6 +41,33 @@ export function middleTruncate(text: string, fits: (content: string) => boolean)
 	return build(low);
 }
 
+/**
+ * Longest contiguous prefix of `text` (counted in code points) accepted by `fits`.
+ *
+ * This is the truncation used by every cursor-bearing payload: the delivered text is
+ * always a plain prefix of the original, so a cursor computed from its code-point length
+ * addresses exactly the first undelivered character. No marker character is ever appended;
+ * the companion `truncated`/`total_chars` fields name what was left out.
+ */
+export function prefixFit(text: string, fits: (content: string) => boolean): string {
+	if (fits(text)) return text;
+	const chars = Array.from(text);
+	// Serialized size is non-decreasing in the kept count, so the largest fitting prefix is
+	// found by a monotone binary search instead of a quadratic shrink loop.
+	let low = 0;
+	let high = chars.length;
+	while (low < high) {
+		const mid = Math.ceil((low + high) / 2);
+		if (fits(chars.slice(0, mid).join(""))) low = mid;
+		else high = mid - 1;
+	}
+	// A candidate's serialized size can dip by a byte or two at the very end (a numeric cursor
+	// becoming null), so the predicate is not perfectly monotone at the tail. Back off until the
+	// returned prefix provably fits; in the monotone case this loop never runs.
+	while (low > 0 && !fits(chars.slice(0, low).join(""))) low -= 1;
+	return chars.slice(0, low).join("");
+}
+
 /** Shrink a single page item to fit; only invoked when that item alone exceeds the budget. */
 export type ItemTruncator<T> = (item: T, fits: (candidate: T) => boolean) => T;
 

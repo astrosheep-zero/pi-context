@@ -4,7 +4,8 @@ export const nullableInteger = () => Type.Optional(Type.Union([Type.Integer(), T
 export const positiveInteger = () => Type.Optional(Type.Integer({ minimum: 1 }));
 export const cursor = () => Type.Optional(Type.Integer({ minimum: 0, description: "Continuation cursor: pass the previous next_cursor back unchanged, with the same filters and ordering. Omit to start. next_cursor is null only when the set is exhausted." }));
 export const recentFirst = () => Type.Optional(Type.Boolean({ description: "Return newest-first. Only an explicit false returns oldest-first. Defaults to true." }));
-export const role = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool"), Type.Literal("system"), Type.Literal("developer"), Type.Null()]);
+/** Role filter. `developer` is the known author for this extension's own custom entries. */
+export const role = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool"), Type.Literal("system"), Type.Literal("developer"), Type.Null()], { description: "Filter by the entry's known author: user/assistant/tool from the conversation, system for native Pi compaction summaries, developer for entries this extension authored (its boot, guidance, fallback, and continuation messages, its reset-window compaction summaries, and any other pi-context/* entry)." });
 
 /** Search query parameter: one literal, or several literals combined with OR. */
 export const searchQuery = () => Type.Union([Type.String(), Type.Array(Type.String(), { minItems: 1 })]);

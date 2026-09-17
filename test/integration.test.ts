@@ -512,15 +512,17 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	}
 	assert.equal(searchFiles.length, 100); assert.equal(notesSearchNext, null);
 	const noteParts: string[] = [];
-	let noteStart = 1;
-	let noteNext: number | null = 1;
-	while (noteNext !== null) {
-		const result = resultJson<{ content: string; total_lines: number; next_start_line: number | null }>(await call(captured, "notes_read_file", { path: `page-${"x".repeat(300)}-0.md`, start_line: noteStart }, ctx));
+	let noteStart: number | null = 1;
+	let noteChar = 0;
+	while (noteStart !== null) {
+		const result: { content: string; total_lines: number; next_start_line: number | null; next_start_char: number } = resultJson<{ content: string; total_lines: number; next_start_line: number | null; next_start_char: number }>(await call(captured, "notes_read_file", { path: `page-${"x".repeat(300)}-0.md`, start_line: noteStart, start_char: noteChar }, ctx));
 		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
-		noteParts.push(result.content); noteNext = result.next_start_line; if (noteNext !== null) noteStart = noteNext;
+		// A page at offset 0 starts a new line, so the pages join with a newline there and only there.
+		if (noteParts.length > 0 && noteChar === 0) noteParts.push("\n");
+		noteParts.push(result.content); noteStart = result.next_start_line; noteChar = result.next_start_char;
 	}
-	assert.equal(noteParts.join("\n"), Array.from({ length: 1000 }, (_, line) => `needle ${line} ${"z".repeat(30)}`).join("\n"));
-	assert.equal(noteNext, null);
+	assert.equal(noteParts.join(""), Array.from({ length: 1000 }, (_, line) => `needle ${line} ${"z".repeat(30)}`).join("\n"));
+	assert.equal(noteStart, null);
 });
 
 test("a page cap limits the page, not the enumerable set: cursors stay truthful past the cap", async () => {
@@ -692,39 +694,52 @@ test("history multi-query search composes with role, tool_name, and window filte
 	assert.deepEqual(await searchIds({ window_id: "pcw:test:second" }), [nextId], "the second window's matches are addressable");
 });
 
-test("a single oversized note line is middle-truncated and the cursor still advances", async () => {
+test("an over-budget note line is delivered as a prefix and resumed by start_char", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	const huge = `H${"x".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}`;
 	await call(captured, "notes_write_file", { path: "huge.md", text: `${huge}\ntail line` }, ctx);
-	const first = resultJson<{ path: string; start_line: number; stop_line: number; content: string; total_lines: number; next_start_line: number | null }>(
+	const first = resultJson<{ path: string; start_line: number; stop_line: number; content: string; total_lines: number; next_start_line: number | null; next_start_char: number }>(
 		await call(captured, "notes_read_file", { path: "huge.md", start_line: 1 }, ctx),
 	);
 	assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "single oversized line stays within budget");
 	assert.ok(first.content.length > 0, "the page is not empty");
-	assert.match(first.content, /…\[truncated \d+ chars\]…/, "the oversized line carries a middle-truncation marker");
+	assert.equal(first.content.includes("…"), false, "the payload is a plain prefix with no marker");
+	assert.ok(huge.startsWith(first.content), "the delivered text is a prefix of the line");
 	assert.equal(first.total_lines, 2);
-	assert.equal(first.next_start_line, 2, "the cursor advances past the oversized line instead of looping");
-	const second = resultJson<{ content: string; next_start_line: number | null }>(
-		await call(captured, "notes_read_file", { path: "huge.md", start_line: first.next_start_line as number }, ctx),
-	);
-	assert.equal(second.content, "tail line", "the following page resumes after the truncated line");
-	assert.equal(second.next_start_line, null, "pagination terminates");
+	assert.equal(first.stop_line, 1, "stop_line names the line the page was reading");
+	assert.equal(first.next_start_line, 1, "the cursor continues the same line");
+	assert.equal(first.next_start_char, Array.from(first.content).length, "next_start_char is the delivered code-point count");
+	// Following the cursor reconstructs the huge line and then the tail line.
+	const parts = [first.content];
+	let line: number | null = first.next_start_line;
+	let char = first.next_start_char;
+	while (line !== null) {
+		if (parts.length > 0 && char === 0) parts.push("\n");
+		const page: { content: string; next_start_line: number | null; next_start_char: number } = resultJson<{ content: string; next_start_line: number | null; next_start_char: number }>(
+			await call(captured, "notes_read_file", { path: "huge.md", start_line: line, start_char: char }, ctx),
+		);
+		parts.push(page.content);
+		line = page.next_start_line;
+		char = page.next_start_char;
+	}
+	assert.equal(parts.join(""), `${huge}\ntail line`, "the cursors reconstruct the file exactly");
 });
 
-test("an oversized note search match is truncated, not silently dropped", async () => {
+test("an over-budget note search match is a named prefix, readable at its line", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	// A fitting file sorts before the oversized one, so the oversized match starts on a later page.
+	const hugeLine = `needle ${"y".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}`;
 	await call(captured, "notes_write_file", { path: "a.md", text: "needle small" }, ctx);
-	await call(captured, "notes_write_file", { path: "search.md", text: `needle ${"y".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}` }, ctx);
-	const pages: Array<{ path: string; matches: Array<{ line: number; text: string }> }> = [];
+	await call(captured, "notes_write_file", { path: "search.md", text: hugeLine }, ctx);
+	const pages: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number }> }> = [];
 	let cursor = 0;
 	let next: number | null = 0;
 	while (next !== null) {
-		const found = resultJson<{ files: Array<{ path: string; matches: Array<{ line: number; text: string }> }>; next_cursor: number | null }>(
+		const found = resultJson<{ files: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number }> }>; next_cursor: number | null }>(
 			await call(captured, "notes_search_contents", { query: "needle", cursor }, ctx),
 		);
 		assert.ok(Buffer.byteLength(JSON.stringify(found), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "match result stays within budget");
@@ -734,22 +749,132 @@ test("an oversized note search match is truncated, not silently dropped", async 
 	}
 	assert.deepEqual(pages.map((file) => file.path), ["a.md", "search.md"], "pagination reaches the oversized file instead of looping");
 	const oversized = pages[1]!;
+	assert.equal(oversized.matches_total, 1, "the file's full match count is named even though the line was cut");
 	assert.equal(oversized.matches.length, 1);
-	assert.match(oversized.matches[0]!.text, /…\[truncated \d+ chars\]…/, "the oversized match line is middle-truncated");
+	const match = oversized.matches[0]!;
+	assert.equal(match.truncated, true, "the oversized match line is flagged as truncated");
+	assert.equal(match.total_chars, Array.from(hugeLine).length, "total_chars names the full line length");
+	assert.ok(hugeLine.startsWith(match.text), "the match text is a plain prefix of the line");
+	assert.equal(match.text.includes("…"), false, "no marker is appended to the match text");
+	// The named cursor reaches the rest of the line (the file is a single line, so no separators).
+	const parts = [match.text];
+	let line: number | null = match.line;
+	let char = Array.from(match.text).length;
+	while (line !== null) {
+		const page: { content: string; next_start_line: number | null; next_start_char: number } = resultJson<{ content: string; next_start_line: number | null; next_start_char: number }>(
+			await call(captured, "notes_read_file", { path: "search.md", start_line: line, start_char: char }, ctx),
+		);
+		parts.push(page.content);
+		line = page.next_start_line;
+		char = page.next_start_char;
+	}
+	assert.equal(parts.join(""), hugeLine, "resuming at the delivered prefix reconstructs the matched line");
 });
 
-test("history_read_item middle-truncates one oversized read within budget", async () => {
+test("history_read_item delivers a prefix and next_offset_chars names the delivered count", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
-	const id = appendText(session, "user", "z".repeat(TOOL_OUTPUT_MAX_BYTES * 3));
-	const read = resultJson<{ content: string; total_chars: number; next_offset_chars: number | null }>(
+	const original = "z".repeat(TOOL_OUTPUT_MAX_BYTES * 3);
+	const id = appendText(session, "user", original);
+	const read = resultJson<{ content: string; total_chars: number; offset_chars: number; next_offset_chars: number | null }>(
 		await call(captured, "history_read_item", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: id, limit_chars: 50000 }, ctx),
 	);
 	assert.ok(Buffer.byteLength(JSON.stringify(read), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "single call stays within budget");
-	assert.match(read.content, /…\[truncated \d+ chars\]…/, "the read carries a middle-truncation marker");
 	assert.ok(read.content.length > 0, "the read is not empty");
-	assert.equal(read.next_offset_chars, 50000, "the cursor advances past the requested window");
+	assert.equal(read.content.includes("…"), false, "no marker is appended to the payload");
+	assert.ok(original.startsWith(read.content), "the delivered text is a prefix of the item");
+	assert.equal(read.total_chars, original.length);
+	assert.equal(read.next_offset_chars, read.offset_chars + Array.from(read.content).length, "the cursor is offset plus delivered code points");
+	assert.ok(read.next_offset_chars !== null && read.next_offset_chars < read.total_chars, "the cursor points at the first undelivered character");
+	// Following the cursor reaches the true end and reconstructs the item.
+	const parts = [read.content];
+	let offset = read.next_offset_chars as number;
+	let next: number | null = offset;
+	while (next !== null) {
+		const page = resultJson<{ content: string; total_chars: number; offset_chars: number; next_offset_chars: number | null }>(
+			await call(captured, "history_read_item", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: id, offset_chars: offset, limit_chars: 50000 }, ctx),
+		);
+		assert.equal(page.next_offset_chars, page.offset_chars + Array.from(page.content).length < page.total_chars ? page.offset_chars + Array.from(page.content).length : null, "the cursor is offset plus delivered, null only at item end");
+		parts.push(page.content);
+		next = page.next_offset_chars;
+		if (next !== null) offset = next;
+	}
+	assert.equal(parts.join(""), original, "the cursors reconstruct the item exactly");
+});
+
+test("the empty note terminates and every read keeps stop_line >= start_line", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	await call(captured, "notes_write_file", { path: "empty.md", text: "" }, ctx);
+	const empty = resultJson<{ start_line: number; stop_line: number; content: string; total_lines: number; next_start_line: number | null; next_start_char: number }>(
+		await call(captured, "notes_read_file", { path: "empty.md" }, ctx),
+	);
+	assert.equal(empty.stop_line >= empty.start_line, true, "the empty note keeps stop_line >= start_line");
+	assert.equal(empty.next_start_line, null, "the empty note is exhausted instead of self-feeding");
+	assert.equal(empty.next_start_char, 0);
+	assert.equal(empty.content, "");
+	assert.equal(empty.total_lines, 1);
+	// A range beyond the file is exhausted, not looped, and still satisfies the range contract.
+	const beyond = resultJson<{ start_line: number; stop_line: number; next_start_line: number | null }>(
+		await call(captured, "notes_read_file", { path: "empty.md", start_line: 9 }, ctx),
+	);
+	assert.equal(beyond.stop_line >= beyond.start_line, true, "a beyond-the-file read keeps stop_line >= start_line");
+	assert.equal(beyond.next_start_line, null, "a beyond-the-file read terminates");
+});
+
+test("history items carry honest truncated/total_chars and max_chars_per_item:1 addresses them", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const content = `${'padding '.repeat(400)}NEEDLE${' trailing'.repeat(400)}`;
+	const id = appendText(session, "user", content);
+	const list = resultJson<{ items: Array<{ item_id: string; truncated: boolean; total_chars: number; truncated_content: string }> }>(
+		await call(captured, "history_list_items", { recent_first: false, max_chars_per_item: 5 }, ctx),
+	);
+	const listed = list.items.find((item) => item.item_id === id)!;
+	assert.equal(listed.truncated, true, "a capped item is flagged truncated");
+	assert.equal(listed.total_chars, Array.from(content).length, "total_chars is the full code-point length");
+	assert.equal(listed.truncated_content, 'paddi', "the payload is the longest fitting prefix, with no marker");
+	assert.equal(listed.truncated_content.includes("…"), false);
+	const whole = resultJson<{ items: Array<{ item_id: string; truncated: boolean; total_chars: number; truncated_content: string }> }>(
+		await call(captured, "history_list_items", { recent_first: false, max_chars_per_item: 50_000 }, ctx),
+	);
+	const untruncated = whole.items.find((item) => item.item_id === id)!;
+	assert.equal(untruncated.truncated, false, "an item that fits is not flagged truncated");
+	assert.equal(untruncated.truncated_content, content, "a fitting item is returned whole");
+	const addresses = resultJson<{ items: Array<{ item_id: string; truncated: boolean; total_chars: number; truncated_content: string; match_offset_chars: number }> }>(
+		await call(captured, "history_search_contents", { query: "NEEDLE", max_chars_per_item: 1 }, ctx),
+	);
+	const address = addresses.items.find((item) => item.item_id === id)!;
+	assert.equal(Array.from(address.truncated_content).length, 1, "max_chars_per_item:1 delivers one code point");
+	assert.equal(address.truncated, true);
+	assert.equal(address.total_chars, Array.from(content).length);
+	const resolved = resultJson<{ content: string }>(
+		await call(captured, "history_read_item", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: id, offset_chars: address.match_offset_chars, limit_chars: 6 }, ctx),
+	);
+	assert.ok(resolved.content.includes("NEEDLE"), "the address resolves to the query through history_read_item");
+});
+
+test("developer re-role names this extension's entries and leaves native compactions as system", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const foreignId = session.appendCustomMessageEntry("other/extension", "foreign custom body", false);
+	const extensionId = session.appendCustomMessageEntry(internal.BOOT_TYPE, "extension boot body", false);
+	const leaf = session.getLeafId();
+	assert.ok(leaf);
+	const resetId = session.appendCompaction("reset v2 summary", leaf, 100, { piContext: "reset-v2", windowId: "pcw:test:dev" }, true);
+	const nextLeaf = session.getLeafId();
+	assert.ok(nextLeaf);
+	const nativeId = session.appendCompaction("native summary", nextLeaf, 100, { readFiles: [], modifiedFiles: [] }, true);
+	const byRole = async (role: string) => resultJson<{ items: Array<{ item_id: string; role: string }> }>(
+		await call(captured, "history_list_items", { role, recent_first: false }, ctx),
+	).items;
+	assert.deepEqual((await byRole("developer")).map((item) => item.item_id), [extensionId, resetId], "developer names exactly this extension's entries");
+	assert.deepEqual((await byRole("system")).map((item) => item.item_id), [nativeId], "system stays native Pi compactions only");
+	assert.deepEqual((await byRole("user")).map((item) => item.item_id), [foreignId], "foreign custom messages stay user turns");
 });
 
 test("oversized history tool_name: page stays within budget, item_id intact, metadata visibly truncated", async () => {
