@@ -3,7 +3,7 @@
  * STATUS: tracked acceptance spec for the history and notes read/search tools. No skip.
  * CLAIM: following the cursors these tools return must reconstruct the original text exactly,
  *   or the result must name the skipped range. Both read tools are one character window over two
- *   stores (notes_read and history_read_item share the cursor walk below). In v2 this failed
+ *   stores (notes_read and history_read share the cursor walk below). In v2 this failed
  *   at 13 sites; the rows that demanded an over-budget line in a single call are rebuilt as
  *   cursor-walking rows below (the CLAIM explicitly licenses that: reconstruct exactly by
  *   following cursors, or name the skipped range).
@@ -83,7 +83,7 @@ type SearchHit = { item_id: string; truncated: boolean; total_chars: number; tru
 type Match = { line: number; text: string; truncated: boolean; total_chars: number; offset_chars: number };
 
 /**
- * Decode a raw read (notes_read / history_read_item): a one-line bracketed header, then
+ * Decode a raw read (notes_read / history_read): a one-line bracketed header, then
  * the payload verbatim (which may itself contain newlines), so split on the first newline only.
  */
 function resultRead(result: AgentToolResult<unknown>): ReadResult {
@@ -122,7 +122,7 @@ const codePointSlice = (text: string, start: number, end?: number) => [...text].
  * walker serves both; `address` carries the tool's own identity parameters, and `options.start`
  * lets a walk begin at a resolved address (a search hit's offset, or a negative tail read).
  */
-async function walkWindow(captured: Captured, ctx: ExtensionContext, tool: "history_read_item" | "notes_read", address: Record<string, unknown>, label: string, options: { start?: number; limitChars?: number } = {}): Promise<string> {
+async function walkWindow(captured: Captured, ctx: ExtensionContext, tool: "history_read" | "notes_read", address: Record<string, unknown>, label: string, options: { start?: number; limitChars?: number } = {}): Promise<string> {
 	const parts: string[] = [];
 	let offset = options.start ?? 0;
 	let next: number | null = 0;
@@ -154,7 +154,7 @@ async function walkWindow(captured: Captured, ctx: ExtensionContext, tool: "hist
 }
 
 const walkHistory = (captured: Captured, ctx: ExtensionContext, windowId: string, itemId: string, limitChars?: number) =>
-	walkWindow(captured, ctx, "history_read_item", { window_id: windowId, item_id: itemId }, `history_read_item ${itemId}`, { limitChars });
+	walkWindow(captured, ctx, "history_read", { window_id: windowId, item_id: itemId }, `history_read ${itemId}`, { limitChars });
 
 const walkNote = (captured: Captured, ctx: ExtensionContext, path: string, start = 0) =>
 	walkWindow(captured, ctx, "notes_read", { path }, `notes_read ${path}`, { start });
@@ -165,14 +165,14 @@ test("coherence: following the returned cursors reconstructs the original text e
 	const ctx = context(session);
 	const windowId = historyFromSession(ctx)[0]!.windowId;
 
-	// --- history_read_item: every profile x length reconstructs; cursor law holds per page ---
+	// --- history_read: every profile x length reconstructs; cursor law holds per page ---
 	for (const profile of PROFILES) {
 		for (const length of [12_000, 12_001, 20_000, 30_000]) {
 			const original = profile.unit.repeat(length);
 			const itemId = appendText(session, original);
 			const reconstructed = await walkHistory(captured, ctx, windowId, itemId);
 			const missing = codePoints(original) - codePoints(reconstructed);
-			const line = `history_read_item default: ${profile.name} ${length} chars (${Buffer.byteLength(original, "utf8")} bytes) -> delivered ${codePoints(reconstructed)} chars, missing ${missing}, marker=${reconstructed.includes("[truncated")}`;
+			const line = `history_read default: ${profile.name} ${length} chars (${Buffer.byteLength(original, "utf8")} bytes) -> delivered ${codePoints(reconstructed)} chars, missing ${missing}, marker=${reconstructed.includes("[truncated")}`;
 			report.push(line);
 			if (reconstructed !== original) failures.push(line);
 			session.appendMessage({ role: "assistant", content: [{ type: "text" as const, text: `ack ${length}` }], timestamp: Date.now() } as never);
@@ -236,48 +236,48 @@ test("coherence: following the returned cursors reconstructs the original text e
 		if (walked !== `${hugeCjkLine}\ntail line`) failures.push(`notes_search match line is not reconstructible from the note read: missing ${codePoints(`${hugeCjkLine}\ntail line`) - codePoints(walked)} chars`);
 	}
 
-	// --- history_search_contents: a hit's visible text may be cut, but the offset it carries
-	// must resolve to the query through history_read_item (addresses-only mode).
+	// --- history_search: a hit's visible text may be cut, but the offset it carries
+	// must resolve to the query through history_read (addresses-only mode).
 	const searchItemContent = `${"padding ".repeat(400)}历史内容${" trailing".repeat(400)}`;
 	const searchItemId = appendText(session, searchItemContent);
 	const hit = resultJson<{ items: SearchHit[] }>(
-		await call(captured, "history_search_contents", { query: "历史内容", max_chars_per_item: 400, window_id: windowId }, ctx),
+		await call(captured, "history_search", { query: "历史内容", max_chars_per_item: 400, window_id: windowId }, ctx),
 	);
 	const first = hit.items.find((item) => item.item_id === searchItemId);
-	report.push(`history_search_contents: hit present=${Boolean(first)}, fields=${JSON.stringify(Object.keys(first ?? {}))}, match_offset_chars=${String(first?.match_offset_chars)}, truncated=${String(first?.truncated)}`);
-	if (!first) failures.push("history_search_contents did not return the matching item");
+	report.push(`history_search: hit present=${Boolean(first)}, fields=${JSON.stringify(Object.keys(first ?? {}))}, match_offset_chars=${String(first?.match_offset_chars)}, truncated=${String(first?.truncated)}`);
+	if (!first) failures.push("history_search did not return the matching item");
 	else {
-		if (first.truncated !== true) failures.push("history_search_contents does not flag the capped item as truncated");
-		if (first.total_chars !== codePoints(searchItemContent)) failures.push(`history_search_contents total_chars=${first.total_chars}, expected ${codePoints(searchItemContent)}`);
-		if (!searchItemContent.startsWith(first.truncated_content)) failures.push("history_search_contents delivered a non-prefix of the item");
-		if (first.truncated_content.includes("…")) failures.push("history_search_contents appended a marker to the payload");
-		if (!Number.isInteger(first.match_offset_chars)) failures.push("history_search_contents carries no match_offset_chars");
+		if (first.truncated !== true) failures.push("history_search does not flag the capped item as truncated");
+		if (first.total_chars !== codePoints(searchItemContent)) failures.push(`history_search total_chars=${first.total_chars}, expected ${codePoints(searchItemContent)}`);
+		if (!searchItemContent.startsWith(first.truncated_content)) failures.push("history_search delivered a non-prefix of the item");
+		if (first.truncated_content.includes("…")) failures.push("history_search appended a marker to the payload");
+		if (!Number.isInteger(first.match_offset_chars)) failures.push("history_search carries no match_offset_chars");
 		else {
-			const at = resultRead(await call(captured, "history_read_item", { window_id: windowId, item_id: searchItemId, offset_chars: first.match_offset_chars, limit_chars: 8 }, ctx));
-			if (!at.content.includes("历史内容")) failures.push(`history_read_item at match_offset_chars=${first.match_offset_chars} does not show the query`);
+			const at = resultRead(await call(captured, "history_read", { window_id: windowId, item_id: searchItemId, offset_chars: first.match_offset_chars, limit_chars: 8 }, ctx));
+			if (!at.content.includes("历史内容")) failures.push(`history_read at match_offset_chars=${first.match_offset_chars} does not show the query`);
 		}
 	}
 
 	// max_chars_per_item: 1 is a real address page for both history tools.
 	const addresses = resultJson<{ items: SearchHit[] }>(
-		await call(captured, "history_search_contents", { query: "历史内容", max_chars_per_item: 1, window_id: windowId }, ctx),
+		await call(captured, "history_search", { query: "历史内容", max_chars_per_item: 1, window_id: windowId }, ctx),
 	);
 	const address = addresses.items.find((item) => item.item_id === searchItemId);
-	report.push(`history_search_contents max_chars_per_item=1: address=${JSON.stringify(address)}`);
-	if (!address) failures.push("history_search_contents max_chars_per_item=1 dropped the hit");
+	report.push(`history_search max_chars_per_item=1: address=${JSON.stringify(address)}`);
+	if (!address) failures.push("history_search max_chars_per_item=1 dropped the hit");
 	else {
 		if (codePoints(address.truncated_content) !== 1) failures.push(`max_chars_per_item=1 delivered ${codePoints(address.truncated_content)} code points`);
 		if (address.truncated !== true || address.total_chars !== codePoints(searchItemContent)) failures.push("max_chars_per_item=1 does not name the full length");
 		if (!Number.isInteger(address.match_offset_chars)) failures.push("max_chars_per_item=1 carries no address");
 	}
 	const listed = resultJson<{ items: Array<{ item_id: string; truncated: boolean; total_chars: number; truncated_content: string }> }>(
-		await call(captured, "history_list_items", { window_id: windowId, max_chars_per_item: 1, recent_first: false, limit: 500 }, ctx),
+		await call(captured, "history_list", { window_id: windowId, max_chars_per_item: 1, recent_first: false, limit: 500 }, ctx),
 	);
 	const listedAddress = listed.items.find((item) => item.item_id === searchItemId);
-	report.push(`history_list_items max_chars_per_item=1: ${JSON.stringify(listedAddress)}`);
-	if (!listedAddress) failures.push("history_list_items max_chars_per_item=1 dropped the item");
+	report.push(`history_list max_chars_per_item=1: ${JSON.stringify(listedAddress)}`);
+	if (!listedAddress) failures.push("history_list max_chars_per_item=1 dropped the item");
 	else if (codePoints(listedAddress.truncated_content) !== 1 || listedAddress.truncated !== true || listedAddress.total_chars !== codePoints(searchItemContent)) {
-		failures.push("history_list_items max_chars_per_item=1 is not an honest address page");
+		failures.push("history_list max_chars_per_item=1 is not an honest address page");
 	}
 
 	// --- brain-04: capping a file's matches to fit the wire budget must be named, never silent.
@@ -356,14 +356,14 @@ test("coherence: following the returned cursors reconstructs the original text e
 		if (resumed.offset_chars !== cut.next_offset_chars) failures.push(`negative offset: notes_read ${profile.name} resume echoed ${resumed.offset_chars}, expected ${String(cut.next_offset_chars)}`);
 	}
 
-	// history_read_item gains the identical sugar over a durable item.
+	// history_read gains the identical sugar over a durable item.
 	const historyTailText = `${"h".repeat(50)}END`;
 	const historyTailId = appendText(session, historyTailText);
-	const historyTail = resultRead(await call(captured, "history_read_item", { window_id: windowId, item_id: historyTailId, offset_chars: -3 }, ctx));
-	report.push(`history_read_item negative offset: offset_chars=${historyTail.offset_chars} next=${String(historyTail.next_offset_chars)} content=${JSON.stringify(historyTail.content)}`);
-	if (historyTail.offset_chars !== 50 || historyTail.content !== "END" || historyTail.next_offset_chars !== null) failures.push(`negative offset: history_read_item returned ${JSON.stringify(historyTail)}`);
-	const historyFromStart = resultRead(await call(captured, "history_read_item", { window_id: windowId, item_id: historyTailId, offset_chars: -500, limit_chars: 4 }, ctx));
-	if (historyFromStart.offset_chars !== 0 || historyFromStart.content !== "hhhh") failures.push(`negative offset: history_read_item with N >= total_chars returned ${JSON.stringify(historyFromStart)}`);
+	const historyTail = resultRead(await call(captured, "history_read", { window_id: windowId, item_id: historyTailId, offset_chars: -3 }, ctx));
+	report.push(`history_read negative offset: offset_chars=${historyTail.offset_chars} next=${String(historyTail.next_offset_chars)} content=${JSON.stringify(historyTail.content)}`);
+	if (historyTail.offset_chars !== 50 || historyTail.content !== "END" || historyTail.next_offset_chars !== null) failures.push(`negative offset: history_read returned ${JSON.stringify(historyTail)}`);
+	const historyFromStart = resultRead(await call(captured, "history_read", { window_id: windowId, item_id: historyTailId, offset_chars: -500, limit_chars: 4 }, ctx));
+	if (historyFromStart.offset_chars !== 0 || historyFromStart.content !== "hhhh") failures.push(`negative offset: history_read with N >= total_chars returned ${JSON.stringify(historyFromStart)}`);
 
 	console.log(report.map((line) => `  ${line}`).join("\n"));
 	assert.deepEqual(failures, [], `cursor-following lost text at ${failures.length} site(s)`);

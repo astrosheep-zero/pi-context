@@ -72,7 +72,7 @@ function toolInfo(message: AgentMessage): Pick<HistoryItem, "toolName" | "output
  * An assistant turn's tool calls, projected as their own items: calls wear their own role so the
  * authoring turn's visible text (role "assistant") stays pure; what was invoked stays as
  * searchable as what came back (role "tool"). Ids derive from the turn's entry id and stay
- * opaque; history_read_item resolves them like any other item.
+ * opaque; history_read resolves them like any other item.
  */
 function toolCallItems(windowId: string, entry: { id: string; timestamp?: string }, message: AgentMessage): HistoryItem[] {
 	if (message.role !== "assistant" || !Array.isArray(message.content)) return [];

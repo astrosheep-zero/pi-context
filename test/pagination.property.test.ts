@@ -1,6 +1,6 @@
 /**
  * Property-based pagination tests for the four paginating pi-context tools:
- * history_list_items, history_search_contents, notes_search,
+ * history_list, history_search, notes_search,
  * notes_list.
  *
  * Each case is generated from a seed, so a failure names its seed and reproduces by
@@ -94,11 +94,11 @@ type HistoryPlan = {
 	search: HistoryVariant[];
 };
 
-const TOOL_NAMES = ["bash", "notes_read", "notes_write", "history_list_items", "history_search_contents", "web_search", "mcp_tool_call", "read", "_odd"] as const;
+const TOOL_NAMES = ["bash", "notes_read", "notes_write", "history_list", "history_search", "web_search", "mcp_tool_call", "read", "_odd"] as const;
 const CONTENT_LIMITS = [1, 5, 60, 1200, 24_000, 50_000] as const;
 const PAGE_LIMITS = [1, 2, 3, 5, 8, 13, 34, 200] as const;
 const ROLE_FILTERS = [null, "user", "assistant", "tool_call", "tool", "system", "developer"] as const;
-const NAME_FILTERS = [null, "bash", "notes_read", "history_list_items", "read", "_odd", "mcp_tool_call"] as const;
+const NAME_FILTERS = [null, "bash", "notes_read", "history_list", "read", "_odd", "mcp_tool_call"] as const;
 
 function makeContent(rng: Rng, large: boolean): string {
 	const shape = large ? rng.pick(["large", "large", "medium", "needle"] as const) : rng.pick(["empty", "tiny", "tiny", "needle", "medium"] as const);
@@ -406,9 +406,9 @@ test("generators are deterministic: the same seed replays the same shapes", () =
 	assert.ok(noteWrites.some((write) => write.body.includes(NEEDLE)), "some committed seed generates a needle body");
 });
 
-test("history_list_items enumerates every item across seeded session shapes", async () => {
+test("history_list enumerates every item across seeded session shapes", async () => {
 	console.log(`pagination property seeds: ${SEEDS.join(", ")}`);
-	await runSeeds("history_list_items", async (seed) => {
+	await runSeeds("history_list", async (seed) => {
 		const plan = historyPlan(seed);
 		const session = manager();
 		const captured = makeExtension(session);
@@ -420,23 +420,23 @@ test("history_list_items enumerates every item across seeded session shapes", as
 			const params = historyParams(ctx, variant);
 			// A role×tool_name combination the taxonomy proves empty is a named error, not a page.
 			if (variant.toolName !== null && variant.role !== null && variant.role !== "tool_call" && variant.role !== "tool") {
-				const dead = resultJson<{ error?: string }>(await call(captured, "history_list_items", params, ctx));
-				assert.ok(dead.error?.includes("only set on"), `history_list_items seed=${seed} ${variant.label} role=${variant.role} tool_name=${variant.toolName}: vacuous combo must be a named error`);
+				const dead = resultJson<{ error?: string }>(await call(captured, "history_list", params, ctx));
+				assert.ok(dead.error?.includes("only set on"), `history_list seed=${seed} ${variant.label} role=${variant.role} tool_name=${variant.toolName}: vacuous combo must be a named error`);
 				continue;
 			}
 			const expected = storeHistoryItems(ctx, params).map((item) => item.itemId);
 			await walkPages({
-				captured, ctx, tool: "history_list_items", params,
+				captured, ctx, tool: "history_list", params,
 				idsOf: (page) => (page.items as Array<{ item_id: string }>).map((item) => item.item_id),
 				expected,
-				label: `history_list_items seed=${seed} ${variant.label} windowIndex=${variant.windowIndex} role=${variant.role} tool_name=${variant.toolName} recent_first=${variant.recentFirst} limit=${variant.limit} max_chars_per_item=${variant.maxCharsPerItem}`,
+				label: `history_list seed=${seed} ${variant.label} windowIndex=${variant.windowIndex} role=${variant.role} tool_name=${variant.toolName} recent_first=${variant.recentFirst} limit=${variant.limit} max_chars_per_item=${variant.maxCharsPerItem}`,
 			});
 		}
 	});
 });
 
-test("history_search_contents enumerates every match across seeded session shapes", async () => {
-	await runSeeds("history_search_contents", async (seed) => {
+test("history_search enumerates every match across seeded session shapes", async () => {
+	await runSeeds("history_search", async (seed) => {
 		const plan = historyPlan(seed);
 		const session = manager();
 		const captured = makeExtension(session);
@@ -445,16 +445,16 @@ test("history_search_contents enumerates every match across seeded session shape
 		for (const variant of plan.search) {
 			const params = { ...historyParams(ctx, variant), query: variant.query ?? "" };
 			if (variant.toolName !== null && variant.role !== null && variant.role !== "tool_call" && variant.role !== "tool") {
-				const dead = resultJson<{ error?: string }>(await call(captured, "history_search_contents", params, ctx));
-				assert.ok(dead.error?.includes("only set on"), `history_search_contents seed=${seed} ${variant.label} role=${variant.role} tool_name=${variant.toolName}: vacuous combo must be a named error`);
+				const dead = resultJson<{ error?: string }>(await call(captured, "history_search", params, ctx));
+				assert.ok(dead.error?.includes("only set on"), `history_search seed=${seed} ${variant.label} role=${variant.role} tool_name=${variant.toolName}: vacuous combo must be a named error`);
 				continue;
 			}
 			const expected = storeHistoryItems(ctx, params).filter((item) => item.content.includes(params.query)).map((item) => item.itemId);
 			await walkPages({
-				captured, ctx, tool: "history_search_contents", params,
+				captured, ctx, tool: "history_search", params,
 				idsOf: (page) => (page.items as Array<{ item_id: string }>).map((item) => item.item_id),
 				expected,
-				label: `history_search_contents seed=${seed} ${variant.label} query=${JSON.stringify(params.query)} windowIndex=${variant.windowIndex} role=${variant.role} tool_name=${variant.toolName} recent_first=${variant.recentFirst} limit=${variant.limit} max_chars_per_item=${variant.maxCharsPerItem}`,
+				label: `history_search seed=${seed} ${variant.label} query=${JSON.stringify(params.query)} windowIndex=${variant.windowIndex} role=${variant.role} tool_name=${variant.toolName} recent_first=${variant.recentFirst} limit=${variant.limit} max_chars_per_item=${variant.maxCharsPerItem}`,
 			});
 		}
 	});

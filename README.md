@@ -24,10 +24,10 @@ pi -e npm:@astrosheep/pi-context
 
 | Codex action | Pi tool |
 | --- | --- |
-| `history.list_windows` | `history_list_windows` |
-| `history.list_items` | `history_list_items` |
-| `history.read_item` | `history_read_item` |
-| `history.search_contents` | `history_search_contents` |
+| `history.list_windows` | `history_windows` |
+| `history.list_items` | `history_list` |
+| `history.read_item` | `history_read` |
+| `history.search_contents` | `history_search` |
 | `notes.write` | `notes_write` |
 | `notes.edit` | `notes_edit` |
 | `notes.read` | `notes_read` |

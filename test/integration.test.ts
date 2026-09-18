@@ -200,7 +200,7 @@ export type ReadWindow = {
 };
 
 /**
- * Decode a raw read (notes_read / history_read_item): a one-line bracketed header, then
+ * Decode a raw read (notes_read / history_read): a one-line bracketed header, then
  * the payload verbatim (which may itself contain newlines), so split on the first newline only.
  */
 export function resultRead(result: AgentToolResult<unknown>): ReadWindow {
@@ -324,14 +324,14 @@ export function appendText(sessionManager: SessionManager, role: "user" | "assis
 test("schemas cover the History/Notes actions plus reset controls", () => {
 	const captured = makeExtension(manager());
 	for (const name of [
-		"history_list_windows", "history_list_items", "history_read_item", "history_search_contents",
+		"history_windows", "history_list", "history_read", "history_search",
 		"notes_list", "notes_read", "notes_search", "notes_edit", "notes_write",
 		"new_context", "get_context_remaining",
 	]) {
 		const tool = captured.tools.get(name);
 		assert.equal(objectSchema(tool)?.type, "object", name);
 	}
-	assert.equal(objectSchema(captured.tools.get("history_read_item"))?.required?.includes("item_id"), true);
+	assert.equal(objectSchema(captured.tools.get("history_read"))?.required?.includes("item_id"), true);
 	// The write surface requires its body; the edit surface requires its anchors.
 	const writeSchema = captured.tools.get("notes_write")?.parameters as { properties?: Record<string, unknown>; required?: string[] } | undefined;
 	assert.ok(writeSchema?.properties?.content, "notes_write exposes content");
@@ -341,7 +341,7 @@ test("schemas cover the History/Notes actions plus reset controls", () => {
 	assert.ok(editSchema?.properties?.edits, "notes_edit exposes edits");
 	assert.deepEqual([...(editSchema?.required ?? [])].sort(), ["path"], "notes_edit requires only path; edits are optional for metadata-only updates");
 	// The history ordering switch is documented as newest-first by default.
-	for (const name of ["history_list_windows", "history_list_items", "history_search_contents"]) {
+	for (const name of ["history_windows", "history_list", "history_search"]) {
 		const schema = captured.tools.get(name)?.parameters as { properties?: Record<string, { description?: string }> } | undefined;
 		assert.equal(schema?.properties?.recent_first?.description?.includes("Defaults to true."), true, `${name} documents the recent_first default`);
 	}
@@ -351,7 +351,7 @@ test("schemas cover the History/Notes actions plus reset controls", () => {
 	assert.equal(/natural direction|Ties break|reshuffle between pages/.test(listDescription), false, "notes_list prose carries no ordering algebra");
 
 	// Both read tools are the same character window: identical params, one offset sugar, no line surface.
-	for (const name of ["notes_read", "history_read_item"]) {
+	for (const name of ["notes_read", "history_read"]) {
 		const schema = captured.tools.get(name)?.parameters as { properties?: Record<string, { minimum?: number; maximum?: number }> } | undefined;
 		assert.ok(schema?.properties?.offset_chars, `${name} exposes offset_chars`);
 		assert.ok(schema?.properties?.limit_chars, `${name} exposes limit_chars`);
@@ -500,19 +500,19 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	let cursor = 0;
 	let next: number | null = 0;
 	while (next !== null) {
-		const result = resultJson<{ items: Array<{ item_id: string; truncated_content: string }>; next_cursor: number | null }>(await call(captured, "history_list_items", { recent_first: false, max_chars_per_item: 1200, cursor }, ctx));
+		const result = resultJson<{ items: Array<{ item_id: string; truncated_content: string }>; next_cursor: number | null }>(await call(captured, "history_list", { recent_first: false, max_chars_per_item: 1200, cursor }, ctx));
 		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
 		historyPages.push(...result.items); next = result.next_cursor; if (next !== null) cursor = next;
 	}
 	assert.deepEqual(historyPages.filter((item) => historyIds.includes(item.item_id)).map((item) => item.item_id), historyIds);
-	const search = resultJson<{ items: Array<unknown>; next_cursor: number | null }>(await call(captured, "history_search_contents", { query: "历史内容", recent_first: false, max_chars_per_item: 50_000 }, ctx));
+	const search = resultJson<{ items: Array<unknown>; next_cursor: number | null }>(await call(captured, "history_search", { query: "历史内容", recent_first: false, max_chars_per_item: 50_000 }, ctx));
 	assert.ok(Buffer.byteLength(JSON.stringify(search), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
 	assert.notEqual(search.next_cursor, null);
 	const searchPages: Array<{ item_id: string }> = [];
 	let searchOffset = 0;
 	let searchNext: number | null = 0;
 	while (searchNext !== null) {
-		const result = resultJson<{ items: Array<{ item_id: string }>; next_cursor: number | null }>(await call(captured, "history_search_contents", { query: "历史内容", recent_first: false, max_chars_per_item: 1200, cursor: searchOffset }, ctx));
+		const result = resultJson<{ items: Array<{ item_id: string }>; next_cursor: number | null }>(await call(captured, "history_search", { query: "历史内容", recent_first: false, max_chars_per_item: 1200, cursor: searchOffset }, ctx));
 		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
 		searchPages.push(...result.items); searchNext = result.next_cursor; if (searchNext !== null) searchOffset = searchNext;
 	}
@@ -522,8 +522,8 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	let readOffset = 0;
 	let readNext: number | null = 0;
 	while (readNext !== null) {
-		const raw = await call(captured, "history_read_item", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: historyIds[0], offset_chars: readOffset, limit_chars: 12000 }, ctx);
-		assertWithinBudget(raw, `history_read_item page at ${readOffset}`);
+		const raw = await call(captured, "history_read", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: historyIds[0], offset_chars: readOffset, limit_chars: 12000 }, ctx);
+		assertWithinBudget(raw, `history_read page at ${readOffset}`);
 		const result = resultRead(raw);
 		readParts.push(result.content); readNext = result.next_offset_chars; if (readNext !== null) readOffset = readNext;
 	}
@@ -577,10 +577,10 @@ test("a page cap limits the page, not the enumerable set: cursors stay truthful 
 		appendText(session, "assistant", `reply-${index}`);
 	}
 
-	// history_list_items: 120 items with limit 50 page as 50/50/20, null only at the true end.
-	const windows = resultJson<{ windows: Array<{ item_count: number }> }>(await call(captured, "history_list_windows", {}, ctx));
+	// history_list: 120 items with limit 50 page as 50/50/20, null only at the true end.
+	const windows = resultJson<{ windows: Array<{ item_count: number }> }>(await call(captured, "history_windows", {}, ctx));
 	assert.equal(windows.windows[0]?.item_count, 120);
-	const list = async (params: Record<string, unknown>) => resultJson<{ items: unknown[]; next_cursor: number | null }>(await call(captured, "history_list_items", params, ctx));
+	const list = async (params: Record<string, unknown>) => resultJson<{ items: unknown[]; next_cursor: number | null }>(await call(captured, "history_list", params, ctx));
 	const first = await list({ limit: 50, recent_first: false, max_chars_per_item: 100 });
 	assert.equal(first.items.length, 50);
 	assert.equal(first.next_cursor, 50, "limit caps the page, not the enumerable set");
@@ -591,8 +591,8 @@ test("a page cap limits the page, not the enumerable set: cursors stay truthful 
 	assert.equal(third.items.length, 20);
 	assert.equal(third.next_cursor, null, "null only at the true end");
 
-	// history_search_contents: the same contract holds over the matching set.
-	const search = async (params: Record<string, unknown>) => resultJson<{ items: unknown[]; next_cursor: number | null }>(await call(captured, "history_search_contents", params, ctx));
+	// history_search: the same contract holds over the matching set.
+	const search = async (params: Record<string, unknown>) => resultJson<{ items: unknown[]; next_cursor: number | null }>(await call(captured, "history_search", params, ctx));
 	const searchFirst = await search({ query: "entry-", limit: 50, recent_first: false, max_chars_per_item: 100 });
 	assert.equal(searchFirst.items.length, 50);
 	assert.equal(searchFirst.next_cursor, 50);
@@ -625,7 +625,7 @@ test("multi-query search: OR semantics, dedupe, and bare-string backward compati
 	const betaId = appendText(session, "assistant", "beta only");
 	const noneId = appendText(session, "user", "gamma only");
 	const historyIds = async (params: Record<string, unknown>) =>
-		resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_search_contents", { recent_first: false, ...params }, ctx)).items.map((item) => item.item_id);
+		resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_search", { recent_first: false, ...params }, ctx)).items.map((item) => item.item_id);
 	const orIds = await historyIds({ query: ["alpha", "beta"] });
 	assert.deepEqual(orIds, [bothId, alphaId, betaId], "history: an item matching any query is returned once");
 	assert.equal(orIds.includes(noneId), false, "history: an item matching no query is not returned");
@@ -648,9 +648,9 @@ test("multi-query search: OR semantics, dedupe, and bare-string backward compati
 	assert.deepEqual((await notesSearch({ query: ["gamma"] })).map((file) => file.path), ["gamma.md"]);
 
 	// An empty array is an argument error, not a silently empty result set.
-	await assert.rejects(() => call(captured, "history_search_contents", { query: [] }, ctx), /non-empty array of strings/, "history: empty query array is refused");
+	await assert.rejects(() => call(captured, "history_search", { query: [] }, ctx), /non-empty array of strings/, "history: empty query array is refused");
 	await assert.rejects(() => call(captured, "notes_search", { query: [] }, ctx), /non-empty array of strings/, "notes: empty query array is refused");
-	await assert.rejects(() => call(captured, "history_search_contents", { query: ["alpha", 7] }, ctx), /elements must be strings/, "history: non-string query element is refused");
+	await assert.rejects(() => call(captured, "history_search", { query: ["alpha", 7] }, ctx), /elements must be strings/, "history: non-string query element is refused");
 	await assert.rejects(() => call(captured, "notes_search", { query: ["alpha", 7] }, ctx), /elements must be strings/, "notes: non-string query element is refused");
 });
 
@@ -663,7 +663,7 @@ test("multi-query search paginates over the OR set with no cross-page duplicates
 	}
 	const historyPage = async (cursor: number) =>
 		resultJson<{ items: Array<{ item_id: string }>; next_cursor: number | null }>(
-			await call(captured, "history_search_contents", { query: ["alpha", "beta"], recent_first: false, max_chars_per_item: 100, limit: 3, cursor }, ctx),
+			await call(captured, "history_search", { query: ["alpha", "beta"], recent_first: false, max_chars_per_item: 100, limit: 3, cursor }, ctx),
 		);
 	const historyIds: string[] = [];
 	let historyNext: number | null = 0;
@@ -728,7 +728,7 @@ test("history multi-query search composes with role, tool_name, and window filte
 	const nextId = appendText(session, "user", "alpha next window");
 
 	const searchIds = async (params: Record<string, unknown>) =>
-		resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_search_contents", { query: ["alpha", "beta"], recent_first: false, ...params }, ctx)).items.map((item) => item.item_id);
+		resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_search", { query: ["alpha", "beta"], recent_first: false, ...params }, ctx)).items.map((item) => item.item_id);
 	assert.deepEqual(await searchIds({ role: "user" }), [userId, nextId], "role filter composes with multi-query");
 	assert.deepEqual(await searchIds({ role: "assistant" }), [assistantId], "role filter narrows the OR set");
 	assert.deepEqual(await searchIds({ tool_name: "bash" }), [toolId], "tool_name filter composes with multi-query");
@@ -820,20 +820,20 @@ test("an over-budget note search match is a named prefix with an honest line add
 	assert.ok(parts.join("").endsWith(hugeLine), "resuming across pages reconstructs the matched body line");
 });
 
-test("history_read_item delivers a prefix and next_offset_chars names the delivered count", async () => {
+test("history_read delivers a prefix and next_offset_chars names the delivered count", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	const original = "z".repeat(TOOL_OUTPUT_MAX_BYTES * 3);
 	const id = appendText(session, "user", original);
-	const rawRead = await call(captured, "history_read_item", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: id, limit_chars: 50000 }, ctx);
-	assertWithinBudget(rawRead, "single history_read_item call");
+	const rawRead = await call(captured, "history_read", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: id, limit_chars: 50000 }, ctx);
+	assertWithinBudget(rawRead, "single history_read call");
 	const read = resultRead(rawRead);
 	assert.ok(read.content.length > 0, "the read is not empty");
 	assert.equal(read.content.includes("…"), false, "no marker is appended to the payload");
 	assert.ok(original.startsWith(read.content), "the delivered text is a prefix of the item");
 	assert.equal(read.total_chars, original.length);
-	assert.deepEqual(Object.keys(read.details), ["window_id", "item_id", "offset_chars", "total_chars", "next_offset_chars", "limit_chars"], "history_read_item details carries exactly the slim window metadata");
+	assert.deepEqual(Object.keys(read.details), ["window_id", "item_id", "offset_chars", "total_chars", "next_offset_chars", "limit_chars"], "history_read details carries exactly the slim window metadata");
 	assert.equal("content" in read.details, false, "details never duplicates the payload");
 	assert.equal(read.next_offset_chars, read.offset_chars + Array.from(read.content).length, "the cursor is offset plus delivered code points");
 	assert.ok(read.next_offset_chars !== null && read.next_offset_chars < read.total_chars, "the cursor points at the first undelivered character");
@@ -843,7 +843,7 @@ test("history_read_item delivers a prefix and next_offset_chars names the delive
 	let next: number | null = offset;
 	while (next !== null) {
 		const page = resultRead(
-			await call(captured, "history_read_item", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: id, offset_chars: offset, limit_chars: 50000 }, ctx),
+			await call(captured, "history_read", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: id, offset_chars: offset, limit_chars: 50000 }, ctx),
 		);
 		assert.equal(page.next_offset_chars, page.offset_chars + Array.from(page.content).length < page.total_chars ? page.offset_chars + Array.from(page.content).length : null, "the cursor is offset plus delivered, null only at item end");
 		parts.push(page.content);
@@ -883,7 +883,7 @@ test("history items carry honest truncated/total_chars and max_chars_per_item:1 
 	const content = `${'padding '.repeat(400)}NEEDLE${' trailing'.repeat(400)}`;
 	const id = appendText(session, "user", content);
 	const list = resultJson<{ items: Array<{ item_id: string; truncated: boolean; total_chars: number; truncated_content: string }> }>(
-		await call(captured, "history_list_items", { recent_first: false, max_chars_per_item: 5 }, ctx),
+		await call(captured, "history_list", { recent_first: false, max_chars_per_item: 5 }, ctx),
 	);
 	const listed = list.items.find((item) => item.item_id === id)!;
 	assert.equal(listed.truncated, true, "a capped item is flagged truncated");
@@ -891,22 +891,22 @@ test("history items carry honest truncated/total_chars and max_chars_per_item:1 
 	assert.equal(listed.truncated_content, 'paddi', "the payload is the longest fitting prefix, with no marker");
 	assert.equal(listed.truncated_content.includes("…"), false);
 	const whole = resultJson<{ items: Array<{ item_id: string; truncated: boolean; total_chars: number; truncated_content: string }> }>(
-		await call(captured, "history_list_items", { recent_first: false, max_chars_per_item: 50_000 }, ctx),
+		await call(captured, "history_list", { recent_first: false, max_chars_per_item: 50_000 }, ctx),
 	);
 	const untruncated = whole.items.find((item) => item.item_id === id)!;
 	assert.equal(untruncated.truncated, false, "an item that fits is not flagged truncated");
 	assert.equal(untruncated.truncated_content, content, "a fitting item is returned whole");
 	const addresses = resultJson<{ items: Array<{ item_id: string; truncated: boolean; total_chars: number; truncated_content: string; match_offset_chars: number }> }>(
-		await call(captured, "history_search_contents", { query: "NEEDLE", max_chars_per_item: 1 }, ctx),
+		await call(captured, "history_search", { query: "NEEDLE", max_chars_per_item: 1 }, ctx),
 	);
 	const address = addresses.items.find((item) => item.item_id === id)!;
 	assert.equal(Array.from(address.truncated_content).length, 1, "max_chars_per_item:1 delivers one code point");
 	assert.equal(address.truncated, true);
 	assert.equal(address.total_chars, Array.from(content).length);
 	const resolved = resultRead(
-		await call(captured, "history_read_item", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: id, offset_chars: address.match_offset_chars, limit_chars: 6 }, ctx),
+		await call(captured, "history_read", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: id, offset_chars: address.match_offset_chars, limit_chars: 6 }, ctx),
 	);
-	assert.ok(resolved.content.includes("NEEDLE"), "the address resolves to the query through history_read_item");
+	assert.ok(resolved.content.includes("NEEDLE"), "the address resolves to the query through history_read");
 });
 
 test("tool calls wear their own role and assistant text stays pure", async () => {
@@ -927,7 +927,7 @@ test("tool calls wear their own role and assistant text stays pure", async () =>
 	const windowId = historyFromSession(ctx)[0]!.windowId;
 
 	const listed = resultJson<{ items: Array<{ item_id: string; role: string; tool_name: string | null; truncated_content: string }> }>(
-		await call(captured, "history_list_items", { recent_first: false, max_chars_per_item: 50_000 }, ctx),
+		await call(captured, "history_list", { recent_first: false, max_chars_per_item: 50_000 }, ctx),
 	);
 	const turn = listed.items.find((item) => item.item_id === turnId)!;
 	assert.equal(turn.role, "assistant");
@@ -942,23 +942,23 @@ test("tool calls wear their own role and assistant text stays pure", async () =>
 
 	// The invocation is searchable exactly where a searcher reaches for it: tool_call + tool_name.
 	const calls = resultJson<{ items: Array<{ item_id: string }> }>(
-		await call(captured, "history_search_contents", { query: "keiyaku status", role: "tool_call", tool_name: "bash" }, ctx),
+		await call(captured, "history_search", { query: "keiyaku status", role: "tool_call", tool_name: "bash" }, ctx),
 	);
 	assert.deepEqual(calls.items.map((item) => item.item_id), [`${turnId}#0`], "the command line is found on the call item, not the turn");
 	const assistantCalls = resultJson<{ items: Array<{ item_id: string }> }>(
-		await call(captured, "history_search_contents", { query: "keiyaku status", role: "assistant" }, ctx),
+		await call(captured, "history_search", { query: "keiyaku status", role: "assistant" }, ctx),
 	);
 	assert.equal(assistantCalls.items.length, 0, "calls never leak into assistant text");
 	const assistantText = resultJson<{ items: Array<{ item_id: string }> }>(
-		await call(captured, "history_search_contents", { query: "on it", role: "assistant" }, ctx),
+		await call(captured, "history_search", { query: "on it", role: "assistant" }, ctx),
 	);
 	assert.deepEqual(assistantText.items.map((item) => item.item_id), [turnId], "assistant search returns the turn's text item only");
 	const outputs = resultJson<{ items: Array<{ item_id: string }> }>(
-		await call(captured, "history_search_contents", { query: "keiyaku status", role: "tool" }, ctx),
+		await call(captured, "history_search", { query: "keiyaku status", role: "tool" }, ctx),
 	);
 	assert.equal(outputs.items.length, 0, "nothing ran, so no output carries the command");
-	const resolved = resultRead(await call(captured, "history_read_item", { window_id: windowId, item_id: `${turnId}#0` }, ctx));
-	assert.equal(resolved.content, JSON.stringify({ command: "keiyaku status" }), "a call item resolves through history_read_item like any other");
+	const resolved = resultRead(await call(captured, "history_read", { window_id: windowId, item_id: `${turnId}#0` }, ctx));
+	assert.equal(resolved.content, JSON.stringify({ command: "keiyaku status" }), "a call item resolves through history_read like any other");
 });
 
 test("a vacuous role×tool_name combination is a named error, not a silent empty page", async () => {
@@ -966,8 +966,8 @@ test("a vacuous role×tool_name combination is a named error, not a silent empty
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	appendText(session, "user", "anything");
-	for (const tool of ["history_list_items", "history_search_contents"] as const) {
-		const base = tool === "history_search_contents" ? { query: "keiyaku" } : {};
+	for (const tool of ["history_list", "history_search"] as const) {
+		const base = tool === "history_search" ? { query: "keiyaku" } : {};
 		const dead = resultJson<{ error?: string; role?: string; tool_name?: string }>(
 			await call(captured, tool, { ...base, role: "assistant", tool_name: "bash" }, ctx),
 		);
@@ -1009,7 +1009,7 @@ test("developer re-role names this extension's entries and leaves native compact
 	assert.ok(nextLeaf);
 	const nativeId = session.appendCompaction("native summary", nextLeaf, 100, { readFiles: [], modifiedFiles: [] }, true);
 	const byRole = async (role: string) => resultJson<{ items: Array<{ item_id: string; role: string }> }>(
-		await call(captured, "history_list_items", { role, recent_first: false }, ctx),
+		await call(captured, "history_list", { role, recent_first: false }, ctx),
 	).items;
 	assert.deepEqual((await byRole("developer")).map((item) => item.item_id), [extensionId, resetId], "developer names exactly this extension's entries");
 	assert.deepEqual((await byRole("system")).map((item) => item.item_id), [nativeId], "system stays native Pi compactions only");
@@ -1024,10 +1024,10 @@ test("oversized history tool_name: page stays within budget, item_id intact, met
 	const itemId = appendText(session, "toolResult", "tool output line", hugeToolName);
 
 	const listed = resultJson<{ items: Array<{ item_id: string; tool_name: string; truncated_content: string }>; next_cursor: number | null }>(
-		await call(captured, "history_list_items", { recent_first: false, max_chars_per_item: 1200 }, ctx),
+		await call(captured, "history_list", { recent_first: false, max_chars_per_item: 1200 }, ctx),
 	);
 	const listedBytes = Buffer.byteLength(JSON.stringify(listed), "utf8");
-	console.log(`pathological page bytes: history_list_items tool_name=40KB -> ${listedBytes}`);
+	console.log(`pathological page bytes: history_list tool_name=40KB -> ${listedBytes}`);
 	assert.ok(listedBytes <= TOOL_OUTPUT_MAX_BYTES, `oversized tool_name list page is ${listedBytes} bytes`);
 	assert.equal(listed.items.length, 1);
 	assert.equal(listed.items[0]!.item_id, itemId, "item_id identity is untouched");
@@ -1035,10 +1035,10 @@ test("oversized history tool_name: page stays within budget, item_id intact, met
 	assert.match(listed.items[0]!.tool_name, /…\[truncated \d+ chars\]…/, "tool_name carries the truncation marker");
 
 	const searched = resultJson<{ items: Array<{ item_id: string; tool_name: string }>; next_cursor: number | null }>(
-		await call(captured, "history_search_contents", { query: "tool output", recent_first: false }, ctx),
+		await call(captured, "history_search", { query: "tool output", recent_first: false }, ctx),
 	);
 	const searchedBytes = Buffer.byteLength(JSON.stringify(searched), "utf8");
-	console.log(`pathological page bytes: history_search_contents tool_name=40KB -> ${searchedBytes}`);
+	console.log(`pathological page bytes: history_search tool_name=40KB -> ${searchedBytes}`);
 	assert.ok(searchedBytes <= TOOL_OUTPUT_MAX_BYTES, `oversized tool_name search page is ${searchedBytes} bytes`);
 	assert.equal(searched.items.length, 1);
 	assert.equal(searched.items[0]!.item_id, itemId, "search keeps item_id identity");
@@ -1105,11 +1105,11 @@ test("custom reset boundary removes old provider context but history remains sea
 	const oldWindow = windows[0]?.windowId;
 	assert.ok(oldWindow);
 	const read = resultRead(
-		await call(captured, "history_read_item", { window_id: oldWindow, item_id: oldUserId }, ctx),
+		await call(captured, "history_read", { window_id: oldWindow, item_id: oldUserId }, ctx),
 	);
 	assert.match(read.content, /OLD-UNIQUE-TRANSCRIPT/);
 	const found = resultJson<{ items: Array<{ item_id: string }> }>(
-		await call(captured, "history_search_contents", { query: "needle" }, ctx),
+		await call(captured, "history_search", { query: "needle" }, ctx),
 	);
 	assert.equal(found.items.length, 1);
 	assert.equal(found.items[0]?.item_id, oldUserId);
@@ -1217,20 +1217,20 @@ test("reset window ids are extension-minted and drive history_* lookups", async 
 	const compactionEntry = sessionManager.getEntry(compactionId);
 	assert.ok(compactionEntry && compactionEntry.type === "compaction");
 
-	// history_list_windows reports exactly the minted id carried in details.
+	// history_windows reports exactly the minted id carried in details.
 	// The default is newest-first, so the current window is listed first.
-	const windows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_list_windows", {}, ctx));
+	const windows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_windows", {}, ctx));
 	assert.equal(windows.windows.length, 2);
 	assert.equal(windows.windows[0]?.window_id, details.windowId, "recent_first defaults to newest-first");
 	// Only an explicit false restores oldest-first window order.
-	const oldestWindows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_list_windows", { recent_first: false }, ctx));
+	const oldestWindows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_windows", { recent_first: false }, ctx));
 	assert.equal(oldestWindows.windows[0]?.window_id, `pcw:${sessionManager.getSessionId().slice(0, 8)}:root`, "explicit false keeps the oldest window first");
 	assert.equal(oldestWindows.windows[1]?.window_id, details.windowId);
 	// The minted id is Pi's 8-hex entry-id shape, but the window id is ours.
 	assert.match(details.windowId, new RegExp(`^pcw:${sessionManager.getSessionId().slice(0, 8)}:[0-9a-f]{8}$`));
 
 	// history_* accepts the minted window id and resolves the baked summary item.
-	const listed = resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_list_items", { window_id: details.windowId }, ctx));
+	const listed = resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_list", { window_id: details.windowId }, ctx));
 	assert.equal(listed.items.length, 1);
 	assert.equal(listed.items[0]?.item_id, compactionEntry.id);
 });
@@ -1244,13 +1244,13 @@ test("recent_first defaults to newest-first for items and search; only false is 
 	const thirdId = appendText(sessionManager, "user", "needle gamma");
 
 	const listOrder = async (params: Record<string, unknown>) =>
-		resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_list_items", params, ctx)).items.map((item) => item.item_id);
+		resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_list", params, ctx)).items.map((item) => item.item_id);
 	assert.deepEqual(await listOrder({}), [thirdId, secondId, firstId], "omitted recent_first lists the newest item first");
 	assert.deepEqual(await listOrder({ recent_first: true }), [thirdId, secondId, firstId], "recent_first true lists the newest item first");
 	assert.deepEqual(await listOrder({ recent_first: false }), [firstId, secondId, thirdId], "explicit false lists the oldest item first");
 
 	const searchOrder = async (params: Record<string, unknown>) =>
-		resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_search_contents", { query: "needle", ...params }, ctx)).items.map((item) => item.item_id);
+		resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_search", { query: "needle", ...params }, ctx)).items.map((item) => item.item_id);
 	assert.deepEqual(await searchOrder({}), [thirdId, secondId, firstId], "search shares the newest-first default");
 	assert.deepEqual(await searchOrder({ recent_first: false }), [firstId, secondId, thirdId], "search honours an explicit false");
 });
@@ -1263,7 +1263,7 @@ test("a Pi-native compaction with the extension off keeps entry.id as the window
 	await runCommand(captured, "pi-context", "off", ctx);
 
 	const compactionId = sessionManager.appendCompaction("Pi native summary", sessionManager.getLeafId() as string, 100, { readFiles: [], modifiedFiles: [] }, true);
-	const windows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_list_windows", {}, ctx));
+	const windows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_windows", {}, ctx));
 	assert.equal(windows.windows[0]?.window_id, `pcw:${sessionManager.getSessionId().slice(0, 8)}:${compactionId}`, "native compactions fall back to entry.id");
 });
 
@@ -1283,19 +1283,19 @@ test("a reset window baked under the older full-session id still projects and re
 	const currentItemId = appendText(sessionManager, "assistant", "message after the old reset");
 
 	// The old session still projects both windows: the computed short root and the opaque baked window.
-	const windows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_list_windows", { recent_first: false }, ctx));
+	const windows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_windows", { recent_first: false }, ctx));
 	assert.deepEqual(windows.windows.map((window) => window.window_id), [projectedRoot, oldWindowId], "both the short root and the older opaque id project");
 
-	// history_read_item resolves items by the older opaque window id, and by the computed root.
-	const oldRead = resultRead(await call(captured, "history_read_item", { window_id: oldWindowId, item_id: compactionId }, ctx));
+	// history_read resolves items by the older opaque window id, and by the computed root.
+	const oldRead = resultRead(await call(captured, "history_read", { window_id: oldWindowId, item_id: compactionId }, ctx));
 	assert.equal(oldRead.content, "old reset summary");
-	const oldCurrent = resultRead(await call(captured, "history_read_item", { window_id: oldWindowId, item_id: currentItemId }, ctx));
+	const oldCurrent = resultRead(await call(captured, "history_read", { window_id: oldWindowId, item_id: currentItemId }, ctx));
 	assert.equal(oldCurrent.content, "message after the old reset");
-	const rootRead = resultRead(await call(captured, "history_read_item", { window_id: projectedRoot, item_id: rootItemId }, ctx));
+	const rootRead = resultRead(await call(captured, "history_read", { window_id: projectedRoot, item_id: rootItemId }, ctx));
 	assert.equal(rootRead.content, "message before the old reset");
 
 	// No normalization: the read path matches window ids exactly and never rewrites an older spelling.
-	const unrewritten = resultJson<{ error?: string }>(await call(captured, "history_read_item", { window_id: `pcw:${sessionId}:root`, item_id: rootItemId }, ctx));
+	const unrewritten = resultJson<{ error?: string }>(await call(captured, "history_read", { window_id: `pcw:${sessionId}:root`, item_id: rootItemId }, ctx));
 	assert.match(unrewritten.error ?? "", /unknown item_id or window_id/);
 });
 
@@ -1908,7 +1908,7 @@ test("argument footguns die loudly and tool-run metadata surfaces (A1/A2/A3/B4/B
 	const ctx = context(session);
 
 	// A1: an empty query string is an argument error on both search tools, never a match-everything.
-	for (const tool of ["history_search_contents", "notes_search"] as const) {
+	for (const tool of ["history_search", "notes_search"] as const) {
 		await assert.rejects(() => call(captured, tool, { query: "" }, ctx), /empty query matches everything/, `${tool}: bare empty string refused`);
 		await assert.rejects(() => call(captured, tool, { query: ["alpha", ""] }, ctx), /empty query matches everything/, `${tool}: empty array element refused`);
 	}
@@ -1917,7 +1917,7 @@ test("argument footguns die loudly and tool-run metadata surfaces (A1/A2/A3/B4/B
 	await call(captured, "notes_write", { path: "a.md", content: "hello" }, ctx);
 	appendText(session, "user", "hello world");
 	const windowId = historyFromSession(ctx)[0]!.windowId;
-	const listed = resultJson<{ items: Array<{ item_id: string; total_chars: number }> }>(await call(captured, "history_list_items", {}, ctx));
+	const listed = resultJson<{ items: Array<{ item_id: string; total_chars: number }> }>(await call(captured, "history_list", {}, ctx));
 	const target = listed.items.find((candidate) => candidate.total_chars === "hello world".length);
 	assert.ok(target, "the user item is listed");
 	const noteTotal = resultRead(await call(captured, "notes_read", { path: "a.md" }, ctx)).total_chars;
@@ -1932,12 +1932,12 @@ test("argument footguns die loudly and tool-run metadata surfaces (A1/A2/A3/B4/B
 	assert.equal(noteEnd.content, "", "notes: offset == total is the legal empty end-read");
 	assert.equal(noteEnd.next_offset_chars, null, "notes: the end-read terminates");
 	const itemPastEnd = resultJson<{ error?: string; offset_chars?: number; total_chars?: number; window_id?: string; item_id?: string }>(
-		await call(captured, "history_read_item", { window_id: windowId, item_id: target.item_id, offset_chars: 12 }, ctx),
+		await call(captured, "history_read", { window_id: windowId, item_id: target.item_id, offset_chars: 12 }, ctx),
 	);
 	assert.match(itemPastEnd.error ?? "", /past the end/, "history: past-end offset is a named error");
 	assert.equal(itemPastEnd.total_chars, 11, "history: the error names the real length");
 	assert.equal(itemPastEnd.item_id, target.item_id, "history: the error echoes the item_id");
-	const itemEnd = resultRead(await call(captured, "history_read_item", { window_id: windowId, item_id: target.item_id, offset_chars: 11 }, ctx));
+	const itemEnd = resultRead(await call(captured, "history_read", { window_id: windowId, item_id: target.item_id, offset_chars: 11 }, ctx));
 	assert.equal(itemEnd.content, "", "history: offset == total is the legal empty end-read");
 	assert.equal(itemEnd.next_offset_chars, null, "history: the end-read terminates");
 
@@ -1955,7 +1955,7 @@ test("argument footguns die loudly and tool-run metadata surfaces (A1/A2/A3/B4/B
 	session.appendMessage({ role: "bashExecution", command: "true", output: "", exitCode: 0, cancelled: false, truncated: false, timestamp: Date.now() } as unknown as AppendableMessage);
 	session.appendMessage({ role: "toolResult", content: [{ type: "text", text: "boom" }], toolCallId: "call-err", toolName: "bash", isError: true, timestamp: Date.now() } as unknown as AppendableMessage);
 	appendText(session, "toolResult", "fine");
-	const tools = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_list_items", { role: "tool", limit: 20 }, ctx));
+	const tools = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_list", { role: "tool", limit: 20 }, ctx));
 	const byContent = (needle: string) => {
 		const found = tools.items.find((candidate) => String(candidate.truncated_content).includes(needle));
 		assert.ok(found, `tool item containing ${JSON.stringify(needle)} is listed`);

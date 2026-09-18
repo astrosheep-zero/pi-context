@@ -31,7 +31,7 @@ function truncateHistoryItem<T extends { truncated_content: string; truncated: b
 
 export function registerHistoryTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
-		name: "history_list_windows",
+		name: "history_windows",
 		label: "History list windows",
 		description: "List durable Pi session-history windows.",
 		parameters: Type.Object({ limit: positiveInteger(), recent_first: recentFirst() }, { additionalProperties: false }),
@@ -44,9 +44,9 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 	}));
 
 	pi.registerTool(defineTool({
-		name: "history_list_items",
+		name: "history_list",
 		label: "History list items",
-		description: "List durable session items, including items before compaction, using opaque item and window IDs; the role parameter's description enumerates the six roles. Every item carries truncated and total_chars: when truncated is true, truncated_content is a plain prefix of the item's content with no marker, and total_chars is its full code-point length. max_chars_per_item: 1 therefore yields pure addresses you can resolve with history_read_item.",
+		description: "List durable session items, including items before compaction, using opaque item and window IDs; the role parameter's description enumerates the six roles. Every item carries truncated and total_chars: when truncated is true, truncated_content is a plain prefix of the item's content with no marker, and total_chars is its full code-point length. max_chars_per_item: 1 therefore yields pure addresses you can resolve with history_read.",
 		parameters: Type.Object({ limit: positiveInteger(), cursor: cursor(), recent_first: recentFirst(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const invalid = vacuousRoleToolCombo(params);
@@ -59,7 +59,7 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 	}));
 
 	pi.registerTool(defineTool({
-		name: "history_read_item",
+		name: "history_read",
 		label: "History read item",
 		description: "Read a bounded character range from one session item. Each response delivers the longest contiguous prefix of the requested window that fits the wire budget: follow the resume cursor to reconstruct the item exactly. A negative offset_chars counts back from the item's end. Offsets and counts are code points (an emoji or CJK character counts as one). The response is the raw item text behind a one-line [bracketed] header naming the item, the resolved offset, the delivered char range, and the resume cursor (continue at offset_chars=N, or end).",
 		parameters: Type.Object({ item_id: Type.String(), offset_chars: Type.Optional(Type.Integer({ description: "Code-point offset to start from. A negative value counts back from the end; the response echoes the resolved absolute offset. Pass the previous next_offset_chars back unchanged to continue." })), limit_chars: Type.Optional(Type.Integer({ minimum: 1, maximum: 50000, description: "Largest requested window in code points (default 12000). A window too large for the wire budget is cut short; next_offset_chars names where the next read resumes." })), window_id: Type.String() }, { additionalProperties: false }),
@@ -81,9 +81,9 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 	}));
 
 	pi.registerTool(defineTool({
-		name: "history_search_contents",
+		name: "history_search",
 		label: "History search",
-		description: "Case-sensitive literal substring search over durable Pi session history; query accepts one string or an array of strings, an item matches when it contains any of them (OR), and each item appears once. No semantic search. Invocations and outputs are separate items (roles \"tool_call\" and \"tool\"), so both are searchable; the role parameter's description enumerates all six. Each hit carries truncated and total_chars plus match_offset_chars: the code-point offset of the earliest query occurrence in the item's full content. With max_chars_per_item: 1 the page is an address list; resolve an address with history_read_item at match_offset_chars.",
+		description: "Case-sensitive literal substring search over durable Pi session history; query accepts one string or an array of strings, an item matches when it contains any of them (OR), and each item appears once. No semantic search. Invocations and outputs are separate items (roles \"tool_call\" and \"tool\"), so both are searchable; the role parameter's description enumerates all six. Each hit carries truncated and total_chars plus match_offset_chars: the code-point offset of the earliest query occurrence in the item's full content. With max_chars_per_item: 1 the page is an address list; resolve an address with history_read at match_offset_chars.",
 		parameters: Type.Object({ limit: positiveInteger(), cursor: cursor(), query: searchQuery(), recent_first: recentFirst(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const invalid = vacuousRoleToolCombo(params);
