@@ -7,8 +7,17 @@ import { serializeNote, stripLeadingFrontmatter, type NoteMeta, type Origin } fr
 import { NoteError, editNote, listNotes, readNote, searchNotes, writeNote } from "./store.js";
 import type { Scope } from "./paths.js";
 
-const SCOPE = Type.Optional(Type.Union([Type.Literal("session"), Type.Literal("project"), Type.Literal("global")]));
-const ORIGIN = Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("self"), Type.Literal("external")]));
+const SCOPE = Type.Optional(
+	Type.Union([Type.Literal("session"), Type.Literal("project"), Type.Literal("global")], {
+		description:
+			"The note's reach — which root it lives under. session: only this session needs it (checkpoints, scratch state, worker rosters); dies with the session. project: tied to the current working directory — design decisions and repo facts that future sessions here still need. global: follows you everywhere — user laws, preferences, cross-project maps. On write, picks the destination root (default: session). Omit on read/list/search to cover all three; a read resolves session → project → global and returns the first existing file.",
+	}),
+);
+const ORIGIN = Type.Optional(
+	Type.Union([Type.Literal("user"), Type.Literal("self"), Type.Literal("external")], {
+		description: "Who authored the note's content. user: the human's own words — treat as authority. self: you wrote it (default). external: third-party or untrusted material.",
+	}),
+);
 
 /** Render epoch-ms metadata as the same local ISO timestamps the frontmatter carries. */
 function wireMeta(meta: NoteMeta): Record<string, unknown> {
