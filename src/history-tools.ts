@@ -2,7 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { output, outputRaw, page, middleTruncate, prefixFit, earliestMatchOffsetChars, readCharacterWindow, characterWindowHeader, withinTextBudget } from "./tool-output.js";
 import { positiveInteger, recentFirst, nullableString, role, cursor, searchQuery, searchQueries } from "./tool-schema.js";
-import { historyFromSession, filteredItems, visibleItem, allItems } from "./history.js";
+import { historyFromSession, filteredItems, visibleItem, allItems, vacuousRoleToolCombo } from "./history.js";
 
 /**
  * Shrink one page item to fit the wire budget. `truncated`/`total_chars` stay honest: the
@@ -49,6 +49,8 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 		description: "List durable session items, including items before compaction, using opaque item and window IDs; the role parameter's description enumerates the six roles. Every item carries truncated and total_chars: when truncated is true, truncated_content is a plain prefix of the item's content with no marker, and total_chars is its full code-point length. max_chars_per_item: 1 therefore yields pure addresses you can resolve with history_read_item.",
 		parameters: Type.Object({ limit: positiveInteger(), cursor: cursor(), recent_first: recentFirst(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
+			const invalid = vacuousRoleToolCombo(params);
+			if (invalid) return output({ error: invalid, role: params.role, tool_name: params.tool_name });
 			const items = filteredItems(ctx, params).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200));
 			return output(page(items, params.cursor ?? 0, "items", params.limit, truncateHistoryItem));
 		},
@@ -76,6 +78,8 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 		description: "Case-sensitive literal substring search over durable Pi session history; query accepts one string or an array of strings, an item matches when it contains any of them (OR), and each item appears once. No semantic search. Invocations and outputs are separate items (roles \"tool_call\" and \"tool\"), so both are searchable; the role parameter's description enumerates all six. Each hit carries truncated and total_chars plus match_offset_chars: the code-point offset of the earliest query occurrence in the item's full content. With max_chars_per_item: 1 the page is an address list; resolve an address with history_read_item at match_offset_chars.",
 		parameters: Type.Object({ limit: positiveInteger(), cursor: cursor(), query: searchQuery(), recent_first: recentFirst(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
+			const invalid = vacuousRoleToolCombo(params);
+			if (invalid) return output({ error: invalid, role: params.role, tool_name: params.tool_name });
 			const queries = searchQueries(params.query);
 			const matching = filteredItems(ctx, params)
 				.filter((item) => queries.some((query) => item.content.includes(query)))

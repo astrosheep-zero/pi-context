@@ -1018,6 +1018,31 @@ test("tool calls wear their own role and assistant text stays pure", async () =>
 	assert.equal(resolved.content, JSON.stringify({ command: "keiyaku status" }), "a call item resolves through history_read_item like any other");
 });
 
+test("a vacuous role×tool_name combination is a named error, not a silent empty page", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	appendText(session, "user", "anything");
+	for (const tool of ["history_list_items", "history_search_contents"] as const) {
+		const base = tool === "history_search_contents" ? { query: "keiyaku" } : {};
+		const dead = resultJson<{ error?: string; role?: string; tool_name?: string }>(
+			await call(captured, tool, { ...base, role: "assistant", tool_name: "bash" }, ctx),
+		);
+		assert.match(dead.error ?? "", /only set on "tool_call" and "tool"/, `${tool} names the rule`);
+		assert.equal(dead.role, "assistant", "the error echoes the offending role");
+		assert.equal(dead.tool_name, "bash", "the error echoes the offending tool_name");
+		for (const role of ["user", "system", "developer"] as const) {
+			const also = resultJson<{ error?: string }>(await call(captured, tool, { ...base, role, tool_name: "bash" }, ctx));
+			assert.match(also.error ?? "", /never carries one/, `${tool} rejects role ${role} + tool_name too`);
+		}
+		for (const legit of [{ role: "tool_call", tool_name: "bash" }, { role: "tool", tool_name: "bash" }, { tool_name: "bash" }, { role: "assistant" }]) {
+			const fine = resultJson<{ error?: string; items?: unknown[] }>(await call(captured, tool, { ...base, ...legit }, ctx));
+			assert.equal(fine.error, undefined, `${tool} accepts ${JSON.stringify(legit)}`);
+			assert.ok(Array.isArray(fine.items), `${tool} returns a page for ${JSON.stringify(legit)}`);
+		}
+	}
+});
+
 test("developer re-role names this extension's entries and leaves native compactions as system", async () => {
 	const session = manager();
 	const captured = makeExtension(session);

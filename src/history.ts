@@ -165,7 +165,20 @@ export function allItems(ctx: SessionReader) {
 	return historyFromSession(ctx).flatMap((window) => window.items);
 }
 
-	export function filteredItems(ctx: SessionReader, params: HistoryFilter): HistoryItem[] {
+/**
+ * A role×tool_name combination is vacuous — provably empty from the taxonomy alone, before
+ * any data is read — when tool_name is given alongside a role that never carries one. Only
+ * "tool_call" and "tool" items have a tool name. Returns the teaching error message, or
+ * undefined when the combination can match.
+ */
+export function vacuousRoleToolCombo(params: HistoryFilter): string | undefined {
+	if (typeof params.tool_name === "string" && typeof params.role === "string" && params.role !== "tool_call" && params.role !== "tool") {
+		return `tool_name is only set on "tool_call" and "tool" items; role "${params.role}" never carries one`;
+	}
+	return undefined;
+}
+
+export function filteredItems(ctx: SessionReader, params: HistoryFilter): HistoryItem[] {
 	let items = allItems(ctx);
 	if (typeof params.window_id === "string") items = items.filter((item) => item.windowId === params.window_id);
 	if (typeof params.role === "string") items = items.filter((item) => item.role === params.role);

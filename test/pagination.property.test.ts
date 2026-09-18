@@ -492,6 +492,12 @@ test("history_list_items enumerates every item across seeded session shapes", as
 		assert.equal(windows.length, plan.windowCount, `seed=${seed}: generated ${plan.windowCount} windows`);
 		for (const variant of plan.list) {
 			const params = historyParams(ctx, variant);
+			// A role×tool_name combination the taxonomy proves empty is a named error, not a page.
+			if (variant.toolName !== null && variant.role !== null && variant.role !== "tool_call" && variant.role !== "tool") {
+				const dead = resultJson<{ error?: string }>(await call(captured, "history_list_items", params, ctx));
+				assert.ok(dead.error?.includes("only set on"), `history_list_items seed=${seed} ${variant.label} role=${variant.role} tool_name=${variant.toolName}: vacuous combo must be a named error`);
+				continue;
+			}
 			const expected = storeHistoryItems(ctx, params).map((item) => item.itemId);
 			await walkPages({
 				captured, ctx, tool: "history_list_items", params,
@@ -512,6 +518,11 @@ test("history_search_contents enumerates every match across seeded session shape
 		materializeHistory(session, plan);
 		for (const variant of plan.search) {
 			const params = { ...historyParams(ctx, variant), query: variant.query ?? "" };
+			if (variant.toolName !== null && variant.role !== null && variant.role !== "tool_call" && variant.role !== "tool") {
+				const dead = resultJson<{ error?: string }>(await call(captured, "history_search_contents", params, ctx));
+				assert.ok(dead.error?.includes("only set on"), `history_search_contents seed=${seed} ${variant.label} role=${variant.role} tool_name=${variant.toolName}: vacuous combo must be a named error`);
+				continue;
+			}
 			const expected = storeHistoryItems(ctx, params).filter((item) => item.content.includes(params.query)).map((item) => item.itemId);
 			await walkPages({
 				captured, ctx, tool: "history_search_contents", params,
