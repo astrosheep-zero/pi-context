@@ -17,5 +17,5 @@ export function parseManifest(output: string): Manifest {
 			return value;
 		} catch { /* try an earlier JSON start */ }
 	}
-	throw new Error("worker did not return a valid JSON manifest");
+	throw new Error("dreamer did not return a valid JSON manifest");
 }
