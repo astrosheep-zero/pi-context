@@ -162,6 +162,21 @@ export function writeNote(ctx: ExtensionContext, vpath: string, body: string, op
 export type EditOperation = { oldText: string; newText: string };
 export type EditOptions = { scope?: Scope; origin?: Origin; stale?: boolean; replaceAll?: boolean };
 
+/** Dream harness mutation: metadata changes still use the store's atomic writer. */
+export function updateNoteMeta(ctx: ExtensionContext, vpath: string, scope: Scope, mutate: (meta: NoteMeta) => void): { meta: NoteMeta; body: string } {
+	assertVirtualPath(vpath);
+	const path = physicalPath(scope, vpath, ctx);
+	if (!existsSync(path)) throw new NoteError("not_found", `note not found: ${vpath}`);
+	const parsed = parseNote(readFileSync(path, "utf8"));
+	const meta = { ...parsed.meta, scope };
+	mutate(meta);
+	meta.updated_at = Date.now();
+	const serialized = serializeNote(meta, parsed.body);
+	assertSerializedSize(serialized);
+	atomicWrite(path, serialized);
+	return { meta, body: parsed.body };
+}
+
 /** Apply body-only edits against one snapshot, then optionally move via the scope/origin/stale setters. */
 export function editNote(ctx: ExtensionContext, vpath: string, edits: EditOperation[] | undefined, opts: EditOptions = {}): { meta: NoteMeta; applied: number; resolved_scope: Scope; diff: string } {
 	assertVirtualPath(vpath);

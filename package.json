@@ -20,15 +20,21 @@
   },
   "files": [
     "src",
+    "dist",
     "docs",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "playbook.md"
   ],
+  "bin": {
+    "dream": "dist/src/dream/cli.js"
+  },
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js",
-    "prepublishOnly": "npm run typecheck"
+    "prepublishOnly": "npm run typecheck",
+    "prepack": "npm run build"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
