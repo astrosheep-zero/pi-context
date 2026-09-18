@@ -1,4 +1,4 @@
-import type { TextContent } from "@earendil-works/pi-ai";
+import type { TextContent, ToolCall } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { SessionReader } from "./session-reader.js";
 import { RESET_V2 } from "./protocol.js";
@@ -45,7 +45,9 @@ const PI_CONTEXT_ENTRY_PREFIX = "pi-context/";
 function messageContent(message: AgentMessage): string {
 	switch (message.role) {
 		case "bashExecution":
-			return message.output;
+			// The command is as much the record as its output: without it the typed line is
+			// unsearchable. Mirrors the tool-call projection below.
+			return message.output ? `${message.command}\n${message.output}` : message.command;
 		case "branchSummary":
 		case "compactionSummary":
 			return message.summary;
@@ -54,11 +56,42 @@ function messageContent(message: AgentMessage): string {
 	}
 }
 
+/** A tool name's namespace is its prefix up to the first underscore (notes_read_file -> notes). */
+function namespaceOf(toolName: string): string | undefined {
+	const underscore = toolName.indexOf("_");
+	return underscore > 0 ? toolName.slice(0, underscore) : undefined;
+}
+
 function toolInfo(message: AgentMessage): Pick<HistoryItem, "toolName" | "toolNamespace"> {
 	if (message.role === "bashExecution") return { toolName: "bash", toolNamespace: undefined };
 	if (message.role !== "toolResult") return {};
-	const underscore = message.toolName.indexOf("_");
-	return { toolName: message.toolName, toolNamespace: underscore > 0 ? message.toolName.slice(0, underscore) : undefined };
+	return { toolName: message.toolName, toolNamespace: namespaceOf(message.toolName) };
+}
+
+/**
+ * An assistant turn's tool calls, projected as their own items: role "assistant" like the turn
+ * that authored them, tool_name set, content = the call's JSON arguments. What was invoked is
+ * then as searchable as what came back (role "tool"). Ids derive from the turn's entry id and
+ * stay opaque; history_read_item resolves them like any other item.
+ */
+function toolCallItems(windowId: string, entry: { id: string; timestamp?: string }, message: AgentMessage): HistoryItem[] {
+	if (message.role !== "assistant" || !Array.isArray(message.content)) return [];
+	const items: HistoryItem[] = [];
+	let callIndex = 0;
+	for (const part of message.content) {
+		if (typeof part !== "object" || part === null || (part as { type?: unknown }).type !== "toolCall") continue;
+		const call = part as ToolCall;
+		items.push({
+			windowId,
+			itemId: `${entry.id}#${callIndex++}`,
+			role: "assistant",
+			content: JSON.stringify(call.arguments),
+			createdAt: entry.timestamp,
+			toolName: call.name,
+			toolNamespace: namespaceOf(call.name),
+		});
+	}
+	return items;
 }
 
 /** The extension-owned window id baked onto a reset-v2 compaction entry, if present. */
@@ -104,6 +137,7 @@ export function historyFromSession(ctx: SessionReader): HistoryWindow[] {
 				createdAt: entry.timestamp,
 				...toolInfo(entry.message),
 			});
+			window.items.push(...toolCallItems(window.windowId, entry, entry.message));
 			continue;
 		}
 		if (entry.type === "custom_message") {

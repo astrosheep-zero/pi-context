@@ -966,6 +966,52 @@ test("history items carry honest truncated/total_chars and max_chars_per_item:1 
 	assert.ok(resolved.content.includes("NEEDLE"), "the address resolves to the query through history_read_item");
 });
 
+test("assistant tool calls project as their own searchable items", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	type AppendableMessage = Parameters<SessionManager["appendMessage"]>[0];
+	const turnId = session.appendMessage({
+		role: "assistant",
+		content: [
+			{ type: "text", text: "on it" },
+			{ type: "toolCall", id: "tc-1", name: "bash", arguments: { command: "keiyaku status" } },
+			{ type: "toolCall", id: "tc-2", name: "notes_read_file", arguments: { path: "x.md" } },
+		],
+		stopReason: "stop",
+		timestamp: Date.now(),
+	} as unknown as AppendableMessage);
+	const windowId = historyFromSession(ctx)[0]!.windowId;
+
+	const listed = resultJson<{ items: Array<{ item_id: string; role: string; tool_name: string | null; tool_namespace: string | null; truncated_content: string }> }>(
+		await call(captured, "history_list_items", { recent_first: false, max_chars_per_item: 50_000 }, ctx),
+	);
+	const turn = listed.items.find((item) => item.item_id === turnId)!;
+	assert.equal(turn.role, "assistant");
+	assert.equal(turn.tool_name, null, "the turn's text item carries no tool identity");
+	assert.equal(turn.truncated_content, "on it", "the turn item keeps only the visible text");
+	const call1 = listed.items.find((item) => item.item_id === `${turnId}#0`)!;
+	assert.equal(call1.role, "assistant", "a call item wears the authoring turn's role");
+	assert.equal(call1.tool_name, "bash");
+	assert.equal(call1.tool_namespace, null, "bash has no underscore namespace");
+	assert.equal(call1.truncated_content, JSON.stringify({ command: "keiyaku status" }), "a call item's content is the call's JSON arguments");
+	const call2 = listed.items.find((item) => item.item_id === `${turnId}#1`)!;
+	assert.equal(call2.tool_name, "notes_read_file");
+	assert.equal(call2.tool_namespace, "notes", "the namespace is the name's first-underscore prefix");
+
+	// The invocation is searchable exactly where a searcher reaches for it: assistant + tool_name.
+	const calls = resultJson<{ items: Array<{ item_id: string }> }>(
+		await call(captured, "history_search_contents", { query: "keiyaku status", role: "assistant", tool_name: "bash" }, ctx),
+	);
+	assert.deepEqual(calls.items.map((item) => item.item_id), [`${turnId}#0`], "the command line is found on the call item, not the turn");
+	const outputs = resultJson<{ items: Array<{ item_id: string }> }>(
+		await call(captured, "history_search_contents", { query: "keiyaku status", role: "tool" }, ctx),
+	);
+	assert.equal(outputs.items.length, 0, "nothing ran, so no output carries the command");
+	const resolved = resultRead(await call(captured, "history_read_item", { window_id: windowId, item_id: `${turnId}#0` }, ctx));
+	assert.equal(resolved.content, JSON.stringify({ command: "keiyaku status" }), "a call item resolves through history_read_item like any other");
+});
+
 test("developer re-role names this extension's entries and leaves native compactions as system", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
