@@ -205,7 +205,7 @@ type NoteOpPlan =
 	| { kind: "mark"; path: string; stale: boolean };
 
 type NoteListVariant = { label: string; pattern: string | null; orderBy: "name" | "created_at" | "updated_at"; order: "ascending" | "descending"; maxResults: number };
-type NoteSearchVariant = { label: string; query: string; prefix: string | null; maxFiles: number; maxMatchesPerFile: number; recentFileFirst: boolean };
+type NoteSearchVariant = { label: string; query: string; pattern: string | null; maxFiles: number; maxMatchesPerFile: number; recentFileFirst: boolean };
 
 type NotesPlan = { seed: number; ops: NoteOpPlan[]; list: NoteListVariant[]; search: NoteSearchVariant[] };
 
@@ -264,9 +264,6 @@ function notesPlan(seed: number): NotesPlan {
 	// tools must truncate it visibly rather than silently, while replay and reads stay un-capped.
 	if (seed % 3 === 0) ops.push({ kind: "entry", data: { op: "write", path: `legacy/${"p".repeat(40_000)}.md`, text: `${NEEDLE} legacy oversized path`, createdAt: clock, updatedAt: clock } });
 
-	const prefixes = [null, "", "notes", "deep/nested", "unicode-日本語", "absent"];
-	// Literal patterns like "notes" discriminate glob from prefix semantics: they must match
-	// only an exact path, never the directory's children.
 	const patterns = [null, "", "**", "*.md", "**.md", "notes/*", "notes", "deep/**", "deep/nested", "unicode-日本語/*", "checkpoint-*", "absent*", "f?.md"];
 	const list: NoteListVariant[] = [
 		{ label: "all-name-asc", pattern: null, orderBy: "name", order: "ascending", maxResults: 200 },
@@ -275,9 +272,9 @@ function notesPlan(seed: number): NotesPlan {
 		{ label: "updated-asc", pattern: rng.pick(patterns), orderBy: "updated_at", order: "ascending", maxResults: rng.pick([2, 4, 200]) },
 	];
 	const search: NoteSearchVariant[] = [
-		{ label: "needle-all", query: NEEDLE, prefix: null, maxFiles: 200, maxMatchesPerFile: 100, recentFileFirst: false },
-		{ label: "needle-paged", query: NEEDLE, prefix: null, maxFiles: rng.pick([1, 2, 3]), maxMatchesPerFile: rng.pick([1, 2, 5, 100]), recentFileFirst: rng.bool() },
-		{ label: "rare-query", query: rng.pick(["line 3", "z", "日本語", "absent-token", "…"]), prefix: rng.pick(prefixes), maxFiles: rng.pick([1, 5, 200]), maxMatchesPerFile: rng.pick([1, 100]), recentFileFirst: rng.bool() },
+		{ label: "needle-all", query: NEEDLE, pattern: null, maxFiles: 200, maxMatchesPerFile: 100, recentFileFirst: false },
+		{ label: "needle-paged", query: NEEDLE, pattern: null, maxFiles: rng.pick([1, 2, 3]), maxMatchesPerFile: rng.pick([1, 2, 5, 100]), recentFileFirst: rng.bool() },
+		{ label: "rare-query", query: rng.pick(["line 3", "z", "日本語", "absent-token", "…"]), pattern: rng.pick(patterns), maxFiles: rng.pick([1, 5, 200]), maxMatchesPerFile: rng.pick([1, 100]), recentFileFirst: rng.bool() },
 	];
 	return { seed, ops, list, search };
 }
@@ -336,7 +333,7 @@ function expectedNoteOrder(ctx: ExtensionContext, variant: NoteListVariant): Sto
 
 /** The documented matching/ordering of notes_search_contents, reimplemented over the store. */
 function expectedSearchOrder(ctx: ExtensionContext, variant: NoteSearchVariant): StoreNoteFile[] {
-	const files = storeNoteFiles(ctx, (path) => !variant.prefix || path.startsWith(variant.prefix));
+	const files = storeNoteFiles(ctx, (path) => !variant.pattern || globMatch(variant.pattern, path));
 	if (variant.recentFileFirst) files.sort((a, b) => b.createdAt - a.createdAt);
 	return files.filter((file) => file.text.split("\n").some((line) => line.includes(variant.query)));
 }
@@ -575,9 +572,9 @@ test("notes_search_contents enumerates every matching file across seeded mixes",
 		const ctx = context(session);
 		await materializeNotes(plan, captured, ctx, session);
 		for (const variant of plan.search) {
-			const params = { query: variant.query, path_prefix: variant.prefix, max_files: variant.maxFiles, max_matches_per_file: variant.maxMatchesPerFile, recent_file_first: variant.recentFileFirst };
+			const params = { query: variant.query, pattern: variant.pattern, max_files: variant.maxFiles, max_matches_per_file: variant.maxMatchesPerFile, recent_file_first: variant.recentFileFirst };
 			const expected = expectedSearchOrder(ctx, variant).map((file) => file.path);
-			const label = `notes_search_contents seed=${seed} ${variant.label} query=${JSON.stringify(variant.query)} prefix=${JSON.stringify(variant.prefix)} max_files=${variant.maxFiles} max_matches_per_file=${variant.maxMatchesPerFile} recent_file_first=${variant.recentFileFirst}`;
+			const label = `notes_search_contents seed=${seed} ${variant.label} query=${JSON.stringify(variant.query)} pattern=${JSON.stringify(variant.pattern)} max_files=${variant.maxFiles} max_matches_per_file=${variant.maxMatchesPerFile} recent_file_first=${variant.recentFileFirst}`;
 			const pages = await walkPages({
 				captured, ctx, tool: "notes_search_contents", params,
 				idsOf: (page, cursor) => notePathIdentity(expected, cursor, label, page, "files"),

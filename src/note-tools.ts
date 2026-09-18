@@ -2,7 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { output, outputRaw, page, middleTruncate, prefixFit, earliestMatchOffsetChars, readCharacterWindow, characterWindowHeader, withinTextBudget } from "./tool-output.js";
 import { nullableString, positiveInteger, cursor, searchQuery, searchQueries } from "./tool-schema.js";
-import { notesFromSession, assertVirtualPath, assertVirtualPrefix, assertGlobPattern, globToRegExp, localIso, type NoteOperation } from "./notes.js";
+import { notesFromSession, assertVirtualPath, assertGlobPattern, globToRegExp, localIso, type NoteOperation } from "./notes.js";
 import { NOTE_TYPE, MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "./protocol.js";
 
 export function registerNoteTools(pi: ExtensionAPI) {
@@ -73,12 +73,13 @@ export function registerNoteTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_search_contents",
 		label: "Notes search",
-		description: "Case-sensitive literal substring search over note lines; query is one string or several (OR), each matched line appears once. No semantic search. Each file entry carries matches_total, its full match count before capping: matches_total minus matches.length is how many were dropped. Each match carries line and offset_chars (the file-absolute code-point offset of the earliest match): notes_read_file at offset_chars shows the query. An over-budget matched line comes back as a prefix with truncated and total_chars; read the rest at the same offset_chars.",
-		parameters: Type.Object({ max_matches_per_file: positiveInteger(), cursor: cursor(), query: searchQuery(), recent_file_first: Type.Optional(Type.Boolean()), max_files: positiveInteger(), path_prefix: nullableString() }, { additionalProperties: false }),
+		description: "Case-sensitive literal substring search over note lines; query is one string or several (OR), each matched line appears once. No semantic search. Optionally filtered by a glob pattern (* within a path segment, ** across segments). Each file entry carries matches_total, its full match count before capping: matches_total minus matches.length is how many were dropped. Each match carries line and offset_chars (the file-absolute code-point offset of the earliest match): notes_read_file at offset_chars shows the query. An over-budget matched line comes back as a prefix with truncated and total_chars; read the rest at the same offset_chars.",
+		parameters: Type.Object({ max_matches_per_file: positiveInteger(), cursor: cursor(), query: searchQuery(), recent_file_first: Type.Optional(Type.Boolean()), max_files: positiveInteger(), pattern: nullableString() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const queries = searchQueries(params.query);
-			const prefix = assertVirtualPrefix(params.path_prefix);
-			let files = [...notesFromSession(ctx)].filter(([path]) => !prefix || path.startsWith(prefix));
+			const pattern = assertGlobPattern(params.pattern);
+			const matcher = pattern ? globToRegExp(pattern) : undefined;
+			let files = [...notesFromSession(ctx)].filter(([path]) => !matcher || matcher.test(path));
 			if (params.recent_file_first) files.sort((a, b) => b[1].createdAt - a[1].createdAt);
 			const maxPerFile = params.max_matches_per_file ?? Number.POSITIVE_INFINITY;
 			const result: Array<{ path: string; created_at: string; updated_at: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number; offset_chars: number }>; path_truncated?: boolean }> = files

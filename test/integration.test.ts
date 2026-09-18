@@ -2097,3 +2097,16 @@ test("argument footguns die loudly and tool-run metadata surfaces (A1/A2/A3/B4/B
 	const fine = byContent("fine");
 	assert.equal("tool_error" in fine, false, "a clean tool result carries no error key");
 });
+
+test("notes_search_contents scopes by glob pattern; a non-matching pattern is an empty page, not an error", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	await call(captured, "notes_write_file", { path: "deep/nested/a.md", text: "needle here" }, ctx);
+	await call(captured, "notes_write_file", { path: "top.md", text: "needle there" }, ctx);
+	const scoped = resultJson<{ files: Array<{ path: string }> }>(await call(captured, "notes_search_contents", { query: "needle", pattern: "deep/**" }, ctx));
+	assert.deepEqual(scoped.files.map((file) => file.path), ["deep/nested/a.md"], "a glob scopes the search to the subtree");
+	const none = resultJson<{ files: unknown[]; error?: string }>(await call(captured, "notes_search_contents", { query: "needle", pattern: "absent/**" }, ctx));
+	assert.equal(none.error, undefined, "a non-matching pattern is not an error");
+	assert.deepEqual(none.files, [], "a non-matching pattern is an empty page");
+});

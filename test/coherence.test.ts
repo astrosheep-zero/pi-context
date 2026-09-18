@@ -217,7 +217,7 @@ test("coherence: following the returned cursors reconstructs the original text e
 	// --- notes_search_contents: an over-budget matched line is named, then read back with cursors ---
 	const hugeCjkLine = "历".repeat(40_000);
 	const searched = resultJson<{ files: Array<{ path: string; matches_total: number; matches: Match[] }> }>(
-		await call(captured, "notes_search_contents", { query: "历", path_prefix: "huge-cjk.md" }, ctx),
+		await call(captured, "notes_search_contents", { query: "历", pattern: "huge-cjk.md" }, ctx),
 	);
 	const matchedFile = searched.files[0];
 	const matched = matchedFile?.matches[0];
@@ -280,7 +280,7 @@ test("coherence: following the returned cursors reconstructs the original text e
 	const manyLines = Array.from({ length: 8_000 }, (_, index) => `needle ${index}`);
 	await call(captured, "notes_write_file", { path: "many.md", text: manyLines.join("\n") }, ctx);
 	const many = resultJson<{ files: Array<{ path: string; matches_total: number; matches: Match[] }> }>(
-		await call(captured, "notes_search_contents", { query: "needle", path_prefix: "many.md" }, ctx),
+		await call(captured, "notes_search_contents", { query: "needle", pattern: "many.md" }, ctx),
 	);
 	const manyEntry = many.files[0];
 	report.push(`brain-04: matches_total=${String(manyEntry?.matches_total)} returned=${String(manyEntry?.matches.length)}, next_cursor=${String((many as { next_cursor?: unknown }).next_cursor)}`);
@@ -295,7 +295,7 @@ test("coherence: following the returned cursors reconstructs the original text e
 	// matches and cutting the kept line must still leave the whole response inside the wire budget.
 	const manyHugeLines = Array.from({ length: 4 }, (_, index) => `needle ${index} ${"w".repeat(45_000)}`);
 	await call(captured, "notes_write_file", { path: "huge-many.md", text: manyHugeLines.join("\n") }, ctx);
-	const hugeManyResult = await call(captured, "notes_search_contents", { query: "needle", path_prefix: "huge-many.md" }, ctx);
+	const hugeManyResult = await call(captured, "notes_search_contents", { query: "needle", pattern: "huge-many.md" }, ctx);
 	assertWithinBudget(hugeManyResult, "notes_search_contents huge-many");
 	const hugeEntry = resultJson<{ files: Array<{ matches_total: number; matches: Match[] }> }>(hugeManyResult).files[0];
 	report.push(`huge-many: matches_total=${String(hugeEntry?.matches_total)} returned=${String(hugeEntry?.matches.length)} truncated=${String(hugeEntry?.matches[0]?.truncated)}`);
@@ -314,7 +314,7 @@ test("coherence: following the returned cursors reconstructs the original text e
 	await call(captured, "notes_write_file", { path: "address.md", text: `${addressLine1}\nsecond\n${addressLine3}\n${addressLine4}` }, ctx);
 	const expectedAddress = codePoints(addressLine1) + 1 + codePoints("second") + 1 + 20;
 	const addressHit = resultJson<{ files: Array<{ path: string; matches: Match[] }> }>(
-		await call(captured, "notes_search_contents", { query: "needle-address", path_prefix: "address.md" }, ctx),
+		await call(captured, "notes_search_contents", { query: "needle-address", pattern: "address.md" }, ctx),
 	).files[0]?.matches.find((match) => match.line === 3);
 	report.push(`notes_search_contents address: line=${String(addressHit?.line)} offset_chars=${String(addressHit?.offset_chars)} expected=${expectedAddress}`);
 	const addressOffset = addressHit?.offset_chars;
@@ -328,7 +328,7 @@ test("coherence: following the returned cursors reconstructs the original text e
 	// Multi-query OR: a line's address is the earliest occurrence of any query inside that line.
 	const line4Base = expectedAddress - 20 + codePoints(addressLine3) + 1;
 	const orLine4 = resultJson<{ files: Array<{ matches: Match[] }> }>(
-		await call(captured, "notes_search_contents", { query: ["needle-address", "zeta"], path_prefix: "address.md" }, ctx),
+		await call(captured, "notes_search_contents", { query: ["needle-address", "zeta"], pattern: "address.md" }, ctx),
 	).files[0]?.matches.find((match) => match.line === 4);
 	report.push(`notes_search_contents OR address: offset_chars=${String(orLine4?.offset_chars)} expected=${line4Base}`);
 	if (orLine4?.offset_chars !== line4Base) failures.push(`notes_search_contents OR offset_chars=${String(orLine4?.offset_chars)}, expected ${line4Base} (earliest of any query)`);

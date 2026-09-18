@@ -20,11 +20,6 @@ export function assertVirtualPath(value: unknown): string {
 	return value;
 }
 
-export function assertVirtualPrefix(value: unknown): string | undefined {
-	if (value === undefined || value === null || value === "") return undefined;
-	return assertVirtualPath(value);
-}
-
 /**
  * Minimal glob over virtual note paths: `*` matches any run within a segment (never
  * `/`), `**` matches any run across segments (a leading double-star followed by a
@@ -112,4 +107,3 @@ export function localIso(epochMs: number): string {
 	const wallClock = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}.${String(date.getMilliseconds()).padStart(3, "0")}`;
 	return `${wallClock}${offset}`;
 }
-
