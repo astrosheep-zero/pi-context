@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -17,6 +17,9 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import piContext, { historyFromSession, internal, notesFromSession } from "../src/index.js";
+import { localIso } from "../src/notes.js";
+import { physicalPath } from "../src/memory/paths.js";
+import { listNotes } from "../src/memory/store.js";
 import { middleTruncate, page, TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
 import { NOTE_TYPE, MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
 
@@ -26,6 +29,10 @@ import { NOTE_TYPE, MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
 const DEFAULT_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-context-agent-"));
 const DEFAULT_CWD = mkdtempSync(join(tmpdir(), "pi-context-cwd-"));
 process.env.PI_CODING_AGENT_DIR = DEFAULT_AGENT_DIR;
+// Notes are real files now: every test process points the store at a throwaway root so no
+// test can read or write the user's ~/.agents/notes/pi.
+const DEFAULT_NOTES_ROOT = mkdtempSync(join(tmpdir(), "pi-context-notes-"));
+process.env.PI_NOTES_HOME = DEFAULT_NOTES_ROOT;
 
 type Notice = { message: string; type?: "info" | "warning" | "error" };
 
@@ -62,6 +69,7 @@ function settingsFixture(options: {
 
 test.beforeEach(() => {
 	process.env.PI_CODING_AGENT_DIR = DEFAULT_AGENT_DIR;
+	process.env.PI_NOTES_HOME = mkdtempSync(join(tmpdir(), "pi-context-notes-"));
 });
 
 type EventHandler = (event: never, ctx: ExtensionContext) => unknown;
@@ -192,7 +200,7 @@ export type ReadWindow = {
 };
 
 /**
- * Decode a raw read (notes_read_file / history_read_item): a one-line bracketed header, then
+ * Decode a raw read (notes_read / history_read_item): a one-line bracketed header, then
  * the payload verbatim (which may itself contain newlines), so split on the first newline only.
  */
 export function resultRead(result: AgentToolResult<unknown>): ReadWindow {
@@ -255,7 +263,7 @@ async function runBeforeCompact(
 	return (await handler(event as never, ctx)) as CompactionHookResult;
 }
 
-function runHandlers(captured: Captured, name: string, event: unknown, ctx: ExtensionContext): void {
+export function runHandlers(captured: Captured, name: string, event: unknown, ctx: ExtensionContext): void {
 	const isIdle = ctx.isIdle;
 	if (name === "agent_settled") ctx.isIdle = () => true;
 	try {
@@ -313,181 +321,132 @@ export function appendText(sessionManager: SessionManager, role: "user" | "assis
 	return sessionManager.appendMessage(base as unknown as AppendableMessage);
 }
 
-test("schemas cover the nine History/Notes actions plus reset controls", () => {
+test("schemas cover the History/Notes actions plus reset controls", () => {
 	const captured = makeExtension(manager());
 	for (const name of [
 		"history_list_windows", "history_list_items", "history_read_item", "history_search_contents",
-		"notes_list_files", "notes_read_file", "notes_search_contents", "notes_append_to_file", "notes_write_file",
+		"notes_list", "notes_read", "notes_search", "notes_edit", "notes_write",
 		"new_context", "get_context_remaining",
 	]) {
 		const tool = captured.tools.get(name);
 		assert.equal(objectSchema(tool)?.type, "object", name);
 	}
 	assert.equal(objectSchema(captured.tools.get("history_read_item"))?.required?.includes("item_id"), true);
-	// text is optional so mark_stale-only calls reach the handler; each write/append tool accepts the stale flag.
-	for (const name of ["notes_write_file", "notes_append_to_file"]) {
-		const schema = captured.tools.get(name)?.parameters as { properties?: Record<string, unknown>; required?: string[] } | undefined;
-		assert.ok(schema?.properties?.text, `${name} exposes text`);
-		assert.ok(schema?.properties?.mark_stale, `${name} exposes mark_stale`);
-		assert.equal(schema?.required?.includes("text"), false, `${name} makes text optional for mark-only calls`);
-	}
+	// The write surface requires its body; the edit surface requires its anchors.
+	const writeSchema = captured.tools.get("notes_write")?.parameters as { properties?: Record<string, unknown>; required?: string[] } | undefined;
+	assert.ok(writeSchema?.properties?.content, "notes_write exposes content");
+	assert.ok(writeSchema?.properties?.path, "notes_write exposes path");
+	assert.deepEqual([...(writeSchema?.required ?? [])].sort(), ["content", "path"], "notes_write requires path and content");
+	const editSchema = captured.tools.get("notes_edit")?.parameters as { properties?: Record<string, unknown>; required?: string[] } | undefined;
+	assert.ok(editSchema?.properties?.edits, "notes_edit exposes edits");
+	assert.deepEqual([...(editSchema?.required ?? [])].sort(), ["path"], "notes_edit requires only path; edits are optional for metadata-only updates");
 	// The history ordering switch is documented as newest-first by default.
 	for (const name of ["history_list_windows", "history_list_items", "history_search_contents"]) {
 		const schema = captured.tools.get(name)?.parameters as { properties?: Record<string, { description?: string }> } | undefined;
 		assert.equal(schema?.properties?.recent_first?.description?.includes("Defaults to true."), true, `${name} documents the recent_first default`);
 	}
-	// The notes list surface is usage-shaped: its default order in one sentence, both axes named,
-	// and none of the ordering algebra left in the prose.
-	const listDescription = captured.tools.get("notes_list_files")?.description ?? "";
-	for (const axis of ["name", "created_at", "updated_at"]) assert.ok(listDescription.includes(axis), `notes_list_files names the ${axis} axis`);
-	assert.match(listDescription, /most recently updated first/, "notes_list_files states its default order in one sentence");
-	assert.equal(/natural direction|Ties break|reshuffle between pages/.test(listDescription), false, "notes_list_files prose carries no ordering algebra");
+	// The notes list surface is usage-shaped: its default order in one sentence, no ordering algebra.
+	const listDescription = captured.tools.get("notes_list")?.description ?? "";
+	assert.match(listDescription, /most recently updated first/, "notes_list states its default order in one sentence");
+	assert.equal(/natural direction|Ties break|reshuffle between pages/.test(listDescription), false, "notes_list prose carries no ordering algebra");
 
 	// Both read tools are the same character window: identical params, one offset sugar, no line surface.
-	for (const name of ["notes_read_file", "history_read_item"]) {
+	for (const name of ["notes_read", "history_read_item"]) {
 		const schema = captured.tools.get(name)?.parameters as { properties?: Record<string, { minimum?: number; maximum?: number }> } | undefined;
 		assert.ok(schema?.properties?.offset_chars, `${name} exposes offset_chars`);
 		assert.ok(schema?.properties?.limit_chars, `${name} exposes limit_chars`);
 		assert.equal(schema?.properties?.offset_chars?.minimum, undefined, `${name} accepts negative offset_chars`);
 		assert.equal(schema?.properties?.limit_chars?.maximum, 50000, `${name} caps limit_chars at 50000`);
 	}
-	const noteReadSchema = captured.tools.get("notes_read_file")?.parameters as { properties?: Record<string, unknown> } | undefined;
-	assert.deepEqual(Object.keys(noteReadSchema?.properties ?? {}).sort(), ["limit_chars", "offset_chars", "path"], "notes_read_file exposes exactly the character-window params");
-	assert.equal(/start_|stop_line|total_lines/.test(captured.tools.get("notes_read_file")?.description ?? ""), false, "notes_read_file prose carries no line surface");
+	const noteReadSchema = captured.tools.get("notes_read")?.parameters as { properties?: Record<string, unknown> } | undefined;
+	assert.deepEqual(Object.keys(noteReadSchema?.properties ?? {}).sort(), ["limit_chars", "offset_chars", "path", "scope"], "notes_read exposes exactly the character-window params plus scope");
+	assert.equal(/start_|stop_line|total_lines/.test(captured.tools.get("notes_read")?.description ?? ""), false, "notes_read prose carries no line surface");
 });
 
-test("notes_list_files defaults to freshest-first and keeps per-axis natural directions", async () => {
+test("notes_list is most-recently-updated first across merged scopes", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
-	// Persisted ops carry exact timestamps, so the total order is pinned without wall-clock races.
+	const put = (scope: "session" | "project" | "global", path: string, updated: number) => {
+		const file = physicalPath(scope, path, ctx);
+		mkdirSync(dirname(file), { recursive: true });
+		writeFileSync(file, `---\nscope: ${scope}\norigin: self\nstatus: active\nstale: false\ncreated_at: ${localIso(updated - 1000)}\nupdated_at: ${localIso(updated)}\nlast_accessed: ${localIso(updated)}\naccess_count: 0\n---\n\nbody`);
+	};
 	const base = 1_700_000_000_000;
-	for (const entry of [
-		{ path: "b.md", createdAt: base + 1, updatedAt: base + 10 },
-		{ path: "a.md", createdAt: base + 2, updatedAt: base + 10 },
-		{ path: "c.md", createdAt: base + 3, updatedAt: base + 5 },
-		{ path: "d.md", createdAt: base + 3, updatedAt: base + 5 },
-		{ path: "e.md", createdAt: base + 4, updatedAt: base + 10 },
-	]) {
-		session.appendCustomEntry(NOTE_TYPE, { op: "write", path: entry.path, text: entry.path, createdAt: entry.createdAt, updatedAt: entry.updatedAt });
-	}
-	const paths = async (params: Record<string, unknown>) =>
-		resultJson<{ files: Array<{ path: string }> }>(await call(captured, "notes_list_files", params, ctx)).files.map((file) => file.path);
-	// A bare call is freshest-first: updated_at descending, then created_at descending, then path descending.
-	assert.deepEqual(await paths({}), ["e.md", "a.md", "b.md", "d.md", "c.md"], "a bare call is updated_at descending with the (created_at, path) tiebreaks");
-	// An explicit axis without an explicit direction takes that axis's natural direction.
-	assert.deepEqual(await paths({ file_order_by: "name" }), ["a.md", "b.md", "c.md", "d.md", "e.md"], "name is naturally ascending");
-	assert.deepEqual(await paths({ file_order_by: "created_at" }), ["e.md", "d.md", "c.md", "a.md", "b.md"], "created_at is naturally descending");
-	// file_order alone keeps the default axis and overrides its natural direction.
-	assert.deepEqual(await paths({ file_order: "ascending" }), ["c.md", "d.md", "b.md", "a.md", "e.md"], "an explicit ascending flips the updated_at default");
-	// An explicit file_order always beats the axis's natural direction.
-	assert.deepEqual(await paths({ file_order_by: "name", file_order: "descending" }), ["e.md", "d.md", "c.md", "b.md", "a.md"], "an explicit descending beats the name axis's natural ascending");
-	assert.deepEqual(await paths({ file_order_by: "updated_at", file_order: "ascending" }), ["c.md", "d.md", "b.md", "a.md", "e.md"], "an explicit ascending beats the updated_at axis's natural descending");
+	put("session", "b.md", base + 10);
+	put("session", "a.md", base + 10);
+	put("project", "c.md", base + 5);
+	put("global", "e.md", base + 20);
+	const files = async (params: Record<string, unknown>) =>
+		resultJson<{ files: Array<{ path: string; scope: string }> }>(await call(captured, "notes_list", params, ctx)).files;
+	assert.deepEqual((await files({})).map((file) => file.path), ["e.md", "a.md", "b.md", "c.md"], "updated_at descending with path ascending as the tiebreak");
+	// A same-path pair in two scopes keeps both rows; equal timestamps tie-break by scope name.
+	put("global", "a.md", base + 10);
+	assert.deepEqual((await files({})).filter((file) => file.path === "a.md").map((file) => file.scope), ["global", "session"], "equal timestamps tie-break by scope name");
+	assert.deepEqual((await files({ scope: "session" })).map((file) => file.path), ["a.md", "b.md"], "a scope filter narrows the set");
 });
 
-test("persisted note operations restore, are Unicode byte-limited, and use safe virtual paths", async () => {
-	const original = manager(true);
+test("notes are real files that persist across sessions and round-trip Unicode", async () => {
+	const original = manager();
 	const captured = makeExtension(original);
 	const ctx = context(original);
-	await call(captured, "notes_write_file", { path: "checkpoint/进度.txt", text: "第一行\nneedle Café" }, ctx);
-	await call(captured, "notes_append_to_file", { path: "checkpoint/进度.txt", text: "\n最后一行" }, ctx);
-	assert.equal(notesFromSession(ctx).get("checkpoint/进度.txt")?.text, "第一行\nneedle Café\n最后一行");
-	// SessionManager intentionally delays writing a brand-new session until its first assistant entry.
-	appendText(original, "assistant", "persist the append-only session");
+	await call(captured, "notes_write", { path: "checkpoint/进度.md", content: "第一行\nneedle Café", scope: "global" }, ctx);
 
-	const file = original.getSessionFile();
-	assert.ok(file);
-	const restored = SessionManager.create("/private/tmp/pi-context-test", mkdtempSync(join(tmpdir(), "pi-context-restore-")));
-	restored.setSessionFile(file);
+	// A brand-new session over the same physical root sees the global note: nothing is replayed
+	// from session entries, the file itself is the durable artifact.
+	const restored = manager();
+	const restoredCaptured = makeExtension(restored);
 	const restoredCtx = context(restored);
-	assert.equal(notesFromSession(restoredCtx).get("checkpoint/进度.txt")?.text, "第一行\nneedle Café\n最后一行");
-	const noteMeta = notesFromSession(ctx).get("checkpoint/进度.txt");
-	assert.ok(noteMeta);
-	const checkpointText = "第一行\nneedle Café\n最后一行";
-	const rawRead = await call(captured, "notes_read_file", { path: "checkpoint/进度.txt", offset_chars: -4 }, ctx);
+	const rawRead = await call(restoredCaptured, "notes_read", { path: "checkpoint/进度.md", scope: "global", offset_chars: -4 }, restoredCtx);
 	const read = resultRead(rawRead);
-	assert.equal(read.details.path, "checkpoint/进度.txt");
-	assert.equal(read.offset_chars, Array.from(checkpointText).length - 4, "a negative offset echoes the resolved absolute offset");
-	assert.equal(read.content, "最后一行", "a negative offset reads the tail in one call");
-	assert.equal(read.total_chars, Array.from(checkpointText).length);
-	assert.equal(read.next_offset_chars, null, "a tail read reaches the end");
-	assertLocalIso(read.details.created_at, noteMeta.createdAt, "notes_read_file created_at");
-	assertLocalIso(read.details.updated_at, noteMeta.updatedAt, "notes_read_file updated_at");
-	const searched = resultJson<{ files: Array<{ path: string; matches: Array<{ line: number }>; created_at: unknown; updated_at: unknown }> }>(
-		await call(captured, "notes_search_contents", { query: "Café" }, ctx),
+	assert.equal(read.details.path, "checkpoint/进度.md");
+	assert.equal(read.content, "Café", "a negative offset reads the body tail in one call");
+	assert.equal(read.details.scope, "global");
+	const searched = resultJson<{ files: Array<{ path: string; created_at: unknown; updated_at: unknown; matches: Array<{ line: number }> }> }>(
+		await call(restoredCaptured, "notes_search", { query: "Café", scope: "global" }, restoredCtx),
 	);
 	assert.equal(searched.files[0]?.matches[0]?.line, 2);
-	// Every notes tool reports the persisted note metadata with the same local-time formatting.
-	assertLocalIso(searched.files[0]?.created_at, noteMeta.createdAt, "notes_search_contents created_at");
-	assertLocalIso(searched.files[0]?.updated_at, noteMeta.updatedAt, "notes_search_contents updated_at");
 	const listedFiles = resultJson<{ files: Array<{ path: string; created_at: unknown; updated_at: unknown }> }>(
-		await call(captured, "notes_list_files", { pattern: "checkpoint/**" }, ctx),
+		await call(restoredCaptured, "notes_list", { pattern: "checkpoint/**", scope: "global" }, restoredCtx),
 	);
 	assert.equal(listedFiles.files.length, 1, "glob ** crosses into the checkpoint directory");
-	assert.equal(listedFiles.files[0]?.path, "checkpoint/进度.txt");
-	assertLocalIso(listedFiles.files[0]?.created_at, noteMeta.createdAt, "notes_list_files created_at");
-	assertLocalIso(listedFiles.files[0]?.updated_at, noteMeta.updatedAt, "notes_list_files updated_at");
+	assert.equal(listedFiles.files[0]?.path, "checkpoint/进度.md");
 	// A single-segment * never crosses `/`, so a nested-only store matches nothing at the root.
 	const rootOnly = resultJson<{ files: Array<{ path: string }> }>(
-		await call(captured, "notes_list_files", { pattern: "*" }, ctx),
+		await call(restoredCaptured, "notes_list", { pattern: "*", scope: "global" }, restoredCtx),
 	);
 	assert.equal(rootOnly.files.length, 0, "glob * stays within one segment");
 	assert.equal(searched.files[0]?.created_at, listedFiles.files[0]?.created_at, "note tools agree on the timestamp format");
 	assert.equal(searched.files[0]?.updated_at, listedFiles.files[0]?.updated_at);
-	await assert.rejects(() => call(captured, "notes_write_file", { path: "../escape", text: "x" }, ctx), /unsupported component/);
-	const tooLarge = resultJson<{ error: string }>(
-		await call(captured, "notes_write_file", { path: "large", text: "é".repeat(500_001) }, ctx),
-	);
-	assert.match(tooLarge.error, /1000000/);
+	await assert.rejects(() => call(captured, "notes_write", { path: "../escape", content: "x" }, ctx), /unsupported component/);
 });
 
-test("stale lifecycle: mark-only, closure, revive, and validation errors", async () => {
+test("stale lifecycle: writes and metadata-only edits close and revive a note", async () => {
 	const sm = manager();
 	const captured = makeExtension(sm);
 	const ctx = context(sm);
 
-	await call(captured, "notes_write_file", { path: "journal.md", text: "log line" }, ctx);
-	assert.equal(notesFromSession(ctx).get("journal.md")?.stale, false, "a fresh write starts not stale");
+	await call(captured, "notes_write", { path: "journal.md", content: "log line" }, ctx);
 
-	// mark-only: content unchanged, flag set
-	const markOnlyResult = await call(captured, "notes_write_file", { path: "journal.md", mark_stale: true }, ctx);
-	const markOnly = resultJson<{ stale: boolean }>(markOnlyResult);
-	assert.equal(markOnly.stale, true);
-	assert.equal(markOnlyResult.details, undefined, "a JSON tool result carries no details metadata");
-	assert.equal(notesFromSession(ctx).get("journal.md")?.stale, true);
-	assert.equal(notesFromSession(ctx).get("journal.md")?.text, "log line", "mark-only leaves content unchanged");
+	// metadata-only: content unchanged, flag set, applied 0
+	const markOnly = resultJson<{ applied: number; meta: { stale: boolean } }>(await call(captured, "notes_edit", { path: "journal.md", stale: true }, ctx));
+	assert.equal(markOnly.applied, 0);
+	assert.equal(markOnly.meta.stale, true);
+	assert.equal(resultRead(await call(captured, "notes_read", { path: "journal.md" }, ctx)).content.endsWith("log line"), true, "mark-only leaves content unchanged");
 
-	// explicit revive without content
-	await call(captured, "notes_write_file", { path: "journal.md", mark_stale: false }, ctx);
-	assert.equal(notesFromSession(ctx).get("journal.md")?.stale, false, "mark_stale:false revives");
-	assert.equal(notesFromSession(ctx).get("journal.md")?.text, "log line", "explicit revive leaves content unchanged");
+	// explicit revive
+	const revived = resultJson<{ meta: { stale: boolean } }>(await call(captured, "notes_edit", { path: "journal.md", stale: false }, ctx));
+	assert.equal(revived.meta.stale, false, "stale:false revives");
 
-	// write+mark closure: replace content and flag stale in one call
-	await call(captured, "notes_write_file", { path: "journal.md", text: "final", mark_stale: true }, ctx);
-	assert.equal(notesFromSession(ctx).get("journal.md")?.text, "final");
-	assert.equal(notesFromSession(ctx).get("journal.md")?.stale, true);
+	// write+stale closure then plain write revival
+	await call(captured, "notes_write", { path: "journal.md", content: "final", stale: true }, ctx);
+	assert.equal(listNotes(ctx, { scope: "session" })[0]?.meta.stale, true);
+	await call(captured, "notes_write", { path: "journal.md", content: "reopened" }, ctx);
+	assert.equal(listNotes(ctx, { scope: "session" })[0]?.meta.stale, false, "writing without stale revives");
 
-	// revive on plain write
-	await call(captured, "notes_write_file", { path: "journal.md", text: "reopened" }, ctx);
-	assert.equal(notesFromSession(ctx).get("journal.md")?.stale, false, "writing without mark_stale revives");
-
-	// append+mark closure, then append mark-only
-	await call(captured, "notes_append_to_file", { path: "journal.md", text: "\nclosed", mark_stale: true }, ctx);
-	const closed = notesFromSession(ctx).get("journal.md");
-	assert.equal(closed?.text, "reopened\nclosed");
-	assert.equal(closed?.stale, true);
-	await call(captured, "notes_append_to_file", { path: "journal.md", mark_stale: false }, ctx);
-	assert.equal(notesFromSession(ctx).get("journal.md")?.stale, false, "append mark_stale:false revives");
-
-	// neither text nor mark_stale is an error on both tools
-	for (const name of ["notes_write_file", "notes_append_to_file"]) {
-		const neither = resultJson<{ error?: string }>(await call(captured, name, { path: "journal.md" }, ctx));
-		assert.equal(typeof neither.error, "string", `${name} rejects a call with neither text nor mark_stale`);
-		// marking a nonexistent path is an error and persists nothing
-		const missing = resultJson<{ error?: string }>(await call(captured, name, { path: "missing.md", mark_stale: true }, ctx));
-		assert.equal(typeof missing.error, "string", `${name} rejects marking a nonexistent path`);
-	}
-	assert.equal(notesFromSession(ctx).has("missing.md"), false, "failed marks leave no phantom note");
+	// metadata-only on a missing path is the typed not-found arm
+	const missing = resultJson<{ error?: string }>(await call(captured, "notes_edit", { path: "missing.md", stale: true }, ctx));
+	assert.equal(missing.error, "note not found");
 });
 
 test("the boot notes index excludes stale notes while list, read, and search still see them", async () => {
@@ -495,9 +454,8 @@ test("the boot notes index excludes stale notes while list, read, and search sti
 	const captured = makeExtension(sm);
 	const ctx = context(sm);
 
-	await call(captured, "notes_write_file", { path: "fresh.md", text: "fresh content" }, ctx);
-	await call(captured, "notes_write_file", { path: "old.md", text: "stale content" }, ctx);
-	await call(captured, "notes_write_file", { path: "old.md", mark_stale: true }, ctx);
+	await call(captured, "notes_write", { path: "fresh.md", content: "fresh content" }, ctx);
+	await call(captured, "notes_write", { path: "old.md", content: "stale content", stale: true }, ctx);
 
 	runHandlers(captured, "session_start", {}, ctx);
 	const boot = captured.sent[0];
@@ -506,14 +464,14 @@ test("the boot notes index excludes stale notes while list, read, and search sti
 	assert.equal(text.includes("old.md"), false, "the stale note leaves the boot index");
 	assert.equal(text.includes("stale content"), false, "the stale preview is not rendered");
 
-	const listed = resultJson<{ files: Array<{ path: string; stale: boolean }> }>(await call(captured, "notes_list_files", {}, ctx));
+	const listed = resultJson<{ files: Array<{ path: string; stale: boolean }> }>(await call(captured, "notes_list", {}, ctx));
 	assert.equal(listed.files.find((file) => file.path === "old.md")?.stale, true, "list carries the stale flag");
 	assert.equal(listed.files.find((file) => file.path === "fresh.md")?.stale, false);
 
-	// stale notes are still readable and searchable, unannotated
-	const read = resultRead(await call(captured, "notes_read_file", { path: "old.md" }, ctx));
-	assert.equal(read.content, "stale content");
-	const searched = resultJson<{ files: Array<{ path: string }> }>(await call(captured, "notes_search_contents", { query: "stale content" }, ctx));
+	// stale notes are still readable and searchable
+	const read = resultRead(await call(captured, "notes_read", { path: "old.md" }, ctx));
+	assert.ok(read.content.endsWith("stale content"));
+	const searched = resultJson<{ files: Array<{ path: string }> }>(await call(captured, "notes_search", { query: "stale content" }, ctx));
 	assert.equal(searched.files[0]?.path, "old.md");
 });
 
@@ -522,7 +480,7 @@ test("the boot notes index omits itself when every note is stale", async () => {
 	const captured = makeExtension(sm);
 	const ctx = context(sm);
 
-	await call(captured, "notes_write_file", { path: "done.md", text: "finished", mark_stale: true }, ctx);
+	await call(captured, "notes_write", { path: "done.md", content: "finished", stale: true }, ctx);
 	runHandlers(captured, "session_start", {}, ctx);
 	const text = typeof captured.sent[0]?.message.content === "string" ? captured.sent[0].message.content : "";
 	assert.equal(text.includes("done.md"), false, "no stale note is indexed");
@@ -530,23 +488,6 @@ test("the boot notes index omits itself when every note is stale", async () => {
 	assert.ok(text.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG), "the rest of the boot block still renders");
 });
 
-test("JSONL reload preserves the stale flag", async () => {
-	const sm = manager(true);
-	const captured = makeExtension(sm);
-	const ctx = context(sm);
-
-	await call(captured, "notes_write_file", { path: "archived.md", text: "keep" }, ctx);
-	await call(captured, "notes_write_file", { path: "archived.md", mark_stale: true }, ctx);
-	// SessionManager intentionally delays writing a brand-new session until its first assistant entry.
-	appendText(sm, "assistant", "persist the append-only session");
-	const file = sm.getSessionFile();
-	assert.ok(file);
-	const restored = manager();
-	restored.setSessionFile(file);
-	const files = notesFromSession(context(restored));
-	assert.equal(files.get("archived.md")?.stale, true, "the stale flag survives JSONL reload");
-	assert.equal(files.get("archived.md")?.text, "keep");
-});
 
 test("paged tool outputs stay bounded and cursors reconstruct history and notes", async () => {
 	const session = manager();
@@ -588,37 +529,42 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	}
 	assert.equal(readParts.join(""), historyText);
 
-	for (let index = 0; index < 100; index++) session.appendCustomEntry(NOTE_TYPE, { op: "write", path: `page-${"x".repeat(300)}-${index}.md`, text: Array.from({ length: 1000 }, (_, line) => `needle ${line} ${"z".repeat(30)}`).join("\n"), createdAt: Date.now(), updatedAt: Date.now() });
+	for (let index = 0; index < 100; index++) {
+		await call(captured, "notes_write", { path: `page-${"x".repeat(120)}-${index}.md`, content: Array.from({ length: 1000 }, (_, line) => `needle ${line} ${"z".repeat(30)}`).join("\n") }, ctx);
+	}
 	const listPages: string[] = [];
 	let listOffset = 0;
 	let listNext: number | null = 0;
 	while (listNext !== null) {
-		const result = resultJson<{ files: Array<{ path: string }>; next_cursor: number | null }>(await call(captured, "notes_list_files", { pattern: null, file_order_by: "name", file_order: "ascending", max_results: 300, cursor: listOffset }, ctx));
+		const result = resultJson<{ files: Array<{ path: string }>; next_cursor: number | null }>(await call(captured, "notes_list", { max_results: 300, cursor: listOffset }, ctx));
 		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
 		listPages.push(...result.files.map((file) => file.path)); listNext = result.next_cursor; if (listNext !== null) listOffset = listNext;
 	}
-	assert.deepEqual(listPages, Array.from({ length: 100 }, (_, index) => `page-${"x".repeat(300)}-${index}.md`).sort((a, b) => a.localeCompare(b)));
+	assert.deepEqual([...listPages].sort((a, b) => a.localeCompare(b)), Array.from({ length: 100 }, (_, index) => `page-${"x".repeat(120)}-${index}.md`).sort((a, b) => a.localeCompare(b)));
 	assert.equal(listNext, null);
 	const searchFiles: Array<{ path: string; matches: Array<{ line: number; text: string }> }> = [];
 	let notesSearchOffset = 0;
 	let notesSearchNext: number | null = 0;
 	while (notesSearchNext !== null) {
-		const result = resultJson<{ files: Array<{ path: string; matches: Array<{ line: number; text: string }> }>; next_cursor: number | null }>(await call(captured, "notes_search_contents", { query: "needle", max_matches_per_file: 100, max_files: 300, cursor: notesSearchOffset }, ctx));
+		const result = resultJson<{ files: Array<{ path: string; matches: Array<{ line: number; text: string }> }>; next_cursor: number | null }>(await call(captured, "notes_search", { query: "needle", max_matches_per_file: 100, max_files: 300, cursor: notesSearchOffset }, ctx));
 		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
 		searchFiles.push(...result.files); notesSearchNext = result.next_cursor; if (notesSearchNext !== null) notesSearchOffset = notesSearchNext;
 	}
 	assert.equal(searchFiles.length, 100); assert.equal(notesSearchNext, null);
+	const bodyText = Array.from({ length: 1000 }, (_, line) => `needle ${line} ${"z".repeat(30)}`).join("\n");
 	const noteParts: string[] = [];
 	let noteOffset = 0;
 	let noteNext: number | null = 0;
 	while (noteNext !== null) {
-		const raw = await call(captured, "notes_read_file", { path: `page-${"x".repeat(300)}-0.md`, offset_chars: noteOffset }, ctx);
-		assertWithinBudget(raw, `notes_read_file page at ${noteOffset}`);
+		const raw = await call(captured, "notes_read", { path: `page-${"x".repeat(120)}-0.md`, offset_chars: noteOffset }, ctx);
+		assertWithinBudget(raw, `notes_read page at ${noteOffset}`);
 		const result = resultRead(raw);
-		// The window is a plain prefix of the note, so the pages join by plain concatenation.
+		// The window is a plain prefix of the file, so the pages join by plain concatenation.
 		noteParts.push(result.content); noteNext = result.next_offset_chars; if (noteNext !== null) noteOffset = noteNext;
 	}
-	assert.equal(noteParts.join(""), Array.from({ length: 1000 }, (_, line) => `needle ${line} ${"z".repeat(30)}`).join("\n"));
+	const joined = noteParts.join("");
+	assert.ok(joined.startsWith("---\n"), "the frontmatter is delivered first");
+	assert.ok(joined.endsWith(bodyText), "cursor-following reconstructs the body");
 	assert.equal(noteNext, null);
 });
 
@@ -654,9 +600,9 @@ test("a page cap limits the page, not the enumerable set: cursors stay truthful 
 	assert.equal(searchTail.items.length, 10);
 	assert.equal(searchTail.next_cursor, null);
 
-	// notes_search_contents: max_files caps the page, not the matched files.
-	for (let index = 0; index < 7; index++) await call(captured, "notes_write_file", { path: `needle-${index}.md`, text: "needle" }, ctx);
-	const notes = async (params: Record<string, unknown>) => resultJson<{ files: unknown[]; next_cursor: number | null }>(await call(captured, "notes_search_contents", params, ctx));
+	// notes_search: max_files caps the page, not the matched files.
+	for (let index = 0; index < 7; index++) await call(captured, "notes_write", { path: `needle-${index}.md`, content: "needle" }, ctx);
+	const notes = async (params: Record<string, unknown>) => resultJson<{ files: unknown[]; next_cursor: number | null }>(await call(captured, "notes_search", params, ctx));
 	const notesFirst = await notes({ query: "needle", max_files: 3 });
 	assert.equal(notesFirst.files.length, 3);
 	assert.equal(notesFirst.next_cursor, 3);
@@ -687,25 +633,25 @@ test("multi-query search: OR semantics, dedupe, and bare-string backward compati
 	assert.deepEqual(await historyIds({ query: "alpha" }), orIds.filter((id) => id !== betaId), "history: a bare string still behaves exactly as before");
 	assert.deepEqual(await historyIds({ query: "alpha" }), await historyIds({ query: ["alpha"] }), "history: bare string equals the single-element list");
 
-	await call(captured, "notes_write_file", { path: "both.md", text: "alpha beta\nunrelated" }, ctx);
-	await call(captured, "notes_write_file", { path: "alpha.md", text: "alpha only" }, ctx);
-	await call(captured, "notes_write_file", { path: "beta.md", text: "beta only" }, ctx);
-	await call(captured, "notes_write_file", { path: "gamma.md", text: "gamma only" }, ctx);
+	await call(captured, "notes_write", { path: "both.md", content: "alpha beta\nunrelated" }, ctx);
+	await call(captured, "notes_write", { path: "alpha.md", content: "alpha only" }, ctx);
+	await call(captured, "notes_write", { path: "beta.md", content: "beta only" }, ctx);
+	await call(captured, "notes_write", { path: "gamma.md", content: "gamma only" }, ctx);
 	const notesSearch = async (params: Record<string, unknown>) =>
-		resultJson<{ files: Array<{ path: string; matches: Array<{ line: number; text: string }> }> }>(await call(captured, "notes_search_contents", params, ctx)).files;
+		resultJson<{ files: Array<{ path: string; matches: Array<{ line: number; text: string }> }> }>(await call(captured, "notes_search", params, ctx)).files;
 	const orFiles = await notesSearch({ query: ["alpha", "beta"] });
-	assert.deepEqual(orFiles.map((file) => file.path), ["both.md", "alpha.md", "beta.md"], "notes: a file matching any query is returned once");
-	assert.equal(orFiles[0]?.matches.length, 1, "notes: one line containing both queries is reported once");
-	assert.deepEqual((await notesSearch({ query: ["alpha"] })).map((file) => file.path), ["both.md", "alpha.md"], "notes: a one-element array searches that literal");
-	assert.deepEqual((await notesSearch({ query: "alpha" })).map((file) => file.path), ["both.md", "alpha.md"], "notes: a bare string still behaves exactly as before");
+	assert.deepEqual(orFiles.map((file) => file.path), ["alpha.md", "beta.md", "both.md"], "notes: a file matching any query is returned once, path-ordered");
+	assert.equal(orFiles.find((file) => file.path === "both.md")?.matches.length, 1, "notes: one line containing both queries is reported once");
+	assert.deepEqual((await notesSearch({ query: ["alpha"] })).map((file) => file.path), ["alpha.md", "both.md"], "notes: a one-element array searches that literal");
+	assert.deepEqual((await notesSearch({ query: "alpha" })).map((file) => file.path), ["alpha.md", "both.md"], "notes: a bare string still behaves exactly as before");
 	assert.deepEqual((await notesSearch({ query: "alpha" })).map((file) => file.path), (await notesSearch({ query: ["alpha"] })).map((file) => file.path), "notes: bare string equals the single-element list");
 	assert.deepEqual((await notesSearch({ query: ["gamma"] })).map((file) => file.path), ["gamma.md"]);
 
 	// An empty array is an argument error, not a silently empty result set.
 	await assert.rejects(() => call(captured, "history_search_contents", { query: [] }, ctx), /non-empty array of strings/, "history: empty query array is refused");
-	await assert.rejects(() => call(captured, "notes_search_contents", { query: [] }, ctx), /non-empty array of strings/, "notes: empty query array is refused");
+	await assert.rejects(() => call(captured, "notes_search", { query: [] }, ctx), /non-empty array of strings/, "notes: empty query array is refused");
 	await assert.rejects(() => call(captured, "history_search_contents", { query: ["alpha", 7] }, ctx), /elements must be strings/, "history: non-string query element is refused");
-	await assert.rejects(() => call(captured, "notes_search_contents", { query: ["alpha", 7] }, ctx), /elements must be strings/, "notes: non-string query element is refused");
+	await assert.rejects(() => call(captured, "notes_search", { query: ["alpha", 7] }, ctx), /elements must be strings/, "notes: non-string query element is refused");
 });
 
 test("multi-query search paginates over the OR set with no cross-page duplicates", async () => {
@@ -741,11 +687,11 @@ test("multi-query search paginates over the OR set with no cross-page duplicates
 
 	for (let index = 0; index < 12; index++) {
 		const text = index % 3 === 0 ? `alpha ${index}` : index % 3 === 1 ? `beta ${index}` : `gamma ${index}`;
-		await call(captured, "notes_write_file", { path: `f${index}.md`, text }, ctx);
+		await call(captured, "notes_write", { path: `f${index}.md`, content: text }, ctx);
 	}
 	const notesPage = async (cursor: number) =>
 		resultJson<{ files: Array<{ path: string }>; next_cursor: number | null }>(
-			await call(captured, "notes_search_contents", { query: ["alpha", "beta"], max_files: 3, cursor }, ctx),
+			await call(captured, "notes_search", { query: ["alpha", "beta"], max_files: 3, cursor }, ctx),
 		);
 	const notePaths: string[] = [];
 	let notesNext: number | null = 0;
@@ -797,54 +743,52 @@ test("an over-budget note is delivered as a prefix and resumed by next_offset_ch
 	const ctx = context(session);
 	const huge = `H${"x".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}`;
 	const text = `${huge}\ntail line`;
-	await call(captured, "notes_write_file", { path: "huge.md", text }, ctx);
-	const rawFirst = await call(captured, "notes_read_file", { path: "huge.md" }, ctx);
+	await call(captured, "notes_write", { path: "huge.md", content: text }, ctx);
+	const rawFirst = await call(captured, "notes_read", { path: "huge.md" }, ctx);
 	assertWithinBudget(rawFirst, "single oversized note");
 	const first = resultRead(rawFirst);
 	assert.ok(first.content.length > 0, "the page is not empty");
 	assert.equal(first.content.includes("…"), false, "the payload is a plain prefix with no marker");
-	assert.ok(text.startsWith(first.content), "the delivered text is a prefix of the note");
-	assert.equal(first.header, `[huge.md · chars 0-${first.next_offset_chars} of ${Array.from(text).length} · continue at offset_chars=${first.next_offset_chars} · created ${String(first.details.created_at)} · updated ${String(first.details.updated_at)}]`, "the raw header names the file, the delivered range, the resume cursor and the timestamps");
-	assert.deepEqual(Object.keys(first.details), ["path", "offset_chars", "total_chars", "next_offset_chars", "limit_chars", "created_at", "updated_at"], "notes_read_file details carries exactly the slim window metadata");
+	assert.ok(first.content.startsWith("---\n"), "the frontmatter is delivered first");
+	assert.equal(first.header, `[huge.md · chars 0-${first.next_offset_chars} of ${first.total_chars} · continue at offset_chars=${first.next_offset_chars} · session · created ${String(first.details.created_at)} · updated ${String(first.details.updated_at)}]`, "the raw header names the file, the delivered range, the resume cursor, the scope and the timestamps");
+	assert.deepEqual(Object.keys(first.details).sort(), ["created_at", "limit_chars", "next_offset_chars", "offset_chars", "path", "scope", "total_chars", "updated_at"], "notes_read details carries exactly the slim window metadata plus scope");
 	assert.equal("content" in first.details, false, "details never duplicates the payload");
 	assert.equal(first.offset_chars, 0, "the default window starts at the resolved offset 0");
-	assert.equal(first.total_chars, Array.from(text).length, "total_chars names the note's full code-point length");
-	assert.equal(first.next_offset_chars, Array.from(first.content).length, "next_offset_chars is offset plus delivered code points");
-	// Following the cursor reconstructs the whole note by plain concatenation.
+	// Following the cursor reconstructs frontmatter + body by plain concatenation.
 	const parts = [first.content];
 	let offset: number | null = first.next_offset_chars;
 	while (offset !== null) {
-		const rawChunk = await call(captured, "notes_read_file", { path: "huge.md", offset_chars: offset }, ctx);
+		const rawChunk = await call(captured, "notes_read", { path: "huge.md", offset_chars: offset }, ctx);
 		assertWithinBudget(rawChunk, `huge note chunk at ${offset}`);
 		const chunk = resultRead(rawChunk);
 		assert.equal(chunk.offset_chars, offset, "the response echoes the resolved absolute offset");
 		parts.push(chunk.content);
 		offset = chunk.next_offset_chars;
 	}
-	assert.equal(parts.join(""), text, "the cursors reconstruct the note exactly");
+	assert.ok(parts.join("").endsWith(text), "the cursors reconstruct the body exactly");
 
 	// A success carries structured details; an error stays a JSON envelope with no details.
-	const missingResult = await call(captured, "notes_read_file", { path: "no-such.md" }, ctx);
+	const missingResult = await call(captured, "notes_read", { path: "no-such.md" }, ctx);
 	const missing = resultJson<Record<string, unknown>>(missingResult);
 	assert.deepEqual(Object.keys(missing).sort(), ["error", "path"], "the read error carries exactly error and path");
+	assert.equal(missing.error, "note not found");
 	assert.equal(missingResult.details, undefined, "a JSON error carries no details metadata");
 });
 
-test("an over-budget note search match is a named prefix, readable at its offset_chars", async () => {
+test("an over-budget note search match is a named prefix with an honest line address", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
-	// A fitting file sorts before the oversized one, so the oversized match starts on a later page.
-	// The query sits behind a prefix, so its address is a real file-absolute offset, not line 1.
+	// The query sits behind a prefix, so its address is a real body-absolute offset, not line 1.
 	const hugeLine = `${'p'.repeat(500)}needle ${"y".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}`;
-	await call(captured, "notes_write_file", { path: "a.md", text: "needle small" }, ctx);
-	await call(captured, "notes_write_file", { path: "search.md", text: hugeLine }, ctx);
+	await call(captured, "notes_write", { path: "a.md", content: "needle small" }, ctx);
+	await call(captured, "notes_write", { path: "search.md", content: hugeLine }, ctx);
 	const pages: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number; offset_chars: number }> }> = [];
 	let cursor = 0;
 	let next: number | null = 0;
 	while (next !== null) {
 		const found = resultJson<{ files: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number; offset_chars: number }> }>; next_cursor: number | null }>(
-			await call(captured, "notes_search_contents", { query: "needle", cursor }, ctx),
+			await call(captured, "notes_search", { query: "needle", cursor }, ctx),
 		);
 		assert.ok(Buffer.byteLength(JSON.stringify(found), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "match result stays within budget");
 		pages.push(...found.files);
@@ -860,23 +804,20 @@ test("an over-budget note search match is a named prefix, readable at its offset
 	assert.equal(match.total_chars, Array.from(hugeLine).length, "total_chars names the full line length");
 	assert.ok(hugeLine.startsWith(match.text), "the match text is a plain prefix of the line");
 	assert.equal(match.text.includes("…"), false, "no marker is appended to the match text");
-	assert.equal(match.offset_chars, 500, "the match carries the file-absolute offset of the query");
+	assert.equal(match.offset_chars, 500, "the match carries the body-absolute offset of the query");
 	assert.equal(match.line, 1, "the informational line number survives");
-	// The address resolves: the query is visible at the match's offset_chars.
-	const at = resultRead(await call(captured, "notes_read_file", { path: "search.md", offset_chars: match.offset_chars, limit_chars: 6 }, ctx));
-	assert.equal(at.content, "needle", "the match's offset_chars resolves to the query through notes_read_file");
-	assert.equal(at.offset_chars, match.offset_chars, "the read echoes the resolved address");
-	// The window cursor reaches the rest of the line (the file is a single line, so no separators).
-	const parts = [match.text];
-	let offset: number | null = Array.from(match.text).length;
+	// The body is reconstructible by following notes_read's cursor from the start of the file.
+	const parts: string[] = [];
+	let offset: number | null = 0;
 	while (offset !== null) {
-		const rawChunk = await call(captured, "notes_read_file", { path: "search.md", offset_chars: offset }, ctx);
+		const rawChunk = await call(captured, "notes_read", { path: "search.md", offset_chars: offset }, ctx);
 		assertWithinBudget(rawChunk, `search.md chunk at ${offset}`);
 		const chunk = resultRead(rawChunk);
+		assert.equal(chunk.offset_chars, offset, "the read echoes the resolved address");
 		parts.push(chunk.content);
 		offset = chunk.next_offset_chars;
 	}
-	assert.equal(parts.join(""), hugeLine, "resuming at the delivered prefix reconstructs the matched line");
+	assert.ok(parts.join("").endsWith(hugeLine), "resuming across pages reconstructs the matched body line");
 });
 
 test("history_read_item delivers a prefix and next_offset_chars names the delivered count", async () => {
@@ -912,26 +853,27 @@ test("history_read_item delivers a prefix and next_offset_chars names the delive
 	assert.equal(parts.join(""), original, "the cursors reconstruct the item exactly");
 });
 
-test("the empty note terminates and every note read is a character window", async () => {
+test("an empty body is a frontmatter-only file that terminates cleanly", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
-	await call(captured, "notes_write_file", { path: "empty.md", text: "" }, ctx);
+	await call(captured, "notes_write", { path: "empty.md", content: "" }, ctx);
 	const empty = resultRead(
-		await call(captured, "notes_read_file", { path: "empty.md" }, ctx),
+		await call(captured, "notes_read", { path: "empty.md" }, ctx),
 	);
 	assert.equal(empty.offset_chars, 0);
-	assert.equal(empty.content, "");
-	assert.equal(empty.total_chars, 0);
-	assert.equal(empty.next_offset_chars, null, "the empty note is exhausted instead of self-feeding");
-	// An offset beyond the file is an addressing error that names the real length (0),
+	assert.ok(empty.content.startsWith("---\n"), "the frontmatter is still delivered");
+	assert.ok(empty.content.endsWith("---\n\n"), "an empty body leaves frontmatter and the blank separator only");
+	assert.ok(empty.total_chars > 0, "the file is not zero-length once the harness frontmatter is written");
+	assert.equal(empty.next_offset_chars, null, "a note that fits terminates instead of self-feeding");
+	// An offset beyond the file is an addressing error that names the real length,
 	// not a silent empty page.
 	const beyond = resultJson<{ error?: string; offset_chars?: number; total_chars?: number }>(
-		await call(captured, "notes_read_file", { path: "empty.md", offset_chars: 9 }, ctx),
+		await call(captured, "notes_read", { path: "empty.md", offset_chars: empty.total_chars + 9 }, ctx),
 	);
 	assert.match(beyond.error ?? "", /past the end/, "a beyond-the-file read is a named error");
-	assert.equal(beyond.offset_chars, 9, "the error echoes the offending offset");
-	assert.equal(beyond.total_chars, 0, "the error names the real length");
+	assert.equal(beyond.offset_chars, empty.total_chars + 9, "the error echoes the offending offset");
+	assert.equal(beyond.total_chars, empty.total_chars, "the error names the real length");
 });
 
 test("history items carry honest truncated/total_chars and max_chars_per_item:1 addresses them", async () => {
@@ -977,7 +919,7 @@ test("tool calls wear their own role and assistant text stays pure", async () =>
 		content: [
 			{ type: "text", text: "on it" },
 			{ type: "toolCall", id: "tc-1", name: "bash", arguments: { command: "keiyaku status" } },
-			{ type: "toolCall", id: "tc-2", name: "notes_read_file", arguments: { path: "x.md" } },
+			{ type: "toolCall", id: "tc-2", name: "notes_read", arguments: { path: "x.md" } },
 		],
 		stopReason: "stop",
 		timestamp: Date.now(),
@@ -996,7 +938,7 @@ test("tool calls wear their own role and assistant text stays pure", async () =>
 	assert.equal(call1.tool_name, "bash");
 	assert.equal(call1.truncated_content, JSON.stringify({ command: "keiyaku status" }), "a call item's content is the call's JSON arguments");
 	const call2 = listed.items.find((item) => item.item_id === `${turnId}#1`)!;
-	assert.equal(call2.tool_name, "notes_read_file");
+	assert.equal(call2.tool_name, "notes_read");
 
 	// The invocation is searchable exactly where a searcher reaches for it: tool_call + tool_name.
 	const calls = resultJson<{ items: Array<{ item_id: string }> }>(
@@ -1103,76 +1045,6 @@ test("oversized history tool_name: page stays within budget, item_id intact, met
 	assert.match(searched.items[0]!.tool_name, /…\[truncated \d+ chars\]…/, "search truncates the oversized tool_name visibly");
 });
 
-test("oversized legacy note path: list and search truncate the path only with an explicit flag", async () => {
-	const session = manager();
-	const captured = makeExtension(session);
-	const ctx = context(session);
-	const legacyPath = `legacy/${"p".repeat(40_000)}.md`;
-	// Bypass the write cap the way history does: append the persisted op directly, then replay.
-	session.appendCustomEntry(NOTE_TYPE, { op: "write", path: legacyPath, text: "needle legacy line", createdAt: Date.now(), updatedAt: Date.now() });
-	assert.ok(notesFromSession(ctx).has(legacyPath), "replay accepts a legacy path beyond the write cap");
-
-	const listed = resultJson<{ files: Array<{ path: string; path_truncated?: boolean }>; next_cursor: number | null }>(
-		await call(captured, "notes_list_files", {}, ctx),
-	);
-	const listedBytes = Buffer.byteLength(JSON.stringify(listed), "utf8");
-	console.log(`pathological page bytes: notes_list_files path=40KB -> ${listedBytes}`);
-	assert.ok(listedBytes <= TOOL_OUTPUT_MAX_BYTES, `legacy path list page is ${listedBytes} bytes`);
-	assert.equal(listed.files.length, 1);
-	const listedFile = listed.files[0]!;
-	assert.equal(listedFile.path_truncated, true, "the truncated path is explicitly flagged");
-	assert.match(listedFile.path, /…\[truncated \d+ chars\]…/, "the path carries the truncation marker");
-	assertTruncationOf(legacyPath, listedFile.path);
-
-	const searched = resultJson<{ files: Array<{ path: string; path_truncated?: boolean; matches: Array<{ line: number }> }>; next_cursor: number | null }>(
-		await call(captured, "notes_search_contents", { query: "needle" }, ctx),
-	);
-	const searchedBytes = Buffer.byteLength(JSON.stringify(searched), "utf8");
-	console.log(`pathological page bytes: notes_search_contents path=40KB -> ${searchedBytes}`);
-	assert.ok(searchedBytes <= TOOL_OUTPUT_MAX_BYTES, `legacy path search page is ${searchedBytes} bytes`);
-	assert.equal(searched.files.length, 1);
-	assert.equal(searched.files[0]!.path_truncated, true, "the search result flags the truncated path");
-	assert.match(searched.files[0]!.path, /…\[truncated \d+ chars\]…/);
-	assert.equal(searched.files[0]!.matches[0]!.line, 1, "the matching line number survives the truncation");
-});
-
-test("the 512-byte write-time path cap refuses longer paths while replay and reads stay un-capped", async () => {
-	const session = manager();
-	const captured = makeExtension(session);
-	const ctx = context(session);
-	const acceptedPath = "a".repeat(MAX_NOTE_PATH_BYTES);
-	const rejectedPath = "b".repeat(MAX_NOTE_PATH_BYTES + 1);
-	await call(captured, "notes_write_file", { path: acceptedPath, text: "accepted" }, ctx);
-	assert.equal(notesFromSession(ctx).get(acceptedPath)?.text, "accepted", "a path exactly at the cap is accepted");
-	for (const name of ["notes_write_file", "notes_append_to_file"]) {
-		const refused = resultJson<{ error: string }>(await call(captured, name, { path: rejectedPath, text: "x" }, ctx));
-		assert.match(refused.error, new RegExp(String(MAX_NOTE_PATH_BYTES)), `${name} refuses a path over the cap with a clear error`);
-	}
-	assert.equal(notesFromSession(ctx).has(rejectedPath), false, "a refused path is never persisted");
-
-	// A legacy path longer than the cap was persisted before the cap existed: replay must still
-	// load it, and reads must accept it and return its identity intact. This path is only just
-	// over the cap, so the read result stays within the shared wire budget, unlike the ~40 KB
-	// paths the list/search budget tests exercise.
-	const persisted = manager(true);
-	const legacyPath = `legacy/${"r".repeat(600)}.md`;
-	assert.ok(Buffer.byteLength(legacyPath, "utf8") > MAX_NOTE_PATH_BYTES);
-	persisted.appendCustomEntry(NOTE_TYPE, { op: "write", path: legacyPath, text: "legacy body\nsecond line", createdAt: Date.now(), updatedAt: Date.now() });
-	// SessionManager delays writing a brand-new session until its first assistant entry.
-	appendText(persisted, "assistant", "persist the legacy note");
-	const file = persisted.getSessionFile();
-	assert.ok(file);
-	const restored = SessionManager.create("/private/tmp/pi-context-test", mkdtempSync(join(tmpdir(), "pi-context-legacy-")));
-	restored.setSessionFile(file);
-	const restoredCtx = context(restored);
-	assert.ok(notesFromSession(restoredCtx).has(legacyPath), "the reloaded session still replays the legacy path");
-	const restoredCaptured = makeExtension(restored);
-	const read = resultRead(await call(restoredCaptured, "notes_read_file", { path: legacyPath }, restoredCtx));
-	assert.equal(read.details.path, legacyPath, "reads are un-capped and return the identity intact");
-	assert.equal(read.content, "legacy body\nsecond line");
-	const refused = resultJson<{ error: string }>(await call(restoredCaptured, "notes_write_file", { path: legacyPath, text: "again" }, restoredCtx));
-	assert.match(refused.error, new RegExp(String(MAX_NOTE_PATH_BYTES)), "the reloaded session still refuses new over-cap writes");
-});
 
 test("page() includes one middle-truncated item and advances the cursor", () => {
 	const truncate = <T extends { text: string }>(item: T, fits: (candidate: T) => boolean): T => ({ ...item, text: middleTruncate(item.text, (candidate) => fits({ ...item, text: candidate })) });
@@ -1194,12 +1066,12 @@ test("page() includes one middle-truncated item and advances the cursor", () => 
 	assert.equal(resumed.next_cursor, 2, "pagination advances toward the remaining item");
 });
 
-test("note write tools run sequentially so a parallel batch cannot race the note store", () => {
+test("note write/edit tools run sequentially so a parallel batch cannot race the note store", () => {
 	const captured = makeExtension(manager());
-	for (const name of ["notes_write_file", "notes_append_to_file"]) {
+	for (const name of ["notes_write", "notes_edit"]) {
 		assert.equal(captured.tools.get(name)?.executionMode, "sequential", `${name} forbids parallel execution`);
 	}
-	assert.equal(captured.tools.get("notes_read_file")?.executionMode, undefined, "read-only note tools keep the default mode");
+	assert.equal(captured.tools.get("notes_read")?.executionMode, undefined, "read-only note tools keep the default mode");
 });
 
 test("custom reset boundary removes old provider context but history remains searchable", async () => {
@@ -1251,8 +1123,8 @@ test("the boot notes preview keeps short notes whole and long notes head-to-tail
 	// Unique Unicode code points so an overlap introduced by a naive head+tail concat is detectable.
 	const longText = Array.from({ length: 400 }, (_, index) => String.fromCharCode(0x4e00 + index)).join("");
 	const shortText = "short-first\nshort-second";
-	await call(captured, "notes_write_file", { path: "long.md", text: longText }, ctx);
-	await call(captured, "notes_write_file", { path: "short.md", text: shortText }, ctx);
+	await call(captured, "notes_write", { path: "long.md", content: longText }, ctx);
+	await call(captured, "notes_write", { path: "short.md", content: shortText }, ctx);
 	runHandlers(captured, "session_start", { reason: "startup" }, ctx);
 	const boot = captured.sent[0];
 	const text = typeof boot?.message.content === "string" ? boot.message.content : "";
@@ -1280,7 +1152,7 @@ test("the boot block is persisted at the root and baked into every reset summary
 	const ctx = context(sessionManager);
 	appendText(sessionManager, "user", "task before reset");
 	appendText(sessionManager, "assistant", "working");
-	await call(captured, "notes_write_file", { path: "decisions.md", text: "use terra" }, ctx);
+	await call(captured, "notes_write", { path: "decisions.md", content: "use terra" }, ctx);
 
 	// Root window: session_start persists the boot block without triggering a turn.
 	runHandlers(captured, "session_start", { reason: "startup" }, ctx);
@@ -1295,10 +1167,10 @@ test("the boot block is persisted at the root and baked into every reset summary
 	assert.match(rootText, new RegExp(`First context window id: pcw:${sessionManager.getSessionId().slice(0, 8)}:root`));
 	assert.match(rootText, new RegExp(`Current context window id: pcw:${sessionManager.getSessionId().slice(0, 8)}:root`));
 	assert.ok(rootText.includes("decisions.md"));
-	const decisionsMeta = notesFromSession(ctx).get("decisions.md");
+	const decisionsMeta = listNotes(ctx, { scope: "session" }).find((row) => row.path === "decisions.md")?.meta;
 	assert.ok(decisionsMeta);
 	const bootUpdated = assertIsoTimestamp(rootText, "note metadata carries an updated timestamp");
-	assert.equal(Date.parse(bootUpdated), decisionsMeta.updatedAt, "boot note timestamp restores the persisted updatedAt");
+	assert.equal(Date.parse(bootUpdated), decisionsMeta.updated_at, "boot note timestamp restores the persisted updatedAt");
 	assert.ok(rootText.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG));
 
 	// Reset: the boot block IS the compaction summary; no separate boot/hint is persisted.
@@ -1314,7 +1186,7 @@ test("the boot block is persisted at the root and baked into every reset summary
 	assert.match(before.compaction.summary, new RegExp(`Current context window id: ${details.windowId}`));
 	assert.ok(before.compaction.summary.includes("decisions.md"));
 	const resetUpdated = assertIsoTimestamp(before.compaction.summary, "reset summary keeps the note updated timestamp");
-	assert.equal(Date.parse(resetUpdated), decisionsMeta.updatedAt, "reset summary keeps the persisted updatedAt");
+	assert.equal(Date.parse(resetUpdated), decisionsMeta.updated_at, "reset summary keeps the persisted updatedAt");
 	assert.ok(before.compaction.summary.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG));
 	const windows = historyFromSession(ctx);
 	assert.ok(before.compaction.summary.includes(`Previous context window id: ${windows[windows.length - 1]?.windowId}`));
@@ -1952,18 +1824,21 @@ test("boot and guidance deduplicate across extension reload while a new branch c
 	assert.equal(fork.sent.length, 1, "sibling boot is created; this branch's reminder already exists");
 });
 
-test("malformed persisted note timestamps are ignored without poisoning valid notes or boot rendering", async () => {
+test("malformed frontmatter timestamps degrade to a finite fallback without poisoning valid notes or boot rendering", async () => {
 	const sm = manager();
 	const ctx = context(sm);
 	const extension = makeExtension(sm);
-	await call(extension, "notes_write_file", { path: "good.md", text: "keep me" }, ctx);
-	for (const time of [NaN, Infinity, -Infinity, 9e15]) {
-		sm.appendCustomEntry(internal.NOTE_TYPE, { op: "write", path: "good.md", text: "corrupted", createdAt: time, updatedAt: time });
-	}
-	assert.equal(notesFromSession(ctx).get("good.md")?.text, "keep me");
+	await call(extension, "notes_write", { path: "good.md", content: "keep me" }, ctx);
+	// Corrupt every timestamp in place; parse must fall back rather than emit NaN.
+	const file = physicalPath("session", "good.md", ctx);
+	writeFileSync(file, readFileSync(file, "utf8").replace(/^(created_at|updated_at|last_accessed): .*$/gm, "$1: not-a-timestamp"));
+	const rows = listNotes(ctx, { scope: "session" });
+	assert.equal(rows.length, 1);
+	assert.ok(Number.isFinite(rows[0]!.meta.updated_at), "a malformed timestamp degrades to a finite fallback");
 	runHandlers(extension, "session_start", {}, ctx);
-	assert.ok(JSON.stringify(extension.sent).includes("keep me"));
-	assert.ok(!JSON.stringify(extension.sent).includes("NaN"));
+	const rendered = JSON.stringify(extension.sent);
+	assert.ok(rendered.includes("keep me"), "the valid body still renders");
+	assert.equal(rendered.includes("NaN"), false, "no malformed timestamp leaks into the boot block");
 });
 
 
@@ -2033,26 +1908,27 @@ test("argument footguns die loudly and tool-run metadata surfaces (A1/A2/A3/B4/B
 	const ctx = context(session);
 
 	// A1: an empty query string is an argument error on both search tools, never a match-everything.
-	for (const tool of ["history_search_contents", "notes_search_contents"] as const) {
+	for (const tool of ["history_search_contents", "notes_search"] as const) {
 		await assert.rejects(() => call(captured, tool, { query: "" }, ctx), /empty query matches everything/, `${tool}: bare empty string refused`);
 		await assert.rejects(() => call(captured, tool, { query: ["alpha", ""] }, ctx), /empty query matches everything/, `${tool}: empty array element refused`);
 	}
 
 	// A2: a positive offset past the end is a named error on both read tools; offset == total stays the legal empty end-read.
-	await call(captured, "notes_write_file", { path: "a.md", text: "hello" }, ctx);
+	await call(captured, "notes_write", { path: "a.md", content: "hello" }, ctx);
 	appendText(session, "user", "hello world");
 	const windowId = historyFromSession(ctx)[0]!.windowId;
 	const listed = resultJson<{ items: Array<{ item_id: string; total_chars: number }> }>(await call(captured, "history_list_items", {}, ctx));
 	const target = listed.items.find((candidate) => candidate.total_chars === "hello world".length);
 	assert.ok(target, "the user item is listed");
+	const noteTotal = resultRead(await call(captured, "notes_read", { path: "a.md" }, ctx)).total_chars;
 	const notePastEnd = resultJson<{ error?: string; offset_chars?: number; total_chars?: number; path?: string }>(
-		await call(captured, "notes_read_file", { path: "a.md", offset_chars: 6 }, ctx),
+		await call(captured, "notes_read", { path: "a.md", offset_chars: noteTotal + 1 }, ctx),
 	);
 	assert.match(notePastEnd.error ?? "", /past the end/, "notes: past-end offset is a named error");
-	assert.equal(notePastEnd.offset_chars, 6, "notes: the error echoes the offending offset");
-	assert.equal(notePastEnd.total_chars, 5, "notes: the error names the real length");
+	assert.equal(notePastEnd.offset_chars, noteTotal + 1, "notes: the error echoes the offending offset");
+	assert.equal(notePastEnd.total_chars, noteTotal, "notes: the error names the real length");
 	assert.equal(notePastEnd.path, "a.md", "notes: the error echoes the path");
-	const noteEnd = resultRead(await call(captured, "notes_read_file", { path: "a.md", offset_chars: 5 }, ctx));
+	const noteEnd = resultRead(await call(captured, "notes_read", { path: "a.md", offset_chars: noteTotal }, ctx));
 	assert.equal(noteEnd.content, "", "notes: offset == total is the legal empty end-read");
 	assert.equal(noteEnd.next_offset_chars, null, "notes: the end-read terminates");
 	const itemPastEnd = resultJson<{ error?: string; offset_chars?: number; total_chars?: number; window_id?: string; item_id?: string }>(
@@ -2065,14 +1941,13 @@ test("argument footguns die loudly and tool-run metadata surfaces (A1/A2/A3/B4/B
 	assert.equal(itemEnd.content, "", "history: offset == total is the legal empty end-read");
 	assert.equal(itemEnd.next_offset_chars, null, "history: the end-read terminates");
 
-	// A3: append to a missing note is a named error that points at notes_write_file; write still creates.
-	const appendMissing = resultJson<{ error?: string; path?: string }>(await call(captured, "notes_append_to_file", { path: "missing.md", text: "x" }, ctx));
-	assert.match(appendMissing.error ?? "", /note file not found \(use notes_write_file to create\)/, "append refuses to silently create");
-	assert.equal(appendMissing.path, "missing.md", "the error echoes the path");
-	const writeCreates = resultJson<{ error?: string; operation?: string }>(await call(captured, "notes_write_file", { path: "missing.md", text: "x" }, ctx));
+	// A3: editing a missing note is the typed not-found arm; write still creates it.
+	const editMissing = resultJson<{ error?: string; path?: string }>(await call(captured, "notes_edit", { path: "missing.md", stale: true }, ctx));
+	assert.equal(editMissing.error, "note not found", "an edit of a missing note is named");
+	const writeCreates = resultJson<{ error?: string }>(await call(captured, "notes_write", { path: "missing.md", content: "x" }, ctx));
 	assert.equal(writeCreates.error, undefined, "write still creates the note");
-	const appendNow = resultJson<{ error?: string; operation?: string }>(await call(captured, "notes_append_to_file", { path: "missing.md", text: "y" }, ctx));
-	assert.equal(appendNow.error, undefined, "append to an existing note still works");
+	const editNow = resultJson<{ error?: string; applied?: number }>(await call(captured, "notes_edit", { path: "missing.md", edits: [{ oldText: "x", newText: "y" }] }, ctx));
+	assert.equal(editNow.error, undefined, "edit of an existing note still works");
 
 	// B4/B5: truncation and error metadata ride along on the projected history items.
 	type AppendableMessage = Parameters<SessionManager["appendMessage"]>[0];
@@ -2098,15 +1973,15 @@ test("argument footguns die loudly and tool-run metadata surfaces (A1/A2/A3/B4/B
 	assert.equal("tool_error" in fine, false, "a clean tool result carries no error key");
 });
 
-test("notes_search_contents scopes by glob pattern; a non-matching pattern is an empty page, not an error", async () => {
+test("notes_search scopes by glob pattern; a non-matching pattern is an empty page, not an error", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
-	await call(captured, "notes_write_file", { path: "deep/nested/a.md", text: "needle here" }, ctx);
-	await call(captured, "notes_write_file", { path: "top.md", text: "needle there" }, ctx);
-	const scoped = resultJson<{ files: Array<{ path: string }> }>(await call(captured, "notes_search_contents", { query: "needle", pattern: "deep/**" }, ctx));
+	await call(captured, "notes_write", { path: "deep/nested/a.md", content: "needle here" }, ctx);
+	await call(captured, "notes_write", { path: "top.md", content: "needle there" }, ctx);
+	const scoped = resultJson<{ files: Array<{ path: string }> }>(await call(captured, "notes_search", { query: "needle", pattern: "deep/**" }, ctx));
 	assert.deepEqual(scoped.files.map((file) => file.path), ["deep/nested/a.md"], "a glob scopes the search to the subtree");
-	const none = resultJson<{ files: unknown[]; error?: string }>(await call(captured, "notes_search_contents", { query: "needle", pattern: "absent/**" }, ctx));
+	const none = resultJson<{ files: unknown[]; error?: string }>(await call(captured, "notes_search", { query: "needle", pattern: "absent/**" }, ctx));
 	assert.equal(none.error, undefined, "a non-matching pattern is not an error");
 	assert.deepEqual(none.files, [], "a non-matching pattern is an empty page");
 });

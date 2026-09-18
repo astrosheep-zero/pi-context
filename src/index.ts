@@ -1,5 +1,5 @@
 import { registerHistoryTools } from "./history-tools.js";
-import { registerNoteTools } from "./note-tools.js";
+import { registerMemoryTools } from "./memory/tools.js";
 import { registerBudget, deriveThresholds, mergePiContextSettings } from "./budget.js";
 import { output } from "./tool-output.js";
 export { deriveThresholds, mergePiContextSettings };
@@ -48,7 +48,7 @@ export default function piContext(pi: ExtensionAPI) {
 	});
 
 	registerHistoryTools(pi);
-	registerNoteTools(pi);
+	registerMemoryTools(pi);
 
 	pi.registerTool(defineTool({
 		name: "new_context",

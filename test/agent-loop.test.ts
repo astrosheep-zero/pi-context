@@ -1,18 +1,21 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import piContext from "../src/index.js";
-import { WARNING_PROMPT, WARNING_TYPE, GUIDANCE_TYPE, NOTE_TYPE } from "../src/protocol.js";
+import { WARNING_PROMPT, WARNING_TYPE, GUIDANCE_TYPE } from "../src/protocol.js";
 
 for (const mode of ["golden", "write-error", "ignored-warning", "explicit", "uncompactable", "followup", "steering", "repeat", "abort"] as const) {
 	test(`real Pi loop: ${mode} reset preserves history and handles completion`, { timeout: 15000 }, async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-context-loop-"));
 		const previousDir = process.env.PI_CODING_AGENT_DIR;
+		const previousNotesRoot = process.env.PI_NOTES_HOME;
 		process.env.PI_CODING_AGENT_DIR = dir;
+		const notesRoot = mkdtempSync(join(tmpdir(), "pi-context-loop-notes-"));
+		process.env.PI_NOTES_HOME = notesRoot;
 		let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
 		try {
 			const runtime = await ModelRuntime.create({ authPath: join(dir, "auth.json"), modelsPath: null, modelsStorePath: join(dir, "models"), refreshOnCreate: false });
@@ -58,7 +61,7 @@ for (const mode of ["golden", "write-error", "ignored-warning", "explicit", "unc
 			sm.appendMessage({ role: "assistant", api: model.api, provider: model.provider, model: model.id,
 				content: [{ type: "text", text: "Earlier result. ".repeat(100) }], stopReason: "stop", timestamp: Date.now(),
 				usage: { input: 100, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 200, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
-			({ session } = await createAgentSession({ cwd: dir, agentDir: dir, modelRuntime: runtime, model, settingsManager, sessionManager: sm, resourceLoader: loader, tools: ["new_context", "notes_write_file", "get_context_remaining"] }));
+			({ session } = await createAgentSession({ cwd: dir, agentDir: dir, modelRuntime: runtime, model, settingsManager, sessionManager: sm, resourceLoader: loader, tools: ["new_context", "notes_write", "get_context_remaining"] }));
 			const requests: string[] = [];
 			let checkpointed = false;
 			let freshTurns = 0;
@@ -81,10 +84,10 @@ for (const mode of ["golden", "write-error", "ignored-warning", "explicit", "unc
 				);
 				const tokens = usageMode ? (fresh ? (freshTurns === 1 ? 100 : 50000) : sawWarning ? 70000 : n === 1 ? 50000 : 60000) : 100;
 				const tool = explicitReset || (mode === "uncompactable" && n === 1);
-				const call = probe ? "get_context_remaining" : checkpoint ? "notes_write_file" : tool ? "new_context" : undefined;
+				const call = probe ? "get_context_remaining" : checkpoint ? "notes_write" : tool ? "new_context" : undefined;
 				const message: AssistantMessage = { role: "assistant", api: model.api, provider: model.provider, model: model.id,
 					content: probe ? [{ type: "toolCall", id: "probe-call", name: "get_context_remaining", arguments: {} }]
-						: checkpoint ? [{ type: "toolCall", id: "checkpoint-call", name: "notes_write_file", arguments: { path: mode === "write-error" ? "../invalid.md" : "checkpoint.md", text: "CHECKPOINT_SENTINEL" } }]
+						: checkpoint ? [{ type: "toolCall", id: "checkpoint-call", name: "notes_write", arguments: { path: mode === "write-error" ? "../invalid.md" : "checkpoint.md", content: "CHECKPOINT_SENTINEL" } }]
 						: tool ? [{ type: "toolCall", id: "reset-call", name: "new_context", arguments: {} }]
 						: [{ type: "text", text: fresh ? "Resumed." : "Working." }],
 					stopReason: call ? "toolUse" : "stop", timestamp: Date.now(),
@@ -130,22 +133,22 @@ for (const mode of ["golden", "write-error", "ignored-warning", "explicit", "unc
 				const branch = sm.getBranch();
 				const guidanceIndices = branch.flatMap((entry, i) => entry.type === "custom_message" && entry.customType === GUIDANCE_TYPE ? [i] : []);
 				const warningIndices = branch.flatMap((entry, i) => entry.type === "custom_message" && entry.customType === WARNING_TYPE ? [i] : []);
-				const noteIndex = branch.findIndex((entry) => entry.type === "custom" && entry.customType === NOTE_TYPE);
+				const noteFile = join(notesRoot, "pi", "session", sm.getSessionId(), "checkpoint.md");
 				const resetIndex = branch.findIndex((entry) => entry.type === "compaction");
 				assert.equal(guidanceIndices.length, 1, "one early reminder");
 				assert.equal(warningIndices.length, 1, "one final warning steer");
 				assert.ok(warningIndices[0]! > guidanceIndices[0]!, "the reminder precedes the warning");
 				if (mode === "ignored-warning") {
-					assert.equal(noteIndex, -1, "an ignored warning leaves no checkpoint");
+					assert.equal(existsSync(noteFile), false, "an ignored warning leaves no checkpoint");
 				} else if (mode === "write-error") {
-					assert.equal(noteIndex, -1, "failed write creates no checkpoint");
-					assert.ok(branch.some((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "notes_write_file" && entry.message.isError));
+					assert.equal(existsSync(noteFile), false, "failed write creates no checkpoint");
+					assert.ok(branch.some((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "notes_write" && entry.message.isError));
 					assert.ok(!requests.at(-1)!.includes("CHECKPOINT_SENTINEL"), "fresh context must not invent a saved note");
 				} else {
-					assert.ok(noteIndex > warningIndices[0]! && resetIndex > noteIndex, "guidance → warning → durable checkpoint → instant reset");
+					assert.ok(existsSync(noteFile), "the checkpoint is a real file on disk");
+					assert.ok(resetIndex > warningIndices[0]!, "the warning precedes the wipe");
 					assert.ok(requests.at(-1)!.includes("CHECKPOINT_SENTINEL"), "fresh boot carries the saved checkpoint");
 				}
-				assert.ok(resetIndex > warningIndices[0]!, "the warning precedes the wipe");
 
 				assert.ok(!requests.at(-1)!.includes("Your brain is almost out of room"), "new window excludes old guidance");
 			}
@@ -187,7 +190,10 @@ for (const mode of ["golden", "write-error", "ignored-warning", "explicit", "unc
 			session?.dispose();
 			if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = previousDir;
+			if (previousNotesRoot === undefined) delete process.env.PI_NOTES_HOME;
+			else process.env.PI_NOTES_HOME = previousNotesRoot;
 			rmSync(dir, { recursive: true, force: true });
+			rmSync(notesRoot, { recursive: true, force: true });
 		}
 	});
 }

@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { historyFromSession } from "./history.js";
-import { notesFromSession, localIso } from "./notes.js";
+import { localIso } from "./notes.js";
+import { listNotes, peekNote, resolveNoteScope } from "./memory/store.js";
 import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, NOTE_PREVIEW_CHARS, NOTE_PREVIEW_HEAD_CHARS, NOTE_PREVIEW_TAIL_CHARS, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "./protocol.js";
 
 /** Codex-style <context_window> identity block: agent name and first/current/previous window ids only. */
@@ -23,23 +24,33 @@ function identityBlock(agentName: string, firstWindowId: string, currentWindowId
  * as tail content. Stale notes are excluded entirely; empty when no fresh notes remain.
  */
 function notesIndex(ctx: ExtensionContext): string {
-	const recentNotes = [...notesFromSession(ctx)]
-		.filter(([, file]) => !file.stale)
-		.sort((a, b) => b[1].updatedAt - a[1].updatedAt)
-		.slice(0, 3);
-	if (recentNotes.length === 0) return "";
-	const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (up to 3, most recent first):`];
-	for (const [path, file] of recentNotes) {
-		lines.push(`- ${path} (${file.text.split("\n").length} lines, ${Buffer.byteLength(file.text, "utf8")} UTF-8 bytes, updated ${localIso(file.updatedAt)})`);
-		const chars = Array.from(file.text);
-		// Short notes stay whole; long notes keep both ends. head + tail <= NOTE_PREVIEW_CHARS < chars.length,
-		// so the slices are disjoint and no character is shown twice.
-		const preview = chars.length <= NOTE_PREVIEW_CHARS
-			? file.text
-			: `${chars.slice(0, NOTE_PREVIEW_HEAD_CHARS).join("")}…${chars.slice(chars.length - NOTE_PREVIEW_TAIL_CHARS).join("")}`;
-		lines.push(preview.split("\n").map((line) => `  ${line}`).join("\n"));
+	const sections: string[] = [];
+	// TOC residency ("地图在场"): the map, when present, is injected whole ahead of the list.
+	const toc = resolveNoteScope(ctx, "TOC.md");
+	if (toc) {
+		const body = peekNote(ctx, toc.scope, "TOC.md").body;
+		if (body.length > 0) sections.push(body);
 	}
-	return lines.join("\n");
+	// listNotes is already most-recently-updated first; stale notes never reach the index.
+	const recentNotes = listNotes(ctx, {})
+		.filter((row) => !row.meta.stale)
+		.slice(0, 5);
+	if (recentNotes.length > 0) {
+		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (up to 5, most recent first):`];
+		for (const row of recentNotes) {
+			const body = peekNote(ctx, row.meta.scope, row.path).body;
+			lines.push(`- ${row.path} (${body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${localIso(row.meta.updated_at)})`);
+			const chars = Array.from(body);
+			// Short notes stay whole; long notes keep both ends. head + tail <= NOTE_PREVIEW_CHARS < chars.length,
+			// so the slices are disjoint and no character is shown twice.
+			const preview = chars.length <= NOTE_PREVIEW_CHARS
+				? body
+				: `${chars.slice(0, NOTE_PREVIEW_HEAD_CHARS).join("")}…${chars.slice(chars.length - NOTE_PREVIEW_TAIL_CHARS).join("")}`;
+			lines.push(preview.split("\n").map((line) => `  ${line}`).join("\n"));
+		}
+		sections.push(lines.join("\n"));
+	}
+	return sections.join("\n\n");
 }
 
 /**

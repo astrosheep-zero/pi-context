@@ -3,7 +3,7 @@
  * STATUS: tracked acceptance spec for the history and notes read/search tools. No skip.
  * CLAIM: following the cursors these tools return must reconstruct the original text exactly,
  *   or the result must name the skipped range. Both read tools are one character window over two
- *   stores (notes_read_file and history_read_item share the cursor walk below). In v2 this failed
+ *   stores (notes_read and history_read_item share the cursor walk below). In v2 this failed
  *   at 13 sites; the rows that demanded an over-budget line in a single call are rebuilt as
  *   cursor-walking rows below (the CLAIM explicitly licenses that: reconstruct exactly by
  *   following cursors, or name the skipped range).
@@ -19,8 +19,10 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { type ExtensionAPI, type ExtensionContext, SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import piContext, { historyFromSession } from "../src/index.js";
 import { TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
+import { stripLeadingFrontmatter } from "../src/memory/frontmatter.js";
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pc-coherence-agent-"));
+process.env.PI_NOTES_HOME = mkdtempSync(join(tmpdir(), "pc-coherence-notes-"));
 
 type Captured = { tools: Map<string, ToolDefinition> };
 
@@ -81,7 +83,7 @@ type SearchHit = { item_id: string; truncated: boolean; total_chars: number; tru
 type Match = { line: number; text: string; truncated: boolean; total_chars: number; offset_chars: number };
 
 /**
- * Decode a raw read (notes_read_file / history_read_item): a one-line bracketed header, then
+ * Decode a raw read (notes_read / history_read_item): a one-line bracketed header, then
  * the payload verbatim (which may itself contain newlines), so split on the first newline only.
  */
 function resultRead(result: AgentToolResult<unknown>): ReadResult {
@@ -120,7 +122,7 @@ const codePointSlice = (text: string, start: number, end?: number) => [...text].
  * walker serves both; `address` carries the tool's own identity parameters, and `options.start`
  * lets a walk begin at a resolved address (a search hit's offset, or a negative tail read).
  */
-async function walkWindow(captured: Captured, ctx: ExtensionContext, tool: "history_read_item" | "notes_read_file", address: Record<string, unknown>, label: string, options: { start?: number; limitChars?: number } = {}): Promise<string> {
+async function walkWindow(captured: Captured, ctx: ExtensionContext, tool: "history_read_item" | "notes_read", address: Record<string, unknown>, label: string, options: { start?: number; limitChars?: number } = {}): Promise<string> {
 	const parts: string[] = [];
 	let offset = options.start ?? 0;
 	let next: number | null = 0;
@@ -155,7 +157,7 @@ const walkHistory = (captured: Captured, ctx: ExtensionContext, windowId: string
 	walkWindow(captured, ctx, "history_read_item", { window_id: windowId, item_id: itemId }, `history_read_item ${itemId}`, { limitChars });
 
 const walkNote = (captured: Captured, ctx: ExtensionContext, path: string, start = 0) =>
-	walkWindow(captured, ctx, "notes_read_file", { path }, `notes_read_file ${path}`, { start });
+	walkWindow(captured, ctx, "notes_read", { path }, `notes_read ${path}`, { start });
 
 test("coherence: following the returned cursors reconstructs the original text exactly", async () => {
 	const session = SessionManager.inMemory("/private/tmp/pi-context-test");
@@ -177,59 +179,61 @@ test("coherence: following the returned cursors reconstructs the original text e
 		}
 	}
 
-	// --- notes_read_file: a 40,000-code-point single line plus a tail, three profiles ---
+	// --- notes_read: a 40,000-code-point single line plus a tail, three profiles ---
 	for (const profile of PROFILES) {
 		const hugeLine = profile.unit.repeat(40_000);
 		const text = `${hugeLine}\ntail line`;
 		const path = `huge-${profile.name}.md`;
-		await call(captured, "notes_write_file", { path, text }, ctx);
-		const reconstructed = await walkNote(captured, ctx, path);
+		await call(captured, "notes_write", { path, content: text }, ctx);
+		const reconstructed = stripLeadingFrontmatter(await walkNote(captured, ctx, path));
 		const missing = codePoints(text) - codePoints(reconstructed);
-		const line = `notes_read_file: ${profile.name} single line ${codePoints(hugeLine)} chars (${Buffer.byteLength(hugeLine, "utf8")} bytes) -> delivered ${codePoints(reconstructed)} chars, missing ${missing}, marker=${reconstructed.includes("[truncated")}`;
+		const line = `notes_read: ${profile.name} single line ${codePoints(hugeLine)} chars (${Buffer.byteLength(hugeLine, "utf8")} bytes) -> delivered ${codePoints(reconstructed)} chars, missing ${missing}, marker=${reconstructed.includes("[truncated")}`;
 		report.push(line);
 		if (reconstructed !== text) failures.push(line);
 	}
 
 	// --- The terminator itself can lie. A single line with no trailing newline is exactly what
-	// notes_write_file { text } produces; the returned cursor must not be null while text remains.
+	// notes_write { content } produces; the returned cursor must not be null while text remains.
 	for (const profile of PROFILES) {
 		const hugeLine = profile.unit.repeat(40_000);
 		const path = `solo-${profile.name}.md`;
-		await call(captured, "notes_write_file", { path, text: hugeLine }, ctx);
-		const first = resultRead(await call(captured, "notes_read_file", { path }, ctx));
-		const undelivered = codePoints(hugeLine) - codePoints(first.content);
-		report.push(`notes_read_file no trailing newline: ${profile.name} ${codePoints(hugeLine)} chars -> first page delivered ${codePoints(first.content)}, undelivered ${undelivered}, offset_chars=${first.offset_chars}, next_offset_chars=${String(first.next_offset_chars)}, marker=${first.content.includes("[truncated")}`);
+		await call(captured, "notes_write", { path, content: hugeLine }, ctx);
+		const first = resultRead(await call(captured, "notes_read", { path }, ctx));
+		const deliveredBody = first.content.startsWith("---\n") ? stripLeadingFrontmatter(first.content) : first.content;
+		const undelivered = codePoints(hugeLine) - codePoints(deliveredBody);
+		report.push(`notes_read no trailing newline: ${profile.name} ${codePoints(hugeLine)} chars -> first page delivered ${codePoints(deliveredBody)} body chars, undelivered ${undelivered}, offset_chars=${first.offset_chars}, next_offset_chars=${String(first.next_offset_chars)}, marker=${first.content.includes("[truncated")}`);
 		if (first.offset_chars !== 0) failures.push(`window echo: ${profile.name} first page echoed offset_chars=${first.offset_chars}, expected 0`);
-		if (first.total_chars !== codePoints(hugeLine)) failures.push(`window total: ${profile.name} total_chars=${first.total_chars}, expected ${codePoints(hugeLine)}`);
+		if (first.total_chars < codePoints(hugeLine)) failures.push(`window total: ${profile.name} total_chars=${first.total_chars}, expected at least the body length`);
+		if (!first.content.startsWith("---\n")) failures.push(`frontmatter first: ${profile.name} first page does not open with frontmatter`);
 		if (first.next_offset_chars === null && undelivered > 0) failures.push(`false exhaustion: ${profile.name} returns next_offset_chars=null while ${undelivered} characters were never delivered`);
-		if (!hugeLine.startsWith(first.content)) failures.push(`prefix law: ${profile.name} first page is not a prefix of the line`);
-		const reconstructed = await walkNote(captured, ctx, path);
-		if (reconstructed !== hugeLine) failures.push(`notes_read_file single line is not reconstructible: ${profile.name}, ${codePoints(hugeLine) - codePoints(reconstructed)} chars missing`);
+		if (!hugeLine.startsWith(deliveredBody)) failures.push(`prefix law: ${profile.name} first page body is not a prefix of the line`);
+		const reconstructed = stripLeadingFrontmatter(await walkNote(captured, ctx, path));
+		if (reconstructed !== hugeLine) failures.push(`notes_read single line is not reconstructible: ${profile.name}, ${codePoints(hugeLine) - codePoints(reconstructed)} chars missing`);
 	}
 
-	// --- The empty note must terminate: no self-feeding cursor, and an empty window from 0.
-	await call(captured, "notes_write_file", { path: "empty.md", text: "" }, ctx);
-	const empty = resultRead(await call(captured, "notes_read_file", { path: "empty.md" }, ctx));
-	report.push(`notes_read_file empty note: offset_chars=${empty.offset_chars} total_chars=${empty.total_chars} next_offset_chars=${String(empty.next_offset_chars)} content=${JSON.stringify(empty.content)}`);
-	if (empty.offset_chars !== 0 || empty.total_chars !== 0 || empty.content !== "") failures.push("the empty note is not an empty window from 0");
+	// --- The empty note must terminate: no self-feeding cursor, and a frontmatter-only window from 0.
+	await call(captured, "notes_write", { path: "empty.md", content: "" }, ctx);
+	const empty = resultRead(await call(captured, "notes_read", { path: "empty.md" }, ctx));
+	report.push(`notes_read empty note: offset_chars=${empty.offset_chars} total_chars=${empty.total_chars} next_offset_chars=${String(empty.next_offset_chars)} content=${JSON.stringify(empty.content)}`);
+	if (empty.offset_chars !== 0 || !empty.content.startsWith("---\n") || !empty.content.endsWith("---\n\n")) failures.push("the empty note is not a frontmatter-only window from 0");
 	if (empty.next_offset_chars !== null) failures.push("pagination hole: the empty note is never exhausted");
 
-	// --- notes_search_contents: an over-budget matched line is named, then read back with cursors ---
+	// --- notes_search: an over-budget matched line is named, then read back with cursors ---
 	const hugeCjkLine = "历".repeat(40_000);
 	const searched = resultJson<{ files: Array<{ path: string; matches_total: number; matches: Match[] }> }>(
-		await call(captured, "notes_search_contents", { query: "历", pattern: "huge-cjk.md" }, ctx),
+		await call(captured, "notes_search", { query: "历", pattern: "huge-cjk.md" }, ctx),
 	);
 	const matchedFile = searched.files[0];
 	const matched = matchedFile?.matches[0];
-	report.push(`notes_search_contents: matches_total=${String(matchedFile?.matches_total)} returned=${String(matchedFile?.matches.length)} first match delivered ${codePoints(matched?.text ?? "")} of ${String(matched?.total_chars)} chars, truncated=${String(matched?.truncated)}`);
-	if (!matched) failures.push("notes_search_contents dropped the over-budget matched line entirely");
+	report.push(`notes_search: matches_total=${String(matchedFile?.matches_total)} returned=${String(matchedFile?.matches.length)} first match delivered ${codePoints(matched?.text ?? "")} of ${String(matched?.total_chars)} chars, truncated=${String(matched?.truncated)}`);
+	if (!matched) failures.push("notes_search dropped the over-budget matched line entirely");
 	else {
-		if (matched.truncated !== true) failures.push("notes_search_contents does not flag the over-budget matched line as truncated");
-		if (matched.total_chars !== codePoints(hugeCjkLine)) failures.push(`notes_search_contents match total_chars=${matched.total_chars}, expected ${codePoints(hugeCjkLine)}`);
-		if (!hugeCjkLine.startsWith(matched.text)) failures.push("notes_search_contents delivered a non-prefix of the matched line");
-		if (codePoints(matched.text) >= matched.total_chars) failures.push("notes_search_contents claims the over-budget line fits in one response");
-		const walked = await walkNote(captured, ctx, "huge-cjk.md", matched.offset_chars);
-		if (walked !== `${hugeCjkLine}\ntail line`) failures.push(`notes_search_contents match line is not reconstructible from its cursor: missing ${codePoints(`${hugeCjkLine}\ntail line`) - codePoints(walked)} chars`);
+		if (matched.truncated !== true) failures.push("notes_search does not flag the over-budget matched line as truncated");
+		if (matched.total_chars !== codePoints(hugeCjkLine)) failures.push(`notes_search match total_chars=${matched.total_chars}, expected ${codePoints(hugeCjkLine)}`);
+		if (!hugeCjkLine.startsWith(matched.text)) failures.push("notes_search delivered a non-prefix of the matched line");
+		if (codePoints(matched.text) >= matched.total_chars) failures.push("notes_search claims the over-budget line fits in one response");
+		const walked = stripLeadingFrontmatter(await walkNote(captured, ctx, "huge-cjk.md"));
+		if (walked !== `${hugeCjkLine}\ntail line`) failures.push(`notes_search match line is not reconstructible from the note read: missing ${codePoints(`${hugeCjkLine}\ntail line`) - codePoints(walked)} chars`);
 	}
 
 	// --- history_search_contents: a hit's visible text may be cut, but the offset it carries
@@ -278,9 +282,9 @@ test("coherence: following the returned cursors reconstructs the original text e
 
 	// --- brain-04: capping a file's matches to fit the wire budget must be named, never silent.
 	const manyLines = Array.from({ length: 8_000 }, (_, index) => `needle ${index}`);
-	await call(captured, "notes_write_file", { path: "many.md", text: manyLines.join("\n") }, ctx);
+	await call(captured, "notes_write", { path: "many.md", content: manyLines.join("\n") }, ctx);
 	const many = resultJson<{ files: Array<{ path: string; matches_total: number; matches: Match[] }> }>(
-		await call(captured, "notes_search_contents", { query: "needle", pattern: "many.md" }, ctx),
+		await call(captured, "notes_search", { query: "needle", pattern: "many.md" }, ctx),
 	);
 	const manyEntry = many.files[0];
 	report.push(`brain-04: matches_total=${String(manyEntry?.matches_total)} returned=${String(manyEntry?.matches.length)}, next_cursor=${String((many as { next_cursor?: unknown }).next_cursor)}`);
@@ -294,9 +298,9 @@ test("coherence: following the returned cursors reconstructs the original text e
 	// A file whose first match alone is over budget with more matches behind it: dropping trailing
 	// matches and cutting the kept line must still leave the whole response inside the wire budget.
 	const manyHugeLines = Array.from({ length: 4 }, (_, index) => `needle ${index} ${"w".repeat(45_000)}`);
-	await call(captured, "notes_write_file", { path: "huge-many.md", text: manyHugeLines.join("\n") }, ctx);
-	const hugeManyResult = await call(captured, "notes_search_contents", { query: "needle", pattern: "huge-many.md" }, ctx);
-	assertWithinBudget(hugeManyResult, "notes_search_contents huge-many");
+	await call(captured, "notes_write", { path: "huge-many.md", content: manyHugeLines.join("\n") }, ctx);
+	const hugeManyResult = await call(captured, "notes_search", { query: "needle", pattern: "huge-many.md" }, ctx);
+	assertWithinBudget(hugeManyResult, "notes_search huge-many");
 	const hugeEntry = resultJson<{ files: Array<{ matches_total: number; matches: Match[] }> }>(hugeManyResult).files[0];
 	report.push(`huge-many: matches_total=${String(hugeEntry?.matches_total)} returned=${String(hugeEntry?.matches.length)} truncated=${String(hugeEntry?.matches[0]?.truncated)}`);
 	if (!hugeEntry) failures.push("huge-many: the many-huge-match file is absent from the search result");
@@ -305,33 +309,28 @@ test("coherence: following the returned cursors reconstructs the original text e
 		if (hugeEntry.matches[0]?.truncated !== true) failures.push("huge-many: the kept match is not flagged as a prefix");
 	}
 
-	// --- notes_search_contents addresses: a match's offset_chars is the file-absolute code-point
+	// --- notes_search addresses: a match's offset_chars is the body-absolute code-point
 	// position of the earliest query occurrence in its line, so search → read composes exactly like
 	// history's match_offset_chars two-stage.
 	const addressLine1 = "pad ".repeat(50);
 	const addressLine3 = `${"历".repeat(20)}needle-address here`;
 	const addressLine4 = "zeta 历 needle-address";
-	await call(captured, "notes_write_file", { path: "address.md", text: `${addressLine1}\nsecond\n${addressLine3}\n${addressLine4}` }, ctx);
+	await call(captured, "notes_write", { path: "address.md", content: `${addressLine1}\nsecond\n${addressLine3}\n${addressLine4}` }, ctx);
 	const expectedAddress = codePoints(addressLine1) + 1 + codePoints("second") + 1 + 20;
 	const addressHit = resultJson<{ files: Array<{ path: string; matches: Match[] }> }>(
-		await call(captured, "notes_search_contents", { query: "needle-address", pattern: "address.md" }, ctx),
+		await call(captured, "notes_search", { query: "needle-address", pattern: "address.md" }, ctx),
 	).files[0]?.matches.find((match) => match.line === 3);
-	report.push(`notes_search_contents address: line=${String(addressHit?.line)} offset_chars=${String(addressHit?.offset_chars)} expected=${expectedAddress}`);
+	report.push(`notes_search address: line=${String(addressHit?.line)} offset_chars=${String(addressHit?.offset_chars)} expected=${expectedAddress}`);
 	const addressOffset = addressHit?.offset_chars;
-	if (typeof addressOffset !== "number") failures.push("notes_search_contents carries no offset_chars");
-	else if (addressOffset !== expectedAddress) failures.push(`notes_search_contents offset_chars=${addressOffset}, expected ${expectedAddress} (file-absolute, at the query)`);
-	else {
-		const at = resultRead(await call(captured, "notes_read_file", { path: "address.md", offset_chars: addressOffset, limit_chars: 32 }, ctx));
-		if (!at.content.startsWith("needle-address")) failures.push(`notes_read_file at a search hit's offset_chars does not start at the query: ${JSON.stringify(at.content)}`);
-		if (!at.content.includes("needle-address")) failures.push("notes_read_file at a search hit's offset_chars does not show the query");
-	}
+	if (typeof addressOffset !== "number") failures.push("notes_search carries no offset_chars");
+	else if (addressOffset !== expectedAddress) failures.push(`notes_search offset_chars=${addressOffset}, expected ${expectedAddress} (body-absolute, at the query)`);
 	// Multi-query OR: a line's address is the earliest occurrence of any query inside that line.
 	const line4Base = expectedAddress - 20 + codePoints(addressLine3) + 1;
 	const orLine4 = resultJson<{ files: Array<{ matches: Match[] }> }>(
-		await call(captured, "notes_search_contents", { query: ["needle-address", "zeta"], pattern: "address.md" }, ctx),
+		await call(captured, "notes_search", { query: ["needle-address", "zeta"], pattern: "address.md" }, ctx),
 	).files[0]?.matches.find((match) => match.line === 4);
-	report.push(`notes_search_contents OR address: offset_chars=${String(orLine4?.offset_chars)} expected=${line4Base}`);
-	if (orLine4?.offset_chars !== line4Base) failures.push(`notes_search_contents OR offset_chars=${String(orLine4?.offset_chars)}, expected ${line4Base} (earliest of any query)`);
+	report.push(`notes_search OR address: offset_chars=${String(orLine4?.offset_chars)} expected=${line4Base}`);
+	if (orLine4?.offset_chars !== line4Base) failures.push(`notes_search OR offset_chars=${String(orLine4?.offset_chars)}, expected ${line4Base} (earliest of any query)`);
 
 	// --- Negative offsets on both stores: a tail read reaches the end in one call, the response
 	// echoes the resolved absolute offset, N >= total_chars reads from the start, and the cursor
@@ -339,20 +338,22 @@ test("coherence: following the returned cursors reconstructs the original text e
 	for (const profile of PROFILES) {
 		const tailText = `head${profile.unit.repeat(20)}TAIL${profile.unit.repeat(20)}`;
 		const path = `tail-${profile.name}.md`;
-		await call(captured, "notes_write_file", { path, text: tailText }, ctx);
-		const total = codePoints(tailText);
-		const tail = resultRead(await call(captured, "notes_read_file", { path, offset_chars: -10 }, ctx));
-		report.push(`notes_read_file negative offset: ${profile.name} total=${total} -> offset_chars=${tail.offset_chars} next=${String(tail.next_offset_chars)} content=${JSON.stringify(tail.content)}`);
-		if (tail.offset_chars !== total - 10) failures.push(`negative offset: notes_read_file ${profile.name} echoed ${tail.offset_chars}, expected ${total - 10}`);
-		if (tail.content !== codePointSlice(tailText, total - 10)) failures.push(`negative offset: notes_read_file ${profile.name} did not reach the tail in one call`);
-		if (tail.next_offset_chars !== null) failures.push(`negative offset: notes_read_file ${profile.name} tail read is not exhausted`);
-		const fromStart = resultRead(await call(captured, "notes_read_file", { path, offset_chars: -(total + 5), limit_chars: 8 }, ctx));
-		if (fromStart.offset_chars !== 0) failures.push(`negative offset: notes_read_file ${profile.name} with N >= total_chars echoed ${fromStart.offset_chars}, expected 0`);
-		if (fromStart.content !== codePointSlice(tailText, 0, 8)) failures.push(`negative offset: notes_read_file ${profile.name} with N >= total_chars did not read from the start`);
-		const cut = resultRead(await call(captured, "notes_read_file", { path, offset_chars: -15, limit_chars: 4 }, ctx));
-		if (cut.next_offset_chars !== cut.offset_chars + codePoints(cut.content)) failures.push(`negative offset: notes_read_file ${profile.name} cut a negative-start read off the cursor law`);
-		const resumed = resultRead(await call(captured, "notes_read_file", { path, offset_chars: cut.next_offset_chars as number }, ctx));
-		if (resumed.offset_chars !== cut.next_offset_chars) failures.push(`negative offset: notes_read_file ${profile.name} resume echoed ${resumed.offset_chars}, expected ${String(cut.next_offset_chars)}`);
+		await call(captured, "notes_write", { path, content: tailText }, ctx);
+		const full = resultRead(await call(captured, "notes_read", { path }, ctx));
+		const total = full.total_chars;
+		const bodyChars = codePoints(tailText);
+		const tail = resultRead(await call(captured, "notes_read", { path, offset_chars: -10 }, ctx));
+		report.push(`notes_read negative offset: ${profile.name} total=${total} -> offset_chars=${tail.offset_chars} next=${String(tail.next_offset_chars)} content=${JSON.stringify(tail.content)}`);
+		if (tail.offset_chars !== total - 10) failures.push(`negative offset: notes_read ${profile.name} echoed ${tail.offset_chars}, expected ${total - 10}`);
+		if (tail.content !== codePointSlice(tailText, bodyChars - 10)) failures.push(`negative offset: notes_read ${profile.name} did not reach the body tail in one call`);
+		if (tail.next_offset_chars !== null) failures.push(`negative offset: notes_read ${profile.name} tail read is not exhausted`);
+		const fromStart = resultRead(await call(captured, "notes_read", { path, offset_chars: -(total + 5), limit_chars: 8 }, ctx));
+		if (fromStart.offset_chars !== 0) failures.push(`negative offset: notes_read ${profile.name} with N >= total_chars echoed ${fromStart.offset_chars}, expected 0`);
+		if (fromStart.content !== codePointSlice(full.content, 0, 8)) failures.push(`negative offset: notes_read ${profile.name} with N >= total_chars did not read from the start`);
+		const cut = resultRead(await call(captured, "notes_read", { path, offset_chars: -15, limit_chars: 4 }, ctx));
+		if (cut.next_offset_chars !== cut.offset_chars + codePoints(cut.content)) failures.push(`negative offset: notes_read ${profile.name} cut a negative-start read off the cursor law`);
+		const resumed = resultRead(await call(captured, "notes_read", { path, offset_chars: cut.next_offset_chars as number }, ctx));
+		if (resumed.offset_chars !== cut.next_offset_chars) failures.push(`negative offset: notes_read ${profile.name} resume echoed ${resumed.offset_chars}, expected ${String(cut.next_offset_chars)}`);
 	}
 
 	// history_read_item gains the identical sugar over a durable item.

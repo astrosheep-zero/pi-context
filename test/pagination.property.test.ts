@@ -1,7 +1,7 @@
 /**
  * Property-based pagination tests for the four paginating pi-context tools:
- * history_list_items, history_search_contents, notes_search_contents,
- * notes_list_files.
+ * history_list_items, history_search_contents, notes_search,
+ * notes_list.
  *
  * Each case is generated from a seed, so a failure names its seed and reproduces by
  * re-running that one seed:
@@ -22,9 +22,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
-import { historyFromSession, notesFromSession } from "../src/index.js";
+import { historyFromSession } from "../src/index.js";
+import { listNotes, searchNotes, type NoteRow, type NoteSearchRow } from "../src/memory/store.js";
 import { TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
-import { NOTE_TYPE, MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
+import { MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
 import { appendText, call, context, makeExtension, manager, resultJson, type Captured } from "./integration.test.js";
 
 const NEEDLE = "PAGE_NEEDLE";
@@ -93,11 +94,11 @@ type HistoryPlan = {
 	search: HistoryVariant[];
 };
 
-const TOOL_NAMES = ["bash", "notes_read_file", "notes_write_file", "history_list_items", "history_search_contents", "web_search", "mcp_tool_call", "read", "_odd"] as const;
+const TOOL_NAMES = ["bash", "notes_read", "notes_write", "history_list_items", "history_search_contents", "web_search", "mcp_tool_call", "read", "_odd"] as const;
 const CONTENT_LIMITS = [1, 5, 60, 1200, 24_000, 50_000] as const;
 const PAGE_LIMITS = [1, 2, 3, 5, 8, 13, 34, 200] as const;
 const ROLE_FILTERS = [null, "user", "assistant", "tool_call", "tool", "system", "developer"] as const;
-const NAME_FILTERS = [null, "bash", "notes_read_file", "history_list_items", "read", "_odd", "mcp_tool_call"] as const;
+const NAME_FILTERS = [null, "bash", "notes_read", "history_list_items", "read", "_odd", "mcp_tool_call"] as const;
 
 function makeContent(rng: Rng, large: boolean): string {
 	const shape = large ? rng.pick(["large", "large", "medium", "needle"] as const) : rng.pick(["empty", "tiny", "tiny", "needle", "medium"] as const);
@@ -198,20 +199,16 @@ function storeHistoryItems(ctx: ExtensionContext, params: Record<string, unknown
 // Notes shapes
 // ---------------------------------------------------------------------------
 
-type NoteOpPlan =
-	| { kind: "entry"; data: unknown }
-	| { kind: "write"; path: string; text: string }
-	| { kind: "append"; path: string; text: string }
-	| { kind: "mark"; path: string; stale: boolean };
+type NoteWrite = { path: string; body: string };
 
-type NoteListVariant = { label: string; pattern: string | null; orderBy: "name" | "created_at" | "updated_at"; order: "ascending" | "descending"; maxResults: number };
-type NoteSearchVariant = { label: string; query: string; pattern: string | null; maxFiles: number; maxMatchesPerFile: number; recentFileFirst: boolean };
+type NoteListVariant = { label: string; pattern: string | null; maxResults: number };
+type NoteSearchVariant = { label: string; query: string; pattern: string | null; maxFiles: number; maxMatchesPerFile: number };
 
-type NotesPlan = { seed: number; ops: NoteOpPlan[]; list: NoteListVariant[]; search: NoteSearchVariant[] };
+type NotesPlan = { seed: number; writes: NoteWrite[]; list: NoteListVariant[]; search: NoteSearchVariant[] };
 
 function makeNotePath(rng: Rng, index: number): string {
 	const dir = rng.pick(["", "notes/", "deep/nested/dir/", "unicode-日本語/"]);
-	const name = rng.pick([`f${index}.md`, `long-${"x".repeat(rng.int(1, 260))}-${index}.md`, `note ${index}.md`, `ünïcode-${index}.md`, `checkpoint-${index}.md`]);
+	const name = rng.pick([`f${index}.md`, `long-${"x".repeat(rng.int(1, 80))}-${index}.md`, `note ${index}.md`, `ünïcode-${index}.md`, `checkpoint-${index}.md`]);
 	return `${dir}${name}`;
 }
 
@@ -229,113 +226,47 @@ function makeNoteText(rng: Rng): string {
 
 function notesPlan(seed: number): NotesPlan {
 	const rng = new Rng(seed * 4 + 3);
-	const ops: NoteOpPlan[] = [];
+	const writes: NoteWrite[] = [];
 	const fileCount = rng.pick([0, 1, 2, 3, 6, 11, 17]);
-	let clock = 1_700_000_000_000 + rng.int(0, 100_000);
+	const used = new Set<string>();
 	for (let index = 0; index < fileCount; index++) {
 		const path = makeNotePath(rng, index);
-		clock += rng.int(0, 3); // ties are common on purpose: sort stability is part of the contract
-		ops.push({ kind: "entry", data: { op: "write", path, text: makeNoteText(rng), createdAt: clock, updatedAt: clock } });
-		if (rng.bool(0.35)) {
-			clock += rng.int(0, 2);
-			ops.push({ kind: "entry", data: { op: "append", path, text: `\nappended ${rng.int(0, 999)}`, createdAt: clock, updatedAt: clock } });
-		}
-		if (rng.bool(0.25)) {
-			clock += rng.int(0, 2);
-			ops.push({ kind: "mark", path, stale: true });
-		}
-		if (rng.bool(0.2)) {
-			clock += rng.int(0, 2);
-			ops.push({ kind: "entry", data: { op: "write", path, text: makeNoteText(rng), createdAt: clock, updatedAt: clock } });
-		}
-		if (rng.bool(0.15)) ops.push({ kind: "write", path: `${path}-tool.md`, text: rng.pick(["tool write", `${NEEDLE} from tool`]) });
+		if (used.has(path)) continue;
+		used.add(path);
+		writes.push({ path, body: makeNoteText(rng) });
 	}
-	// Replay-filtering edges: the store drops all of these, and so must every page.
-	ops.push({ kind: "entry", data: { op: "nope", path: "bad-op.md", text: "x", createdAt: clock, updatedAt: clock } });
-	ops.push({ kind: "entry", data: { op: "write", path: "../escape.md", text: "x", createdAt: clock, updatedAt: clock } });
-	ops.push({ kind: "entry", data: { op: "write", path: "/absolute.md", text: "x", createdAt: clock, updatedAt: clock } });
-	ops.push({ kind: "entry", data: { op: "write", path: "nonstring.md", text: 42, createdAt: clock, updatedAt: clock } });
-	ops.push({ kind: "entry", data: null });
-	ops.push({ kind: "entry", data: { op: "write", path: "oversized.md", text: "z".repeat(1_000_001), createdAt: clock, updatedAt: clock } });
-	ops.push({ kind: "entry", data: { op: "write", path: "mark-missing.md", stale: true, createdAt: clock, updatedAt: clock } });
-	ops.push({ kind: "entry", data: { op: "write", path: "bad-time.md", text: "x", createdAt: Number.NaN, updatedAt: clock } });
-	// Rare pathological legacy path on a deterministic subset of seeds: predates the 512-byte
-	// write cap, so it can only enter the store by replaying a persisted op. The list/search
-	// tools must truncate it visibly rather than silently, while replay and reads stay un-capped.
-	if (seed % 3 === 0) ops.push({ kind: "entry", data: { op: "write", path: `legacy/${"p".repeat(40_000)}.md`, text: `${NEEDLE} legacy oversized path`, createdAt: clock, updatedAt: clock } });
-
 	const patterns = [null, "", "**", "*.md", "**.md", "notes/*", "notes", "deep/**", "deep/nested", "unicode-日本語/*", "checkpoint-*", "absent*", "f?.md"];
 	const list: NoteListVariant[] = [
-		{ label: "all-name-asc", pattern: null, orderBy: "name", order: "ascending", maxResults: 200 },
-		{ label: "paged-name-asc", pattern: rng.pick(patterns), orderBy: "name", order: "ascending", maxResults: rng.pick([1, 2, 3, 5]) },
-		{ label: "created-desc", pattern: rng.pick(patterns), orderBy: "created_at", order: "descending", maxResults: rng.pick([1, 3, 7, 200]) },
-		{ label: "updated-asc", pattern: rng.pick(patterns), orderBy: "updated_at", order: "ascending", maxResults: rng.pick([2, 4, 200]) },
+		{ label: "all", pattern: null, maxResults: 200 },
+		{ label: "paged-1", pattern: rng.pick(patterns), maxResults: rng.pick([1, 2, 3, 5]) },
+		{ label: "paged-2", pattern: rng.pick(patterns), maxResults: rng.pick([1, 3, 7, 200]) },
+		{ label: "paged-3", pattern: rng.pick(patterns), maxResults: rng.pick([2, 4, 200]) },
 	];
 	const search: NoteSearchVariant[] = [
-		{ label: "needle-all", query: NEEDLE, pattern: null, maxFiles: 200, maxMatchesPerFile: 100, recentFileFirst: false },
-		{ label: "needle-paged", query: NEEDLE, pattern: null, maxFiles: rng.pick([1, 2, 3]), maxMatchesPerFile: rng.pick([1, 2, 5, 100]), recentFileFirst: rng.bool() },
-		{ label: "rare-query", query: rng.pick(["line 3", "z", "日本語", "absent-token", "…"]), pattern: rng.pick(patterns), maxFiles: rng.pick([1, 5, 200]), maxMatchesPerFile: rng.pick([1, 100]), recentFileFirst: rng.bool() },
+		{ label: "needle-all", query: NEEDLE, pattern: null, maxFiles: 200, maxMatchesPerFile: 100 },
+		{ label: "needle-paged", query: NEEDLE, pattern: null, maxFiles: rng.pick([1, 2, 3]), maxMatchesPerFile: rng.pick([1, 2, 5, 100]) },
+		{ label: "rare-query", query: rng.pick(["line 3", "z", "日本語", "absent-token", "…"]), pattern: rng.pick(patterns), maxFiles: rng.pick([1, 5, 200]), maxMatchesPerFile: rng.pick([1, 100]) },
 	];
-	return { seed, ops, list, search };
+	return { seed, writes, list, search };
 }
 
-async function materializeNotes(plan: NotesPlan, captured: Captured, ctx: ExtensionContext, session: SessionManager): Promise<void> {
-	for (const op of plan.ops) {
-		if (op.kind === "entry") session.appendCustomEntry(NOTE_TYPE, op.data);
-		else if (op.kind === "write") await call(captured, "notes_write_file", { path: op.path, text: op.text }, ctx);
-		else if (op.kind === "append") await call(captured, "notes_append_to_file", { path: op.path, text: op.text }, ctx);
-		else await call(captured, "notes_write_file", { path: op.path, mark_stale: op.stale }, ctx);
+async function materializeNotes(plan: NotesPlan, captured: Captured, ctx: ExtensionContext): Promise<void> {
+	for (const write of plan.writes) {
+		const result = resultJson<{ error?: string }>(await call(captured, "notes_write", { path: write.path, content: write.body }, ctx));
+		assert.equal(result.error, undefined, `seed=${plan.seed}: write ${write.path}`);
 	}
 }
 
-type StoreNoteFile = { path: string; text: string; stale: boolean; createdAt: number; updatedAt: number };
-
-/** Test-local reimplementation of the documented glob semantics -- never imported from src. */
-function globMatch(pattern: string, path: string): boolean {
-	let source = "^";
-	for (let index = 0; index < pattern.length; index++) {
-		const char = pattern[index]!;
-		if (char === "*") {
-			if (pattern[index + 1] === "*") {
-				const followedBySlash = pattern[index + 2] === "/";
-				source += followedBySlash ? "(?:[^]*/)?" : "[^]*";
-				index += followedBySlash ? 2 : 1;
-			} else {
-				source += "[^/]*";
-			}
-		} else {
-			source += char.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
-		}
-	}
-	return new RegExp(`${source}$`).test(path);
+/**
+ * The store's own enumeration is the oracle for membership and order here; the pagination
+ * layer (page()) is what is under test, and walkPages asserts it enumerates exactly this set.
+ */
+function expectedListRows(ctx: ExtensionContext, variant: NoteListVariant): NoteRow[] {
+	return listNotes(ctx, { pattern: variant.pattern ?? undefined });
 }
 
-function storeNoteFiles(ctx: ExtensionContext, match: (path: string) => boolean): StoreNoteFile[] {
-	return [...notesFromSession(ctx)]
-		.filter(([path]) => match(path))
-		.map(([path, file]) => ({ path, text: file.text, stale: file.stale, createdAt: file.createdAt, updatedAt: file.updatedAt }));
-}
-
-/** The documented ordering of notes_list_files, reimplemented over the store: the total order
- * (axis key, createdAt, path) ascending, then the whole comparator reversed for descending. */
-function expectedNoteOrder(ctx: ExtensionContext, variant: NoteListVariant): StoreNoteFile[] {
-	const files = storeNoteFiles(ctx, (path) => !variant.pattern || globMatch(variant.pattern, path));
-	const key = variant.orderBy;
-	files.sort((a, b) => {
-		const primary = key === "name" ? a.path.localeCompare(b.path) : key === "created_at" ? a.createdAt - b.createdAt : a.updatedAt - b.updatedAt;
-		if (primary !== 0) return primary;
-		if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
-		return a.path.localeCompare(b.path);
-	});
-	if (variant.order === "descending") files.reverse();
-	return files;
-}
-
-/** The documented matching/ordering of notes_search_contents, reimplemented over the store. */
-function expectedSearchOrder(ctx: ExtensionContext, variant: NoteSearchVariant): StoreNoteFile[] {
-	const files = storeNoteFiles(ctx, (path) => !variant.pattern || globMatch(variant.pattern, path));
-	if (variant.recentFileFirst) files.sort((a, b) => b.createdAt - a.createdAt);
-	return files.filter((file) => file.text.split("\n").some((line) => line.includes(variant.query)));
+function expectedSearchRows(ctx: ExtensionContext, variant: NoteSearchVariant): NoteSearchRow[] {
+	return searchNotes(ctx, [variant.query], { pattern: variant.pattern ?? undefined });
 }
 
 // ---------------------------------------------------------------------------
@@ -468,12 +399,11 @@ test("generators are deterministic: the same seed replays the same shapes", () =
 	}
 	assert.notDeepEqual(historyPlan(DEFAULT_SEEDS[0]), historyPlan(DEFAULT_SEEDS[1]), "different seeds generate different history shapes");
 	assert.notDeepEqual(notesPlan(DEFAULT_SEEDS[0]), notesPlan(DEFAULT_SEEDS[1]), "different seeds generate different notes shapes");
-	// The rare pathological shapes are reachable from the committed corpus, so the new
-	// truncation paths are actually exercised by the default run rather than only in theory.
+	// The rare pathological history shape is reachable from the committed corpus.
 	const historyEntries = DEFAULT_SEEDS.flatMap((seed) => historyPlan(seed).entries);
 	assert.ok(historyEntries.some((entry) => entry.kind === "message" && Buffer.byteLength(entry.toolName, "utf8") > TOOL_OUTPUT_MAX_BYTES), "some committed seed generates an oversized tool_name");
-	const noteOps = DEFAULT_SEEDS.flatMap((seed) => notesPlan(seed).ops);
-	assert.ok(noteOps.some((op) => op.kind === "entry" && typeof op.data === "object" && op.data !== null && typeof (op.data as { path?: unknown }).path === "string" && Buffer.byteLength((op.data as { path: string }).path, "utf8") > MAX_NOTE_PATH_BYTES), "some committed seed generates an oversized legacy note path");
+	const noteWrites = DEFAULT_SEEDS.flatMap((seed) => notesPlan(seed).writes);
+	assert.ok(noteWrites.some((write) => write.body.includes(NEEDLE)), "some committed seed generates a needle body");
 });
 
 test("history_list_items enumerates every item across seeded session shapes", async () => {
@@ -530,19 +460,20 @@ test("history_search_contents enumerates every match across seeded session shape
 	});
 });
 
-test("notes_list_files enumerates every note file across seeded mixes", async () => {
-	await runSeeds("notes_list_files", async (seed) => {
+test("notes_list enumerates every note file across seeded mixes", async () => {
+	await runSeeds("notes_list", async (seed) => {
 		const plan = notesPlan(seed);
 		const session = manager();
 		const captured = makeExtension(session);
 		const ctx = context(session);
-		await materializeNotes(plan, captured, ctx, session);
+		await materializeNotes(plan, captured, ctx);
+		const all = new Map(listNotes(ctx, {}).map((row) => [row.path, row]));
 		for (const variant of plan.list) {
-			const params = { pattern: variant.pattern, max_results: variant.maxResults, file_order_by: variant.orderBy, file_order: variant.order };
-			const expected = expectedNoteOrder(ctx, variant).map((file) => file.path);
-			const label = `notes_list_files seed=${seed} ${variant.label} pattern=${JSON.stringify(variant.pattern)} order_by=${variant.orderBy} order=${variant.order} max_results=${variant.maxResults}`;
+			const params = { pattern: variant.pattern, max_results: variant.maxResults };
+			const expected = expectedListRows(ctx, variant).map((row) => row.path);
+			const label = `notes_list seed=${seed} ${variant.label} pattern=${JSON.stringify(variant.pattern)} max_results=${variant.maxResults}`;
 			const pages = await walkPages({
-				captured, ctx, tool: "notes_list_files", params,
+				captured, ctx, tool: "notes_list", params,
 				idsOf: (page, cursor) => notePathIdentity(expected, cursor, label, page, "files"),
 				expected,
 				label,
@@ -552,31 +483,32 @@ test("notes_list_files enumerates every note file across seeded mixes", async ()
 			for (const page of pages) {
 				for (const file of page.files as Array<{ path: string; path_truncated?: boolean; size_bytes: number; stale: boolean; created_at: string; updated_at: string }>) {
 					const storePath = expected[flat++]!;
-					const store = notesFromSession(ctx).get(storePath);
-					assert.ok(store, `${label}: listed ${storePath} is not in the note store`);
-					assert.equal(file.size_bytes, Buffer.byteLength(store.text, "utf8"), `${label}: size_bytes for ${storePath}`);
-					assert.equal(file.stale, store.stale, `${label}: stale for ${storePath}`);
-					assert.equal(Date.parse(file.created_at), store.createdAt, `${label}: created_at for ${storePath}`);
-					assert.equal(Date.parse(file.updated_at), store.updatedAt, `${label}: updated_at for ${storePath}`);
+					const row = all.get(storePath);
+					assert.ok(row, `${label}: listed ${storePath} is not in the note store`);
+					assert.equal(file.size_bytes, row.sizeBytes, `${label}: size_bytes for ${storePath}`);
+					assert.equal(file.stale, row.meta.stale, `${label}: stale for ${storePath}`);
+					assert.equal(Date.parse(file.created_at), row.meta.created_at, `${label}: created_at for ${storePath}`);
+					assert.equal(Date.parse(file.updated_at), row.meta.updated_at, `${label}: updated_at for ${storePath}`);
 				}
 			}
 		}
 	});
 });
 
-test("notes_search_contents enumerates every matching file across seeded mixes", async () => {
-	await runSeeds("notes_search_contents", async (seed) => {
+test("notes_search enumerates every matching file across seeded mixes", async () => {
+	await runSeeds("notes_search", async (seed) => {
 		const plan = notesPlan(seed);
 		const session = manager();
 		const captured = makeExtension(session);
 		const ctx = context(session);
-		await materializeNotes(plan, captured, ctx, session);
+		await materializeNotes(plan, captured, ctx);
+		const bodies = new Map(plan.writes.map((write) => [write.path, write.body]));
 		for (const variant of plan.search) {
-			const params = { query: variant.query, pattern: variant.pattern, max_files: variant.maxFiles, max_matches_per_file: variant.maxMatchesPerFile, recent_file_first: variant.recentFileFirst };
-			const expected = expectedSearchOrder(ctx, variant).map((file) => file.path);
-			const label = `notes_search_contents seed=${seed} ${variant.label} query=${JSON.stringify(variant.query)} pattern=${JSON.stringify(variant.pattern)} max_files=${variant.maxFiles} max_matches_per_file=${variant.maxMatchesPerFile} recent_file_first=${variant.recentFileFirst}`;
+			const params = { query: variant.query, pattern: variant.pattern, max_files: variant.maxFiles, max_matches_per_file: variant.maxMatchesPerFile };
+			const expected = expectedSearchRows(ctx, variant).map((row) => row.path);
+			const label = `notes_search seed=${seed} ${variant.label} query=${JSON.stringify(variant.query)} pattern=${JSON.stringify(variant.pattern)} max_files=${variant.maxFiles} max_matches_per_file=${variant.maxMatchesPerFile}`;
 			const pages = await walkPages({
-				captured, ctx, tool: "notes_search_contents", params,
+				captured, ctx, tool: "notes_search", params,
 				idsOf: (page, cursor) => notePathIdentity(expected, cursor, label, page, "files"),
 				expected,
 				label,
@@ -586,9 +518,9 @@ test("notes_search_contents enumerates every matching file across seeded mixes",
 			for (const page of pages) {
 				for (const file of page.files as Array<{ path: string; path_truncated?: boolean; matches: Array<{ line: number; text: string; offset_chars: number }> }>) {
 					const storePath = expected[flat++]!;
-					const store = notesFromSession(ctx).get(storePath);
-					assert.ok(store, `${label}: reported ${storePath} is not in the note store`);
-					const lines = store.text.split("\n");
+					const body = bodies.get(storePath);
+					assert.ok(body !== undefined, `${label}: reported ${storePath} was never written`);
+					const lines = body.split("\n");
 					const matchingLines = lines.flatMap((line, index) => line.includes(variant.query) ? [index + 1] : []);
 					assert.ok(file.matches.length >= 1, `${label}: ${storePath} reports no matches but appears in the result`);
 					assert.ok(file.matches.length <= Math.min(matchingLines.length, variant.maxMatchesPerFile), `${label}: ${storePath} reports ${file.matches.length} matches beyond its cap`);
@@ -602,8 +534,8 @@ test("notes_search_contents enumerates every matching file across seeded mixes",
 					for (const match of file.matches) {
 						const line = lines[match.line - 1]!;
 						assert.ok(line.includes(variant.query), `${label}: ${storePath}:${match.line} does not contain the query`);
-						// The documented address: file-absolute code points up to the line, plus the query's
-						// earliest occurrence inside it -- so notes_read_file at offset_chars shows the query.
+						// The documented address: body-absolute code points up to the line, plus the query's
+						// earliest occurrence inside it.
 						const earliest = line.indexOf(variant.query);
 						assert.equal(match.offset_chars, (lineBase[match.line - 1] as number) + Array.from(line.slice(0, earliest)).length, `${label}: ${storePath}:${match.line} offset_chars does not address the query`);
 					}

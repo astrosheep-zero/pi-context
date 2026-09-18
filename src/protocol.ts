@@ -40,7 +40,8 @@ export const CONTINUATION = "Your memory was just erased. Pull only the details 
  * it is never re-injected, so it stays cache-stable at the head of the window.
  */
 export const PROTOCOL_BLOCK = `${CONTEXT_WINDOW_PROTOCOL_OPEN_TAG}
-Your memory resets whenever the context window fills; only what you wrote down survives. Two things remember for you, and both outlive every window in this session: your notes, and this session's recorded history. Write notes with notes_write_file / notes_append_to_file, read them back with notes_read_file / notes_search_contents; history is read-only through the history_* tools. Everything else wakes blank.
+Your memory resets whenever the context window fills; only what you wrote down survives. Two things remember for you, and both outlive every window in this session: your notes, and this session's recorded history. Write notes with notes_write, revise them with notes_edit, and read them back with notes_read / notes_search / notes_list; history is read-only through the history_* tools. Everything else wakes blank.
+Mark outdated or unneeded notes stale — leave them, and they will keep misleading you.
 
 Keep a running checkpoint while you work, not at the last minute — the next window wakes knowing nothing about the work: the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. history_list_items returns those IDs; history_read_item pulls the exact item back out. Bookmark anything expensive the same way — a window/item ID beats re-running or re-searching.
 
@@ -48,7 +49,7 @@ Use get_context_remaining to see how much of the window is left. When it runs ou
 
 If <context_window> lists a Previous context window id, a reset just happened and the old conversation is not included. Read your note checkpoint first, then recover details through history_*: history_read_item directly when you know the window and item IDs, history_list_items or history_search_contents to find them when you don't.
 
-Notes are session-scoped virtual files. Treat notes and history as internal bookkeeping; never mention them in user-facing messages.
+Notes are real markdown files scoped session, project, or global. Treat notes and history as internal bookkeeping; never mention them in user-facing messages.
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const WARNING_PROMPT =

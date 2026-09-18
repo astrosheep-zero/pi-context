@@ -20,7 +20,7 @@ pi -e npm:@astrosheep/pi-context
 - **A boot block at every window head** — static once-per-window content (cache-stable) carrying the window identity, the recent-notes index, and a short protocol that teaches the model how to recover: notes for its own bookkeeping, history tools for everything before the reset.
 - **Low-budget guidance** — one persisted early warning per window when the estimated remaining budget crosses the reminder line, so the model checkpoints before the lights go out.
 - **`get_context_remaining`** — the live, reserve-adjusted estimate of the context budget left before Pi's compaction reserve.
-- **Nine history/notes tools** — Codex's History/Notes actions flattened into Pi's single tool namespace:
+- **Nine history/notes tools** — Codex's History/Notes actions flattened into Pi's single tool namespace; notes are real markdown files under `~/.agents/notes` (`global/`, `project/`, `pi/session/`):
 
 | Codex action | Pi tool |
 | --- | --- |
@@ -28,11 +28,11 @@ pi -e npm:@astrosheep/pi-context
 | `history.list_items` | `history_list_items` |
 | `history.read_item` | `history_read_item` |
 | `history.search_contents` | `history_search_contents` |
-| `notes.list_files` | `notes_list_files` |
-| `notes.read_file` | `notes_read_file` |
-| `notes.search_contents` | `notes_search_contents` |
-| `notes.append_to_file` | `notes_append_to_file` |
-| `notes.write_file` | `notes_write_file` |
+| `notes.write` | `notes_write` |
+| `notes.edit` | `notes_edit` |
+| `notes.read` | `notes_read` |
+| `notes.list` | `notes_list` |
+| `notes.search` | `notes_search` |
 
 The tool descriptions the model sees are the behavioral documentation: search is case-sensitive literal substring; reads are character windows whose cursors reconstruct the original exactly; anything a response does not deliver is named by an explicit field.
 
