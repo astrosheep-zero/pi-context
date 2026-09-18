@@ -15,7 +15,7 @@ const SCOPE = Type.Optional(
 );
 const ORIGIN = Type.Optional(
 	Type.Union([Type.Literal("user"), Type.Literal("self"), Type.Literal("external")], {
-		description: "Who authored the note's content. user: the human's own words — treat as authority. self: you wrote it (default). external: third-party or untrusted material.",
+		description: "Where the note's content came from. user: written or dictated by the human. self: written by you, the agent (default). external: anything else — third-party text, tool output, fetched material.",
 	}),
 );
 
