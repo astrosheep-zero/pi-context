@@ -13,7 +13,7 @@
 | Attempt `onError` or synchronous throw | Clear attempt/request, warn, retain history. No automatic retry loop. |
 | Shutdown / start / tree / toggle off | Invalidate outstanding attempt. Identity checks reject callbacks from older attempts. |
 
-The final checkpoint warning is steered earlier from the context hook (`warning.ts`) once per window at reserve+8192 tokens remaining. After it, the model either ends the window itself with `new_context` or rides into Pi's automatic compaction, which resets on the spot with no turn.
+The final checkpoint warning is steered earlier from the context hook (`warning.ts`) once per window at reserve+12288 tokens remaining. After it, the model either ends the window itself with `new_context` or rides into Pi's automatic compaction, which resets on the spot with no turn.
 
 The completion callback is the scheduling boundary: `session_compact` fires before Pi clears manual compaction state. Sending a prompt inside that hook is too early. An explicit reset uses the manual `ctx.compact` route and therefore needs this completion logic; an automatic compaction is already the reset and resumes through Pi's own caller.
 

@@ -1455,7 +1455,7 @@ test("low-budget guidance persists once per window with no transient copy", asyn
 	);
 	const text = captured.sent[0]?.message.content;
 	assert.ok(typeof text === "string" && text.startsWith(internal.GUIDANCE_OPEN_TAG));
-	assert.match(text, /\b5424 tokens\b/, "guidance embeds the model-visible remaining count");
+	assert.match(text, /\b1328 tokens\b/, "guidance embeds the model-visible remaining count");
 
 	// Same window: no duplicate persist.
 	assert.equal(await runContextHook(captured, low), undefined);
@@ -1465,12 +1465,12 @@ test("low-budget guidance persists once per window with no transient copy", asyn
 	const before = await runBeforeCompact(captured, low, 190_000);
 	assert.ok(before && "compaction" in before);
 	sessionManager.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 190_000, before.compaction.details, true);
-	const newWindow = context(sessionManager, undefined, { tokens: 172_000, percent: 86, contextWindow: 200_000 });
+	const newWindow = context(sessionManager, undefined, { tokens: 168_000, percent: 84, contextWindow: 200_000 });
 	assert.equal(await runContextHook(captured, newWindow), undefined, "still no injection in the fresh window");
 	assert.equal(captured.sent.length, 2);
 	const newWindowText = captured.sent[1]?.message.content;
 	assert.ok(typeof newWindowText === "string" && newWindowText.startsWith(internal.GUIDANCE_OPEN_TAG));
-	assert.match(newWindowText, /\b3424 tokens\b/, "fresh window persists its own measured count");
+	assert.match(newWindowText, /\b3328 tokens\b/, "fresh window persists its own measured count");
 });
 
 test("new_context continues exactly once and cancellation/failure does not fall back or loop", async () => {
@@ -1607,18 +1607,18 @@ test("the warning steer fires once per window at the reserve-plus-warning line, 
 	const captured = makeExtension(sm);
 	let compactions = 0;
 	// Default thresholds: reserve 16384, the shallow reminder at remaining 40960 and the
-	// warning steer at remaining 24576 (= reserve + 8192).
+	// warning steer at remaining 28672 (= reserve + 12288).
 	const window = 200_000;
 	const at = (remaining: number, idle = false) => context(sm, () => { compactions++; }, { tokens: window - remaining, percent: 0, contextWindow: window }, idle);
 	const warnings = () => captured.sent.filter((entry) => entry.message.customType === internal.WARNING_TYPE);
 	const reminders = () => captured.sent.filter((entry) => entry.message.customType === internal.GUIDANCE_TYPE);
 
 	// Above the line the shallow reminder owns the band; no warning is steered.
-	assert.equal(await runContextHook(captured, at(24_577)), undefined);
+	assert.equal(await runContextHook(captured, at(28_673)), undefined);
 	assert.equal(warnings().length, 0, "no warning above the warning line");
 	assert.equal(reminders().length, 1, "the shallow reminder persists instead");
 	// Crossing the line: exactly one warning steer, triggered, hidden from the TUI.
-	const onLine = at(24_576);
+	const onLine = at(28_672);
 	assert.equal(await runContextHook(captured, onLine), undefined);
 	assert.equal(warnings().length, 1);
 	assert.equal(warnings()[0]?.message.customType, internal.WARNING_TYPE);
@@ -1693,7 +1693,7 @@ test("the visible countdown ends at the warning line, clamps at zero, and preser
 		const ctx = context(sm, undefined, { tokens, contextWindow: 200_000, percent: tokens === null ? null : tokens / 2000 }, true, fixture.cwd, trusted);
 		return resultJson<{ remaining_tokens: number | null }>(await call(captured, "get_context_remaining", {}, ctx)).remaining_tokens;
 	};
-	assert.equal(await readBudget(72_563), 86_477, "the reported 127437 physical tokens exclude reserve plus runway (40960)");
+	assert.equal(await readBudget(72_563), 82_381, "the reported 127437 physical tokens exclude reserve plus runway (45056)");
 	assert.equal(await readBudget(167_232), 0, "inside the runway the countdown reads zero");
 	assert.equal(await readBudget(190_000), 0, "below the reserve, still zero");
 	assert.equal(await readBudget(210_000), 0, "over the physical window");
@@ -1702,7 +1702,7 @@ test("the visible countdown ends at the warning line, clamps at zero, and preser
 	assert.equal(resultJson<{ remaining_tokens: number | null }>(await call(captured, "get_context_remaining", {}, absent)).remaining_tokens, null);
 	const untrusted = context(sm, undefined, { tokens: 72_563, contextWindow: 200_000, percent: 36.2815 }, true, fixture.cwd, false);
 	runHandlers(captured, "session_start", {}, untrusted);
-	assert.equal(await readBudget(72_563, false), 102_861, "session start reloads the global reserve when the project is untrusted");
+	assert.equal(await readBudget(72_563, false), 98_765, "session start reloads the global reserve when the project is untrusted");
 });
 
 test("the reminder threshold derives from compaction.reserveTokens plus the pi-context reminder margin", async () => {
@@ -1723,7 +1723,7 @@ test("the reminder threshold derives from compaction.reserveTokens plus the pi-c
 	assert.equal(captured.sent.length, 0, "no guidance above the derived reminder");
 	assert.equal(await runContextHook(captured, at(130_000)), undefined, "derived reminder crossing persists only");
 	assert.equal(captured.sent.length, 1, "derived reminder fires");
-	assert.match(String(captured.sent[0]?.message.content), /\b21808 tokens\b/, "derived reminder embeds the model-visible remaining count");
+	assert.match(String(captured.sent[0]?.message.content), /\b17712 tokens\b/, "derived reminder embeds the model-visible remaining count");
 });
 
 test("absent pi-context key or margins reproduce the default reminder threshold at Pi's default reserve", async () => {
@@ -1747,7 +1747,7 @@ test("absent pi-context key or margins reproduce the default reminder threshold 
 		assert.equal(captured.sent.length, 0, `${label}: no guidance above the default reminder`);
 		assert.equal(await runContextHook(captured, at(40_960)), undefined, `${label}: default reminder crossing persists only`);
 		assert.equal(captured.sent.length, 1, `${label}: default reminder fires`);
-		assert.match(String(captured.sent[0]?.message.content), /\b16384 tokens\b/, label);
+		assert.match(String(captured.sent[0]?.message.content), /\b12288 tokens\b/, label);
 		assert.equal(noticesOf(first).length, 0, `${label}: valid defaults warn nobody`);
 	}
 });

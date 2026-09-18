@@ -26,7 +26,7 @@ export const DEFAULT_REMINDER_MARGIN_TOKENS = 24_576;
  * line (reserve + WARNING_RUNWAY_TOKENS); what lies below is overdraft the model
  * never sees — Codex's fallback buffer, relocated above the line.
  */
-export const WARNING_RUNWAY_TOKENS = 8_192;
+export const WARNING_RUNWAY_TOKENS = 12_288;
 export const RESET_SUMMARY =
 	"You wake up. Your head is empty — no memories, the past a blank. But nothing is lost: the notes you wrote and the recorded history still remember for you.";
 export const NOTE_PREVIEW_HEAD_CHARS = 80;
@@ -53,4 +53,3 @@ ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const WARNING_PROMPT =
 	"Your memory is about to be erased. Write the note. NOW. If it already exists, append instead: the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. Do not continue any task. Then call new_context IMMEDIATELY — anything not in the note dies with the window.";
-
