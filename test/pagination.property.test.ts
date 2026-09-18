@@ -154,9 +154,9 @@ function historyPlan(seed: number): HistoryPlan {
 	];
 	const search: HistoryVariant[] = [
 		{ label: "needle-unfiltered", query: NEEDLE, windowIndex: null, role: null, toolName: null, recentFirst: false, limit: 200, maxCharsPerItem: rng.pick(CONTENT_LIMITS) },
-		variant("search-1", rng.pick([NEEDLE, "", "line", "no-such-token", "…"])),
-		variant("search-2", rng.pick([NEEDLE, "", "x", "item", "_odd"])),
-		variant("search-3", rng.pick([NEEDLE, "", "日本語", "m", "L"])),
+		variant("search-1", rng.pick([NEEDLE, "line", "no-such-token", "…"])),
+		variant("search-2", rng.pick([NEEDLE, "x", "item", "_odd"])),
+		variant("search-3", rng.pick([NEEDLE, "日本語", "m", "L"])),
 	];
 	return { seed, entries, windowCount, list, search };
 }
@@ -277,7 +277,6 @@ function notesPlan(seed: number): NotesPlan {
 	const search: NoteSearchVariant[] = [
 		{ label: "needle-all", query: NEEDLE, prefix: null, maxFiles: 200, maxMatchesPerFile: 100, recentFileFirst: false },
 		{ label: "needle-paged", query: NEEDLE, prefix: null, maxFiles: rng.pick([1, 2, 3]), maxMatchesPerFile: rng.pick([1, 2, 5, 100]), recentFileFirst: rng.bool() },
-		{ label: "empty-query", query: "", prefix: null, maxFiles: rng.pick([1, 3, 200]), maxMatchesPerFile: 100, recentFileFirst: false },
 		{ label: "rare-query", query: rng.pick(["line 3", "z", "日本語", "absent-token", "…"]), prefix: rng.pick(prefixes), maxFiles: rng.pick([1, 5, 200]), maxMatchesPerFile: rng.pick([1, 100]), recentFileFirst: rng.bool() },
 	];
 	return { seed, ops, list, search };

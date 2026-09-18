@@ -924,13 +924,14 @@ test("the empty note terminates and every note read is a character window", asyn
 	assert.equal(empty.content, "");
 	assert.equal(empty.total_chars, 0);
 	assert.equal(empty.next_offset_chars, null, "the empty note is exhausted instead of self-feeding");
-	// An offset beyond the file is exhausted, not looped, and still echoes its resolved offset.
-	const beyond = resultRead(
+	// An offset beyond the file is an addressing error that names the real length (0),
+	// not a silent empty page.
+	const beyond = resultJson<{ error?: string; offset_chars?: number; total_chars?: number }>(
 		await call(captured, "notes_read_file", { path: "empty.md", offset_chars: 9 }, ctx),
 	);
-	assert.equal(beyond.offset_chars, 9, "a positive offset past the end is echoed as resolved");
-	assert.equal(beyond.content, "");
-	assert.equal(beyond.next_offset_chars, null, "a beyond-the-file read terminates");
+	assert.match(beyond.error ?? "", /past the end/, "a beyond-the-file read is a named error");
+	assert.equal(beyond.offset_chars, 9, "the error echoes the offending offset");
+	assert.equal(beyond.total_chars, 0, "the error names the real length");
 });
 
 test("history items carry honest truncated/total_chars and max_chars_per_item:1 addresses them", async () => {
@@ -2024,4 +2025,75 @@ test("warning suppression is branch-local and survives toggling without becoming
 	runHandlers(captured, "session_tree", {}, ctx);
 	runHandlers(captured, "context", {}, ctx);
 	assert.equal(captured.sent.length, 2, "returning to the warned branch stays suppressed");
+});
+
+test("argument footguns die loudly and tool-run metadata surfaces (A1/A2/A3/B4/B5)", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+
+	// A1: an empty query string is an argument error on both search tools, never a match-everything.
+	for (const tool of ["history_search_contents", "notes_search_contents"] as const) {
+		await assert.rejects(() => call(captured, tool, { query: "" }, ctx), /empty query matches everything/, `${tool}: bare empty string refused`);
+		await assert.rejects(() => call(captured, tool, { query: ["alpha", ""] }, ctx), /empty query matches everything/, `${tool}: empty array element refused`);
+	}
+
+	// A2: a positive offset past the end is a named error on both read tools; offset == total stays the legal empty end-read.
+	await call(captured, "notes_write_file", { path: "a.md", text: "hello" }, ctx);
+	appendText(session, "user", "hello world");
+	const windowId = historyFromSession(ctx)[0]!.windowId;
+	const listed = resultJson<{ items: Array<{ item_id: string; total_chars: number }> }>(await call(captured, "history_list_items", {}, ctx));
+	const target = listed.items.find((candidate) => candidate.total_chars === "hello world".length);
+	assert.ok(target, "the user item is listed");
+	const notePastEnd = resultJson<{ error?: string; offset_chars?: number; total_chars?: number; path?: string }>(
+		await call(captured, "notes_read_file", { path: "a.md", offset_chars: 6 }, ctx),
+	);
+	assert.match(notePastEnd.error ?? "", /past the end/, "notes: past-end offset is a named error");
+	assert.equal(notePastEnd.offset_chars, 6, "notes: the error echoes the offending offset");
+	assert.equal(notePastEnd.total_chars, 5, "notes: the error names the real length");
+	assert.equal(notePastEnd.path, "a.md", "notes: the error echoes the path");
+	const noteEnd = resultRead(await call(captured, "notes_read_file", { path: "a.md", offset_chars: 5 }, ctx));
+	assert.equal(noteEnd.content, "", "notes: offset == total is the legal empty end-read");
+	assert.equal(noteEnd.next_offset_chars, null, "notes: the end-read terminates");
+	const itemPastEnd = resultJson<{ error?: string; offset_chars?: number; total_chars?: number; window_id?: string; item_id?: string }>(
+		await call(captured, "history_read_item", { window_id: windowId, item_id: target.item_id, offset_chars: 12 }, ctx),
+	);
+	assert.match(itemPastEnd.error ?? "", /past the end/, "history: past-end offset is a named error");
+	assert.equal(itemPastEnd.total_chars, 11, "history: the error names the real length");
+	assert.equal(itemPastEnd.item_id, target.item_id, "history: the error echoes the item_id");
+	const itemEnd = resultRead(await call(captured, "history_read_item", { window_id: windowId, item_id: target.item_id, offset_chars: 11 }, ctx));
+	assert.equal(itemEnd.content, "", "history: offset == total is the legal empty end-read");
+	assert.equal(itemEnd.next_offset_chars, null, "history: the end-read terminates");
+
+	// A3: append to a missing note is a named error that points at notes_write_file; write still creates.
+	const appendMissing = resultJson<{ error?: string; path?: string }>(await call(captured, "notes_append_to_file", { path: "missing.md", text: "x" }, ctx));
+	assert.match(appendMissing.error ?? "", /note file not found \(use notes_write_file to create\)/, "append refuses to silently create");
+	assert.equal(appendMissing.path, "missing.md", "the error echoes the path");
+	const writeCreates = resultJson<{ error?: string; operation?: string }>(await call(captured, "notes_write_file", { path: "missing.md", text: "x" }, ctx));
+	assert.equal(writeCreates.error, undefined, "write still creates the note");
+	const appendNow = resultJson<{ error?: string; operation?: string }>(await call(captured, "notes_append_to_file", { path: "missing.md", text: "y" }, ctx));
+	assert.equal(appendNow.error, undefined, "append to an existing note still works");
+
+	// B4/B5: truncation and error metadata ride along on the projected history items.
+	type AppendableMessage = Parameters<SessionManager["appendMessage"]>[0];
+	session.appendMessage({ role: "bashExecution", command: "yes", output: "y\ny\n", exitCode: 0, cancelled: false, truncated: true, fullOutputPath: "/tmp/full-yes.txt", timestamp: Date.now() } as unknown as AppendableMessage);
+	session.appendMessage({ role: "bashExecution", command: "true", output: "", exitCode: 0, cancelled: false, truncated: false, timestamp: Date.now() } as unknown as AppendableMessage);
+	session.appendMessage({ role: "toolResult", content: [{ type: "text", text: "boom" }], toolCallId: "call-err", toolName: "bash", isError: true, timestamp: Date.now() } as unknown as AppendableMessage);
+	appendText(session, "toolResult", "fine");
+	const tools = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_list_items", { role: "tool", limit: 20 }, ctx));
+	const byContent = (needle: string) => {
+		const found = tools.items.find((candidate) => String(candidate.truncated_content).includes(needle));
+		assert.ok(found, `tool item containing ${JSON.stringify(needle)} is listed`);
+		return found;
+	};
+	const truncatedBash = byContent("yes");
+	assert.equal(truncatedBash.output_truncated, true, "a truncated bash run says so");
+	assert.equal(truncatedBash.full_output_path, "/tmp/full-yes.txt", "a truncated bash run names its full-output path");
+	const cleanBash = byContent("true");
+	assert.equal("output_truncated" in cleanBash, false, "an untruncated bash run carries no truncation keys");
+	assert.equal("full_output_path" in cleanBash, false, "an untruncated bash run names no path");
+	const errored = byContent("boom");
+	assert.equal(errored.tool_error, true, "an errored tool result says so");
+	const fine = byContent("fine");
+	assert.equal("tool_error" in fine, false, "a clean tool result carries no error key");
 });

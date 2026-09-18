@@ -10,6 +10,11 @@ type HistoryItem = {
 	content: string;
 	createdAt: string | undefined;
 	toolName?: string;
+	// bashExecution only: the persisted output was truncated and the full text lives on disk.
+	outputTruncated?: boolean;
+	fullOutputPath?: string;
+	// toolResult only: the run reported an error.
+	toolError?: boolean;
 };
 type HistoryWindow = { windowId: string; createdAt?: string; items: HistoryItem[] };
 
@@ -54,10 +59,13 @@ function messageContent(message: AgentMessage): string {
 	}
 }
 
-function toolInfo(message: AgentMessage): Pick<HistoryItem, "toolName"> {
-	if (message.role === "bashExecution") return { toolName: "bash" };
+function toolInfo(message: AgentMessage): Pick<HistoryItem, "toolName" | "outputTruncated" | "fullOutputPath" | "toolError"> {
+	if (message.role === "bashExecution") {
+		// A truncated bash run is only half the record without the on-disk path: surface both.
+		return { toolName: "bash", outputTruncated: message.truncated || undefined, fullOutputPath: message.truncated ? message.fullOutputPath : undefined };
+	}
 	if (message.role !== "toolResult") return {};
-	return { toolName: message.toolName };
+	return { toolName: message.toolName, toolError: message.isError === true ? true : undefined };
 }
 
 /**
@@ -153,6 +161,10 @@ export function visibleItem(item: HistoryItem, maxChars = 1200) {
 		item_id: item.itemId,
 		role: item.role,
 		tool_name: item.toolName ?? null,
+		// Surfaced only when set: a truncated bash run names its full-output path, and an
+		// errored tool run says so. Absent keys mean nothing special happened.
+		...(item.outputTruncated ? { output_truncated: true, full_output_path: item.fullOutputPath ?? null } : {}),
+		...(item.toolError ? { tool_error: true } : {}),
 		truncated,
 		total_chars: characters.length,
 		// A truncated payload is a plain prefix: no synthetic marker is appended, and

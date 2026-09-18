@@ -66,6 +66,12 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _update, ctx) {
 			const item = allItems(ctx).find((candidate) => candidate.windowId === params.window_id && candidate.itemId === params.item_id);
 			if (!item) return output({ error: "unknown item_id or window_id" });
+			const totalChars = Array.from(item.content).length;
+			// A positive offset past the end is an addressing error, not an empty page: say so,
+			// and name the largest legal offset (offset == total stays the legal empty end-read).
+			if (typeof params.offset_chars === "number" && params.offset_chars > totalChars) {
+				return output({ error: `offset_chars ${params.offset_chars} is past the end: the item has ${totalChars} chars; the largest legal offset is ${totalChars} (an empty end-read)`, window_id: item.windowId, item_id: item.itemId, offset_chars: params.offset_chars, total_chars: totalChars });
+			}
 			const limit_chars = Math.min(params.limit_chars ?? 12000, 50000);
 			return readCharacterWindow(item.content, params.offset_chars, params.limit_chars, (window) => {
 				const { content, ...cursor } = window;

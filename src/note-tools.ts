@@ -54,6 +54,12 @@ export function registerNoteTools(pi: ExtensionAPI) {
 			const path = assertVirtualPath(params.path);
 			const file = notesFromSession(ctx).get(path);
 			if (!file) return output({ error: "note file not found", path });
+			const totalChars = Array.from(file.text).length;
+			// A positive offset past the end is an addressing error, not an empty page: say so,
+			// and name the largest legal offset (offset == total stays the legal empty end-read).
+			if (typeof params.offset_chars === "number" && params.offset_chars > totalChars) {
+				return output({ error: `offset_chars ${params.offset_chars} is past the end: the note has ${totalChars} chars; the largest legal offset is ${totalChars} (an empty end-read)`, path, offset_chars: params.offset_chars, total_chars: totalChars });
+			}
 			const created_at = localIso(file.createdAt);
 			const updated_at = localIso(file.updatedAt);
 			const limit_chars = Math.min(params.limit_chars ?? 12000, 50000);
@@ -146,6 +152,9 @@ export function registerNoteTools(pi: ExtensionAPI) {
 				if (!hasText && !hasStale) return output({ error: "provide text, mark_stale, or both", path });
 				const old = notesFromSession(ctx).get(path);
 				if (!hasText && !old) return output({ error: "note file not found", path });
+				// Appending is not creating: an append to a path that does not exist almost always
+				// means a typo'd path, so it dies loudly instead of silently minting a new note.
+				if (op === "append" && hasText && !old) return output({ error: "note file not found (use notes_write_file to create)", path });
 				const next = hasText ? (op === "append" ? `${old?.text ?? ""}${params.text}` : params.text as string) : old!.text;
 				const bytes = Buffer.byteLength(next, "utf8");
 				if (hasText && bytes > MAX_NOTE_BYTES) return output({ error: `note exceeds ${MAX_NOTE_BYTES} UTF-8 bytes`, path, size_bytes: bytes });

@@ -12,13 +12,15 @@ export const searchQuery = () => Type.Union([Type.String(), Type.Array(Type.Stri
 /**
  * Normalize a search `query` parameter into the literal needles to match.
  * A bare string is a one-element list, so single-query behavior is unchanged.
- * An empty list or a non-string element is refused rather than silently searching
- * for nothing: an empty array is an argument error, not an empty result set.
+ * An empty list, a non-string element, or an empty string is refused rather than silently
+ * searching for nothing: those are argument errors, not empty result sets. An empty string
+ * matches every line and every item, so it can never be what the caller meant.
  */
 export function searchQueries(query: unknown): string[] {
-	if (typeof query === "string") return [query];
-	if (!Array.isArray(query) || query.length === 0) throw new Error("query must be a string or a non-empty array of strings");
-	if (!query.every((candidate) => typeof candidate === "string")) throw new Error("query array elements must be strings");
-	return query as string[];
+	const candidates = typeof query === "string" ? [query] : query;
+	if (!Array.isArray(candidates) || candidates.length === 0) throw new Error("query must be a string or a non-empty array of strings");
+	if (!candidates.every((candidate) => typeof candidate === "string")) throw new Error("query array elements must be strings");
+	if (candidates.some((candidate) => candidate === "")) throw new Error("query strings must be non-empty: an empty query matches everything");
+	return candidates as string[];
 }
 
