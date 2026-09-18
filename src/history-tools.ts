@@ -2,7 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { output, outputRaw, page, middleTruncate, prefixFit, earliestMatchOffsetChars, readCharacterWindow, characterWindowHeader, withinTextBudget } from "./tool-output.js";
 import { positiveInteger, recentFirst, nullableString, role, cursor, searchQuery, searchQueries } from "./tool-schema.js";
-import { historyFromSession, filteredItems, visibleItem, allItems, vacuousRoleToolCombo } from "./history.js";
+import { historyFromSession, filteredItems, visibleItem, allItems, vacuousRoleToolCombo, unknownWindowId } from "./history.js";
 
 /**
  * Shrink one page item to fit the wire budget. `truncated`/`total_chars` stay honest: the
@@ -51,6 +51,8 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _update, ctx) {
 			const invalid = vacuousRoleToolCombo(params);
 			if (invalid) return output({ error: invalid, role: params.role, tool_name: params.tool_name });
+			const badWindow = unknownWindowId(ctx, params);
+			if (badWindow) return output({ error: badWindow.message, window_id: params.window_id, known_windows: badWindow.known });
 			const items = filteredItems(ctx, params).map((item) => visibleItem(item, params.max_chars_per_item ?? 1200));
 			return output(page(items, params.cursor ?? 0, "items", params.limit, truncateHistoryItem));
 		},
@@ -80,6 +82,8 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _update, ctx) {
 			const invalid = vacuousRoleToolCombo(params);
 			if (invalid) return output({ error: invalid, role: params.role, tool_name: params.tool_name });
+			const badWindow = unknownWindowId(ctx, params);
+			if (badWindow) return output({ error: badWindow.message, window_id: params.window_id, known_windows: badWindow.known });
 			const queries = searchQueries(params.query);
 			const matching = filteredItems(ctx, params)
 				.filter((item) => queries.some((query) => item.content.includes(query)))

@@ -166,6 +166,17 @@ export function allItems(ctx: SessionReader) {
 }
 
 /**
+ * window_id must name a real window; anything else is a named error, not a silent empty page
+ * (a window that exists but has no matching items after the other filters stays a legal empty
+ * page). Returns the teaching message plus the known window ids so the error is self-healing.
+ */
+export function unknownWindowId(ctx: SessionReader, params: HistoryFilter): { message: string; known: string[] } | undefined {
+	if (typeof params.window_id !== "string") return undefined;
+	const known = historyFromSession(ctx).map((window) => window.windowId);
+	return known.includes(params.window_id) ? undefined : { message: `unknown window_id "${params.window_id}"`, known };
+}
+
+/**
  * A role×tool_name combination is vacuous — provably empty from the taxonomy alone, before
  * any data is read — when tool_name is given alongside a role that never carries one. Only
  * "tool_call" and "tool" items have a tool name. Returns the teaching error message, or

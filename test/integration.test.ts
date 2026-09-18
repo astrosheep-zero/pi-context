@@ -1040,6 +1040,16 @@ test("a vacuous role×tool_name combination is a named error, not a silent empty
 			assert.equal(fine.error, undefined, `${tool} accepts ${JSON.stringify(legit)}`);
 			assert.ok(Array.isArray(fine.items), `${tool} returns a page for ${JSON.stringify(legit)}`);
 		}
+		const realWindow = historyFromSession(ctx)[0]!.windowId;
+		const badWindow = resultJson<{ error?: string; window_id?: string; known_windows?: string[] }>(
+			await call(captured, tool, { ...base, window_id: "pcw:00000000:deadbeef" }, ctx),
+		);
+		assert.match(badWindow.error ?? "", /unknown window_id/, `${tool} names an unknown window_id`);
+		assert.equal(badWindow.window_id, "pcw:00000000:deadbeef", "the error echoes the offending window_id");
+		assert.deepEqual(badWindow.known_windows, [realWindow], "the error lists the known windows so it is self-healing");
+		const goodWindow = resultJson<{ error?: string; items?: unknown[] }>(await call(captured, tool, { ...base, window_id: realWindow }, ctx));
+		assert.equal(goodWindow.error, undefined, `${tool} accepts a real window_id`);
+		assert.ok(Array.isArray(goodWindow.items), `${tool} returns a page for a real window_id`);
 	}
 });
 
