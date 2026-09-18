@@ -39,7 +39,7 @@ export function registerMemoryTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_write",
 		label: "Notes write",
-		description: "Create or replace a note as a real markdown file under the session, project, or global note root. Keep notes small and split by topic; a rewrite replaces the body whole while preserving created_at and every other frontmatter key. stale: true marks the note closed so it leaves the boot index but stays readable and searchable.",
+		description: "Create or replace a note as a real markdown file under the session, project, or global note root. Keep notes small and split by topic — by what the note is about, never by who said it (authorship is origin's job); a rewrite replaces the body whole while preserving created_at and every other frontmatter key. stale: true marks the note closed so it leaves the boot index but stays readable and searchable.",
 		parameters: Type.Object({ path: Type.String(), content: Type.String(), scope: SCOPE, origin: ORIGIN, stale: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
 		// A batch containing write or edit runs one call at a time, so note read-modify-write cannot race.
 		executionMode: "sequential",
