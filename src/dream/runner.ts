@@ -30,14 +30,21 @@ export async function runDreamer(playbook: string, cwd: string, options: { comma
 	if (options.command) return runExternalDreamer(options.command, playbook, cwd);
 	const session = await (options.sessionFactory ?? defaultDreamerSessionFactory)({ cwd, modelPattern: options.modelPattern, tools: READ_ONLY_TOOLS });
 	let answer = "";
+	let providerError: string | undefined;
 	const unsubscribe = session.subscribe((event: any) => {
 		if (event.type !== "message_end" || event.message?.role !== "assistant") return;
+		if (event.message.stopReason === "error") { providerError = event.message.errorMessage ?? "unknown provider error"; return; }
 		const content = event.message.content;
 		answer = typeof content === "string" ? content : Array.isArray(content) ? content.filter((part: any) => part.type === "text").map((part: any) => part.text).join("") : "";
 	});
 	try {
 		await session.prompt(`${playbook}\n\nReturn exactly one JSON manifest matching this schema: { merge?, promote?, trash?, pending?, skillCandidates?, report }.`);
-		return parseManifest(answer);
+		try {
+			return parseManifest(answer);
+		} catch (error) {
+			if (providerError) throw new Error(`dreamer failed: ${providerError}`);
+			throw error;
+		}
 	} finally {
 		unsubscribe?.();
 		session.dispose();

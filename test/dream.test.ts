@@ -30,6 +30,17 @@ test("SDK dreamer captures assistant event and receives read-only allowlist", as
 	assert.deepEqual(manifest, { report: "stub" }); assert.deepEqual(configured, READ_ONLY_TOOLS); assert.equal(configured.includes("notes_write"), false); assert.equal(configured.includes("notes_edit"), false);
 });
 
+test("SDK dreamer surfaces provider stopReason error instead of manifest-parse lie", async () => {
+	const session = { subscribe(handler: (event: unknown) => void) { this.handler = handler; return () => {}; }, handler: (_event: unknown) => {}, async prompt(_text: string) { this.handler({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "402: {\"error\":{\"message\":\"Insufficient Balance\"}}" } }); }, dispose() {} };
+	await assert.rejects(() => runDreamer("playbook", "/tmp/notes", { sessionFactory: async () => session as any }), /Insufficient Balance/);
+	await assert.rejects(() => runDreamer("playbook", "/tmp/notes", { sessionFactory: async () => session as any }), /402/);
+});
+
+test("SDK dreamer parse failure keeps existing manifest message without provider error", async () => {
+	const session = { subscribe(handler: (event: unknown) => void) { this.handler = handler; return () => {}; }, handler: (_event: unknown) => {}, async prompt(_text: string) { this.handler({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "sorry, I could not do that" }] } }); }, dispose() {} };
+	await assert.rejects(() => runDreamer("playbook", "/tmp/notes", { sessionFactory: async () => session as any }), /did not return a valid JSON manifest/);
+});
+
 test("default dreamer rejects an unresolvable model pattern", async () => {
 	await assert.rejects(() => defaultDreamerSessionFactory({ cwd: "/tmp/notes", modelPattern: "definitely-not-a-real-model", tools: READ_ONLY_TOOLS }), /definitely-not-a-real-model/);
 });
