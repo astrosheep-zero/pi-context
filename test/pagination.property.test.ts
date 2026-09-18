@@ -80,7 +80,6 @@ type HistoryVariant = {
 	windowIndex: number | null;
 	role: HistoryFilterName | null;
 	toolName: string | null;
-	toolNamespace: string | null;
 	recentFirst: boolean;
 	limit: number;
 	maxCharsPerItem: number;
@@ -99,7 +98,6 @@ const CONTENT_LIMITS = [1, 5, 60, 1200, 24_000, 50_000] as const;
 const PAGE_LIMITS = [1, 2, 3, 5, 8, 13, 34, 200] as const;
 const ROLE_FILTERS = [null, "user", "assistant", "tool", "system", "developer"] as const;
 const NAME_FILTERS = [null, "bash", "notes_read_file", "history_list_items", "read", "_odd", "mcp_tool_call"] as const;
-const SPACE_FILTERS = [null, "notes", "history", "web", "mcp"] as const;
 
 function makeContent(rng: Rng, large: boolean): string {
 	const shape = large ? rng.pick(["large", "large", "medium", "needle"] as const) : rng.pick(["empty", "tiny", "tiny", "needle", "medium"] as const);
@@ -143,20 +141,19 @@ function historyPlan(seed: number): HistoryPlan {
 		windowIndex: rng.bool(0.3) ? rng.int(0, windowCount - 1) : null,
 		role: rng.pick(ROLE_FILTERS),
 		toolName: rng.pick(NAME_FILTERS),
-		toolNamespace: rng.pick(SPACE_FILTERS),
 		recentFirst: rng.bool(),
 		limit: rng.pick(PAGE_LIMITS),
 		maxCharsPerItem: rng.pick(CONTENT_LIMITS),
 	});
 	// Variant 0 of each list is deliberately unfiltered: it must enumerate the whole set.
 	const list: HistoryVariant[] = [
-		{ label: "unfiltered", windowIndex: null, role: null, toolName: null, toolNamespace: null, recentFirst: false, limit: 200, maxCharsPerItem: rng.pick(CONTENT_LIMITS) },
+		{ label: "unfiltered", windowIndex: null, role: null, toolName: null, recentFirst: false, limit: 200, maxCharsPerItem: rng.pick(CONTENT_LIMITS) },
 		variant("list-1"),
 		variant("list-2"),
 		variant("list-3"),
 	];
 	const search: HistoryVariant[] = [
-		{ label: "needle-unfiltered", query: NEEDLE, windowIndex: null, role: null, toolName: null, toolNamespace: null, recentFirst: false, limit: 200, maxCharsPerItem: rng.pick(CONTENT_LIMITS) },
+		{ label: "needle-unfiltered", query: NEEDLE, windowIndex: null, role: null, toolName: null, recentFirst: false, limit: 200, maxCharsPerItem: rng.pick(CONTENT_LIMITS) },
 		variant("search-1", rng.pick([NEEDLE, "", "line", "no-such-token", "…"])),
 		variant("search-2", rng.pick([NEEDLE, "", "x", "item", "_odd"])),
 		variant("search-3", rng.pick([NEEDLE, "", "日本語", "m", "L"])),
@@ -180,20 +177,18 @@ function historyParams(ctx: ExtensionContext, variant: HistoryVariant): Record<s
 		recent_first: variant.recentFirst,
 		role: variant.role,
 		tool_name: variant.toolName,
-		tool_namespace: variant.toolNamespace,
 		window_id: windowId,
 		max_chars_per_item: variant.maxCharsPerItem,
 	};
 }
 
-type StoreHistoryItem = { itemId: string; windowId: string; role: string; content: string; toolName?: string; toolNamespace?: string };
+type StoreHistoryItem = { itemId: string; windowId: string; role: string; content: string; toolName?: string };
 
 /** The documented filter order (filteredItems), reimplemented over the store, never over page(). */
 function storeHistoryItems(ctx: ExtensionContext, params: Record<string, unknown>): StoreHistoryItem[] {
 	let items = historyFromSession(ctx).flatMap((window) => window.items);
 	if (typeof params.window_id === "string") items = items.filter((item) => item.windowId === params.window_id);
 	if (typeof params.role === "string") items = items.filter((item) => item.role === params.role);
-	if (typeof params.tool_namespace === "string") items = items.filter((item) => item.toolNamespace === params.tool_namespace);
 	if (typeof params.tool_name === "string") items = items.filter((item) => item.toolName === params.tool_name);
 	if (params.recent_first !== false) items = [...items].reverse();
 	return items;
@@ -502,7 +497,7 @@ test("history_list_items enumerates every item across seeded session shapes", as
 				captured, ctx, tool: "history_list_items", params,
 				idsOf: (page) => (page.items as Array<{ item_id: string }>).map((item) => item.item_id),
 				expected,
-				label: `history_list_items seed=${seed} ${variant.label} windowIndex=${variant.windowIndex} role=${variant.role} tool_name=${variant.toolName} tool_namespace=${variant.toolNamespace} recent_first=${variant.recentFirst} limit=${variant.limit} max_chars_per_item=${variant.maxCharsPerItem}`,
+				label: `history_list_items seed=${seed} ${variant.label} windowIndex=${variant.windowIndex} role=${variant.role} tool_name=${variant.toolName} recent_first=${variant.recentFirst} limit=${variant.limit} max_chars_per_item=${variant.maxCharsPerItem}`,
 			});
 		}
 	});
@@ -522,7 +517,7 @@ test("history_search_contents enumerates every match across seeded session shape
 				captured, ctx, tool: "history_search_contents", params,
 				idsOf: (page) => (page.items as Array<{ item_id: string }>).map((item) => item.item_id),
 				expected,
-				label: `history_search_contents seed=${seed} ${variant.label} query=${JSON.stringify(params.query)} windowIndex=${variant.windowIndex} role=${variant.role} tool_name=${variant.toolName} tool_namespace=${variant.toolNamespace} recent_first=${variant.recentFirst} limit=${variant.limit} max_chars_per_item=${variant.maxCharsPerItem}`,
+				label: `history_search_contents seed=${seed} ${variant.label} query=${JSON.stringify(params.query)} windowIndex=${variant.windowIndex} role=${variant.role} tool_name=${variant.toolName} recent_first=${variant.recentFirst} limit=${variant.limit} max_chars_per_item=${variant.maxCharsPerItem}`,
 			});
 		}
 	});

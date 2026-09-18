@@ -983,7 +983,7 @@ test("assistant tool calls project as their own searchable items", async () => {
 	} as unknown as AppendableMessage);
 	const windowId = historyFromSession(ctx)[0]!.windowId;
 
-	const listed = resultJson<{ items: Array<{ item_id: string; role: string; tool_name: string | null; tool_namespace: string | null; truncated_content: string }> }>(
+	const listed = resultJson<{ items: Array<{ item_id: string; role: string; tool_name: string | null; truncated_content: string }> }>(
 		await call(captured, "history_list_items", { recent_first: false, max_chars_per_item: 50_000 }, ctx),
 	);
 	const turn = listed.items.find((item) => item.item_id === turnId)!;
@@ -993,11 +993,9 @@ test("assistant tool calls project as their own searchable items", async () => {
 	const call1 = listed.items.find((item) => item.item_id === `${turnId}#0`)!;
 	assert.equal(call1.role, "assistant", "a call item wears the authoring turn's role");
 	assert.equal(call1.tool_name, "bash");
-	assert.equal(call1.tool_namespace, null, "bash has no underscore namespace");
 	assert.equal(call1.truncated_content, JSON.stringify({ command: "keiyaku status" }), "a call item's content is the call's JSON arguments");
 	const call2 = listed.items.find((item) => item.item_id === `${turnId}#1`)!;
 	assert.equal(call2.tool_name, "notes_read_file");
-	assert.equal(call2.tool_namespace, "notes", "the namespace is the name's first-underscore prefix");
 
 	// The invocation is searchable exactly where a searcher reaches for it: assistant + tool_name.
 	const calls = resultJson<{ items: Array<{ item_id: string }> }>(

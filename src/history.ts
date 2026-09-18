@@ -10,14 +10,12 @@ type HistoryItem = {
 	content: string;
 	createdAt: string | undefined;
 	toolName?: string;
-	toolNamespace?: string;
 };
 type HistoryWindow = { windowId: string; createdAt?: string; items: HistoryItem[] };
 
 type HistoryFilter = {
 	window_id?: string | null;
 	role?: HistoryItem["role"] | null;
-	tool_namespace?: string | null;
 	tool_name?: string | null;
 	recent_first?: boolean;
 };
@@ -56,16 +54,10 @@ function messageContent(message: AgentMessage): string {
 	}
 }
 
-/** A tool name's namespace is its prefix up to the first underscore (notes_read_file -> notes). */
-function namespaceOf(toolName: string): string | undefined {
-	const underscore = toolName.indexOf("_");
-	return underscore > 0 ? toolName.slice(0, underscore) : undefined;
-}
-
-function toolInfo(message: AgentMessage): Pick<HistoryItem, "toolName" | "toolNamespace"> {
-	if (message.role === "bashExecution") return { toolName: "bash", toolNamespace: undefined };
+function toolInfo(message: AgentMessage): Pick<HistoryItem, "toolName"> {
+	if (message.role === "bashExecution") return { toolName: "bash" };
 	if (message.role !== "toolResult") return {};
-	return { toolName: message.toolName, toolNamespace: namespaceOf(message.toolName) };
+	return { toolName: message.toolName };
 }
 
 /**
@@ -88,7 +80,6 @@ function toolCallItems(windowId: string, entry: { id: string; timestamp?: string
 			content: JSON.stringify(call.arguments),
 			createdAt: entry.timestamp,
 			toolName: call.name,
-			toolNamespace: namespaceOf(call.name),
 		});
 	}
 	return items;
@@ -161,7 +152,6 @@ export function visibleItem(item: HistoryItem, maxChars = 1200) {
 		window_id: item.windowId,
 		item_id: item.itemId,
 		role: item.role,
-		tool_namespace: item.toolNamespace ?? null,
 		tool_name: item.toolName ?? null,
 		truncated,
 		total_chars: characters.length,
@@ -179,7 +169,6 @@ export function allItems(ctx: SessionReader) {
 	let items = allItems(ctx);
 	if (typeof params.window_id === "string") items = items.filter((item) => item.windowId === params.window_id);
 	if (typeof params.role === "string") items = items.filter((item) => item.role === params.role);
-	if (typeof params.tool_namespace === "string") items = items.filter((item) => item.toolNamespace === params.tool_namespace);
 	if (typeof params.tool_name === "string") items = items.filter((item) => item.toolName === params.tool_name);
 	if (params.recent_first !== false) items.reverse();
 	return items;
