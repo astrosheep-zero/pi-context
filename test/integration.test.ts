@@ -966,7 +966,7 @@ test("history items carry honest truncated/total_chars and max_chars_per_item:1 
 	assert.ok(resolved.content.includes("NEEDLE"), "the address resolves to the query through history_read_item");
 });
 
-test("assistant tool calls project as their own searchable items", async () => {
+test("tool calls wear their own role and assistant text stays pure", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
@@ -991,17 +991,25 @@ test("assistant tool calls project as their own searchable items", async () => {
 	assert.equal(turn.tool_name, null, "the turn's text item carries no tool identity");
 	assert.equal(turn.truncated_content, "on it", "the turn item keeps only the visible text");
 	const call1 = listed.items.find((item) => item.item_id === `${turnId}#0`)!;
-	assert.equal(call1.role, "assistant", "a call item wears the authoring turn's role");
+	assert.equal(call1.role, "tool_call");
 	assert.equal(call1.tool_name, "bash");
 	assert.equal(call1.truncated_content, JSON.stringify({ command: "keiyaku status" }), "a call item's content is the call's JSON arguments");
 	const call2 = listed.items.find((item) => item.item_id === `${turnId}#1`)!;
 	assert.equal(call2.tool_name, "notes_read_file");
 
-	// The invocation is searchable exactly where a searcher reaches for it: assistant + tool_name.
+	// The invocation is searchable exactly where a searcher reaches for it: tool_call + tool_name.
 	const calls = resultJson<{ items: Array<{ item_id: string }> }>(
-		await call(captured, "history_search_contents", { query: "keiyaku status", role: "assistant", tool_name: "bash" }, ctx),
+		await call(captured, "history_search_contents", { query: "keiyaku status", role: "tool_call", tool_name: "bash" }, ctx),
 	);
 	assert.deepEqual(calls.items.map((item) => item.item_id), [`${turnId}#0`], "the command line is found on the call item, not the turn");
+	const assistantCalls = resultJson<{ items: Array<{ item_id: string }> }>(
+		await call(captured, "history_search_contents", { query: "keiyaku status", role: "assistant" }, ctx),
+	);
+	assert.equal(assistantCalls.items.length, 0, "calls never leak into assistant text");
+	const assistantText = resultJson<{ items: Array<{ item_id: string }> }>(
+		await call(captured, "history_search_contents", { query: "on it", role: "assistant" }, ctx),
+	);
+	assert.deepEqual(assistantText.items.map((item) => item.item_id), [turnId], "assistant search returns the turn's text item only");
 	const outputs = resultJson<{ items: Array<{ item_id: string }> }>(
 		await call(captured, "history_search_contents", { query: "keiyaku status", role: "tool" }, ctx),
 	);

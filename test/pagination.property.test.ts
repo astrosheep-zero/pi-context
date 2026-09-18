@@ -72,7 +72,7 @@ type HistoryEntryPlan =
 	| { kind: "custom_message"; content: string }
 	| { kind: "compaction"; summary: string };
 
-type HistoryFilterName = "user" | "assistant" | "tool" | "system" | "developer";
+type HistoryFilterName = "user" | "assistant" | "tool_call" | "tool" | "system" | "developer";
 
 type HistoryVariant = {
 	label: string;
@@ -96,7 +96,7 @@ type HistoryPlan = {
 const TOOL_NAMES = ["bash", "notes_read_file", "notes_write_file", "history_list_items", "history_search_contents", "web_search", "mcp_tool_call", "read", "_odd"] as const;
 const CONTENT_LIMITS = [1, 5, 60, 1200, 24_000, 50_000] as const;
 const PAGE_LIMITS = [1, 2, 3, 5, 8, 13, 34, 200] as const;
-const ROLE_FILTERS = [null, "user", "assistant", "tool", "system", "developer"] as const;
+const ROLE_FILTERS = [null, "user", "assistant", "tool_call", "tool", "system", "developer"] as const;
 const NAME_FILTERS = [null, "bash", "notes_read_file", "history_list_items", "read", "_odd", "mcp_tool_call"] as const;
 
 function makeContent(rng: Rng, large: boolean): string {

@@ -6,7 +6,7 @@ import { RESET_V2 } from "./protocol.js";
 type HistoryItem = {
 	windowId: string;
 	itemId: string;
-	role: "user" | "assistant" | "tool" | "system" | "developer";
+	role: "user" | "assistant" | "tool_call" | "tool" | "system" | "developer";
 	content: string;
 	createdAt: string | undefined;
 	toolName?: string;
@@ -61,10 +61,10 @@ function toolInfo(message: AgentMessage): Pick<HistoryItem, "toolName"> {
 }
 
 /**
- * An assistant turn's tool calls, projected as their own items: role "assistant" like the turn
- * that authored them, tool_name set, content = the call's JSON arguments. What was invoked is
- * then as searchable as what came back (role "tool"). Ids derive from the turn's entry id and
- * stay opaque; history_read_item resolves them like any other item.
+ * An assistant turn's tool calls, projected as their own items: calls wear their own role so the
+ * authoring turn's visible text (role "assistant") stays pure; what was invoked stays as
+ * searchable as what came back (role "tool"). Ids derive from the turn's entry id and stay
+ * opaque; history_read_item resolves them like any other item.
  */
 function toolCallItems(windowId: string, entry: { id: string; timestamp?: string }, message: AgentMessage): HistoryItem[] {
 	if (message.role !== "assistant" || !Array.isArray(message.content)) return [];
@@ -76,7 +76,7 @@ function toolCallItems(windowId: string, entry: { id: string; timestamp?: string
 		items.push({
 			windowId,
 			itemId: `${entry.id}#${callIndex++}`,
-			role: "assistant",
+			role: "tool_call",
 			content: JSON.stringify(call.arguments),
 			createdAt: entry.timestamp,
 			toolName: call.name,
