@@ -10,7 +10,7 @@ Every note has this frontmatter block:
 ```yaml
 ---
 scope: session | project | global
-origin: human | agent | dream
+origin: user | self | external
 status: active
 stale: false
 created_at: <timestamp>
