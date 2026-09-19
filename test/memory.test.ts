@@ -101,6 +101,15 @@ test("overwrite preserves created_at and unknown keys, bumps updated_at, and cle
 	assert.equal(listed.meta.status, "active");
 });
 
+test("listNotes retains each parsed body for boot previews", async () => {
+	freshRoot();
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	await call(captured, "notes_write", { path: "preview.md", content: "parsed once" }, ctx);
+	assert.equal(listNotes(ctx, { scope: "session" })[0]?.body, "parsed once");
+});
+
 test("edit is body-scoped with named failures and a replace_all escape hatch", async () => {
 	freshRoot();
 	const session = manager();

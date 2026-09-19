@@ -3,6 +3,7 @@ import { lstat, mkdir, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createAgentSession, createEditToolDefinition, createWriteToolDefinition, ModelRuntime, resolveModelScopeWithDiagnostics, SessionManager, type AgentSession, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { contentText } from "../history.js";
 
 export type DreamWrite = { tool: "write" | "edit"; path: string };
 export type DreamResult = { report: string; writes: DreamWrite[] };
@@ -84,10 +85,6 @@ export const defaultDreamerSessionFactory: DreamerSessionFactory = async ({ cwd,
 	return session;
 };
 
-function textContent(content: unknown): string {
-	return typeof content === "string" ? content : Array.isArray(content) ? content.filter((part: any) => part.type === "text").map((part: any) => part.text).join("") : "";
-}
-
 export async function runDreamer(playbook: string, cwd: string, options: { modelPattern?: string; sessionFactory?: DreamerSessionFactory } = {}): Promise<DreamResult> {
 	const session = await (options.sessionFactory ?? defaultDreamerSessionFactory)({ cwd, modelPattern: options.modelPattern, tools: DREAMER_TOOLS });
 	let answer = "";
@@ -99,7 +96,7 @@ export async function runDreamer(playbook: string, cwd: string, options: { model
 		if ((tool === "write" || tool === "edit") && args && typeof args === "object" && typeof args.path === "string") writes.push({ tool, path: args.path });
 		if (event.type !== "message_end" || event.message?.role !== "assistant") return;
 		if (event.message.stopReason === "error") { providerError = event.message.errorMessage ?? "unknown provider error"; return; }
-		answer = textContent(event.message.content);
+		answer = contentText(event.message.content);
 	});
 	try {
 		await session.prompt(playbook);

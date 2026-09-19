@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { WARNING_TYPE, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG, WARNING_PROMPT } from "./protocol.js";
 import { thresholdsFor, resetThresholds, type ResolvedThresholds } from "./thresholds.js";
 import { hasWindowMessage, currentWindowId } from "./history.js";
+import { remainingTokens } from "./budget.js";
 
 /**
  * The final checkpoint warning, steered to the model once per window. Like the early
@@ -30,9 +31,8 @@ export function registerWarning(pi: ExtensionAPI, isEnabled: () => boolean): voi
 	pi.on("context", (_event, ctx) => {
 		const windowId = currentWindowId(ctx);
 		if (!isEnabled() || firedInWindow === windowId || hasWindowMessage(ctx, WARNING_TYPE)) return undefined;
-		const usage = ctx.getContextUsage();
-		if (!usage || usage.tokens === null) return undefined;
-		const remaining = Math.max(0, usage.contextWindow - usage.tokens);
+		const remaining = remainingTokens(ctx);
+		if (remaining === null) return undefined;
 		const thresholds = thresholdsFor(ctx);
 		if (!warningDue(remaining, thresholds)) return undefined;
 		firedInWindow = windowId;

@@ -1,12 +1,16 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { GUIDANCE_TYPE, WARNING_TYPE } from "./protocol.js";
-import { thresholdsFor, resetThresholds, deriveThresholds, mergePiContextSettings } from "./thresholds.js";
+import { thresholdsFor, resetThresholds } from "./thresholds.js";
 import { currentWindowId, hasWindowMessage } from "./history.js";
 import { tokenBudgetGuidance } from "./prompts.js";
 import { output } from "./tool-output.js";
 
-export { deriveThresholds, mergePiContextSettings } from "./thresholds.js";
+/** Remaining tokens in the current context window, or null when Pi has no usage estimate. */
+export function remainingTokens(ctx: Pick<ExtensionContext, "getContextUsage">): number | null {
+	const usage = ctx.getContextUsage();
+	return !usage || usage.tokens === null ? null : Math.max(0, usage.contextWindow - usage.tokens);
+}
 
 export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean) {
 	let guidancePersistedInWindow: string | undefined;
@@ -17,16 +21,15 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean) {
 		if (!isEnabled() || hasWindowMessage(ctx, GUIDANCE_TYPE)) return undefined;
 		// The early reminder persists once per window the first time remaining crosses
 		// reserve+margin. It never edits the outgoing request.
-		const usage = ctx.getContextUsage();
-		if (!usage || usage.tokens === null) return undefined;
-		const remaining = Math.max(0, usage.contextWindow - usage.tokens);
+		const remaining = remainingTokens(ctx);
+		if (remaining === null) return undefined;
 		const windowId = currentWindowId(ctx);
 		const { reminder, reserve, warning } = thresholdsFor(ctx);
 		// The final warning owns the deep band: when it has fired (or is due now),
 		// the shallow reminder would only repeat the same instruction closer to
 		// the wipe, at a worse position. See warning.ts.
 		if (remaining <= warning || hasWindowMessage(ctx, WARNING_TYPE)) return undefined;
-		if (remaining <= reminder && guidancePersistedInWindow !== windowId && !hasWindowMessage(ctx, GUIDANCE_TYPE)) {
+		if (remaining <= reminder && guidancePersistedInWindow !== windowId) {
 			guidancePersistedInWindow = windowId;
 			// Persist once per window — no transient copy. A transient bridge would
 			// cover the crossing request, but history would record the reminder after
@@ -54,11 +57,10 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean) {
 		description: "Return estimated context tokens left before your memory is wiped; null when Pi cannot estimate usage.",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_id, _params, _signal, _update, ctx) {
-			const usage = ctx.getContextUsage();
 			// The countdown the model sees ends at the warning line (reserve + runway);
 			// the runway below it is overdraft the model never sees. See protocol.ts.
-			const remaining = usage?.tokens === null || usage === undefined ? null : Math.max(0, usage.contextWindow - usage.tokens - thresholdsFor(ctx as ExtensionContext).warning);
-			return output({ remaining_tokens: remaining });
+			const remaining = remainingTokens(ctx);
+			return output({ remaining_tokens: remaining === null ? null : Math.max(0, remaining - thresholdsFor(ctx as ExtensionContext).warning) });
 		},
 	}));
 

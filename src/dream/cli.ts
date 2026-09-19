@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { acquireLock, failLock, releaseLock } from "./lock.js";
 import { materialGate, timeGate } from "./gates.js";
 import { loadPlaybook, runDreamer } from "./runner.js";
+import { notesRoot } from "../memory/paths.js";
 
 function args(argv: string[]) { const out: Record<string, string | boolean> = {}; for (let i=0;i<argv.length;i++) { const a=argv[i]!; if (a === "--force" || a === "--help") out[a.slice(2)] = true; else if (a.startsWith("--")) out[a.slice(2)] = argv[++i] ?? ""; } return out; }
 function packageRoot(): string {
@@ -14,7 +14,7 @@ function packageRoot(): string {
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
 	const a = args(argv); if (a.help) { console.log("dream --notes-home <dir> [--min-hours 24] [--min-sessions 3] [--force] [--dreamer <model pattern>] [--playbook <path>]\nDefault dreamer: in-process pi SDK session with jailed file tools. Default playbook: <installed package root>/playbook.md; --playbook overrides it."); return 0; }
-	const home = resolve(String(a["notes-home"] ?? process.env.PI_NOTES_HOME ?? join(homedir(), ".agents", "notes"))); process.env.PI_NOTES_HOME = home; mkdirSync(home, { recursive: true });
+	const home = resolve(String(a["notes-home"] ?? notesRoot())); process.env.PI_NOTES_HOME = home; mkdirSync(home, { recursive: true });
 	const lockPath = join(home, ".dream.lock"); const minHours = Number(a["min-hours"] ?? 24); const minSessions = Number(a["min-sessions"] ?? 3);
 	const time = timeGate(lockPath, minHours); console.log(time.reason); if (!a.force && !time.ok) return 0;
 	const material = materialGate(home, existsSync(lockPath) ? statSync(lockPath).mtimeMs : 0, minSessions); console.log(material.reason); if (!a.force && !material.ok) return 0;

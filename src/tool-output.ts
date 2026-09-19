@@ -1,4 +1,7 @@
 export const TOOL_OUTPUT_MAX_BYTES = 32 * 1024;
+export const DEFAULT_READ_WINDOW_CHARS = 12000;
+export const MAX_READ_WINDOW_CHARS = 50000;
+export const HISTORY_PREVIEW_CHARS = 1200;
 
 function json(value: unknown): string {
 	return JSON.stringify(value, null, 2);
@@ -102,7 +105,7 @@ export function readCharacterWindow<T>(text: string, offsetChars: number | undef
 	const chars = Array.from(text);
 	const requested = offsetChars ?? 0;
 	const resolved = requested < 0 ? Math.max(0, chars.length + requested) : Math.max(0, requested);
-	const windowChars = chars.slice(resolved, resolved + Math.min(limitChars ?? 12000, 50000));
+	const windowChars = chars.slice(resolved, resolved + Math.min(limitChars ?? DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS));
 	const build = (content: string): CharacterWindow => {
 		const next = resolved + Array.from(content).length;
 		return { offset_chars: resolved, content, total_chars: chars.length, next_offset_chars: next < chars.length ? next : null };

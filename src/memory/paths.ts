@@ -12,6 +12,11 @@ export function notesRoot(): string {
 	return override && override.length > 0 ? resolve(override) : join(homedir(), ".agents", "notes");
 }
 
+/** Absolute directory holding the per-session note homes. */
+export function sessionHomesRoot(home = notesRoot()): string {
+	return join(home, "pi", "session");
+}
+
 /**
  * Absolute git root for `cwd`, walking upward until a directory holds a `.git` entry.
  * No git root yields undefined, which projectKey then replaces with the cwd itself.
@@ -43,7 +48,7 @@ function sessionId(ctx: ExtensionContext): string {
 export function scopeDir(scope: Scope, ctx: ExtensionContext): string {
 	if (scope === "global") return join(notesRoot(), "global");
 	if (scope === "project") return join(notesRoot(), "project", projectKey(ctx.cwd));
-	return join(notesRoot(), "pi", "session", sessionId(ctx));
+	return join(sessionHomesRoot(), sessionId(ctx));
 }
 
 /**

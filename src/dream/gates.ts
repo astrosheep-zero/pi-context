@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { sessionHomesRoot } from "../memory/paths.js";
 
 export type GateResult = { ok: boolean; reason: string };
 export function timeGate(lockPath: string, minHours: number, now = Date.now()): GateResult {
@@ -8,7 +9,7 @@ export function timeGate(lockPath: string, minHours: number, now = Date.now()): 
 	return age >= minHours * 3600000 ? { ok: true, reason: "time gate: stale" } : { ok: false, reason: "time gate: lock is too fresh" };
 }
 export function materialGate(home: string, lockMtime: number, minSessions: number): GateResult {
-	const root = join(home, "pi", "session");
+	const root = sessionHomesRoot(home);
 	let changed = 0;
 	if (existsSync(root)) for (const dir of readdirSync(root, { withFileTypes: true })) {
 		if (!dir.isDirectory()) continue;

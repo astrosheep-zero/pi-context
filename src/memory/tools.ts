@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { localIso } from "../notes.js";
-import { characterWindowHeader, middleTruncate, output, outputRaw, page, prefixFit, readCharacterWindow, withinTextBudget } from "../tool-output.js";
+import { characterWindowHeader, DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS, middleTruncate, output, outputRaw, page, prefixFit, readCharacterWindow, withinTextBudget } from "../tool-output.js";
 import { cursor, nullableString, positiveInteger, searchQueries, searchQuery } from "../tool-schema.js";
 import { assertAddress } from "./address.js";
 import { serializeNote, stripLeadingFrontmatter, type NoteMeta, type Origin } from "./frontmatter.js";
@@ -56,8 +56,8 @@ export function registerMemoryTools(pi: ExtensionAPI) {
 
 	pi.registerTool(defineTool({
 		name: "notes_read", label: "Notes read",
-		description: `Read a character window of a note file, frontmatter included. ${ADDRESS_DESCRIPTION} offset_chars is the code-point offset to start from (default 0) — a negative value counts back from the end — and limit_chars caps the window (default 12000, max 50000). Each response delivers the longest fitting prefix of that window: concatenate pages in order to reconstruct the note. The response is the raw frontmatter + body behind a one-line [bracketed] header naming the address, the resolved offset, the delivered char range, and the resume cursor.`,
-		parameters: Type.Object({ address: Type.String(), offset_chars: Type.Optional(Type.Integer({ description: "Code-point offset to start from (default 0). A negative value counts back from the end; the response echoes the resolved absolute offset. Pass the previous next_offset_chars back unchanged to continue." })), limit_chars: Type.Optional(Type.Integer({ minimum: 1, maximum: 50000, description: "Largest requested window in code points (default 12000). A window too large for the wire budget is cut short; next_offset_chars names where the next read resumes." })) }, { additionalProperties: false }),
+		description: `Read a character window of a note file, frontmatter included. ${ADDRESS_DESCRIPTION} offset_chars is the code-point offset to start from (default 0) — a negative value counts back from the end — and limit_chars caps the window (default ${DEFAULT_READ_WINDOW_CHARS}, max ${MAX_READ_WINDOW_CHARS}). Each response delivers the longest fitting prefix of that window: concatenate pages in order to reconstruct the note. The response is the raw frontmatter + body behind a one-line [bracketed] header naming the address, the resolved offset, the delivered char range, and the resume cursor.`,
+		parameters: Type.Object({ address: Type.String(), offset_chars: Type.Optional(Type.Integer({ description: "Code-point offset to start from (default 0). A negative value counts back from the end; the response echoes the resolved absolute offset. Pass the previous next_offset_chars back unchanged to continue." })), limit_chars: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_READ_WINDOW_CHARS, description: `Largest requested window in code points (default ${DEFAULT_READ_WINDOW_CHARS}). A window too large for the wire budget is cut short; next_offset_chars names where the next read resumes.` })) }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			let note: ReturnType<typeof readNote>;
 			try {
@@ -70,7 +70,7 @@ export function registerMemoryTools(pi: ExtensionAPI) {
 			if (typeof params.offset_chars === "number" && params.offset_chars > totalChars) return output({ error: `offset_chars ${params.offset_chars} is past the end: the note has ${totalChars} chars; the largest legal offset is ${totalChars} (an empty end-read)`, address: params.address, offset_chars: params.offset_chars, total_chars: totalChars });
 			const created_at = localIso(note.meta.created_at);
 			const updated_at = localIso(note.meta.updated_at);
-			const limit_chars = Math.min(params.limit_chars ?? 12000, 50000);
+			const limit_chars = Math.min(params.limit_chars ?? DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS);
 			return readCharacterWindow(text, params.offset_chars, params.limit_chars, (window) => {
 				const { content, ...rest } = window;
 				return outputRaw(characterWindowHeader(params.address, window, ` · ${note.resolvedScope} · created ${created_at} · updated ${updated_at}`), content, { address: params.address, scope: note.resolvedScope, ...rest, limit_chars, created_at, updated_at });

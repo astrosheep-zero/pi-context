@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { acquireLock, failLock } from "../src/dream/lock.js";
 import { materialGate, timeGate } from "../src/dream/gates.js";
 import { defaultDreamerSessionFactory, dreamerWriteToolDefinitions, runDreamer, DREAMER_TOOLS } from "../src/dream/runner.js";
+import { contentText } from "../src/history.js";
 
 function fixture() { return mkdtempSync(join(tmpdir(), "dream-")); }
 function old(path: string) { const d = new Date(Date.now() - 48 * 3600_000); utimesSync(path, d, d); }
@@ -89,7 +90,7 @@ test("dreamer allowlist contains only the file tools and reports their writes", 
 	const session = {
 		subscribe(handler: (event: unknown) => void) { this.handler = handler; return () => {}; },
 		handler: (_event: unknown) => {},
-		async prompt(_text: string) { this.handler({ type: "tool_execution_start", toolName: "write", args: { path: "global/a.md", content: "a" } }); this.handler({ type: "tool_execution_start", toolName: "edit", args: { path: "project/p.md", edits: [] } }); this.handler({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }] } }); },
+		async prompt(_text: string) { this.handler({ type: "tool_execution_start", toolName: "write", args: { path: "global/a.md", content: "a" } }); this.handler({ type: "tool_execution_start", toolName: "edit", args: { path: "project/p.md", edits: [] } }); this.handler({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }, { type: "text", text: "again" }] } }); },
 		dispose() {},
 	};
 	const result = await runDreamer("playbook", "/tmp/notes", { sessionFactory: async (options) => { configured = options.tools; return session as any; } });
@@ -97,7 +98,8 @@ test("dreamer allowlist contains only the file tools and reports their writes", 
 	assert.deepEqual(configured, ["read", "grep", "find", "ls", "write", "edit"]);
 	assert.equal(configured.some((tool) => tool.startsWith("notes_")), false);
 	assert.deepEqual(result.writes, [{ tool: "write", path: "global/a.md" }, { tool: "edit", path: "project/p.md" }]);
-	assert.equal(result.report, "done");
+	assert.equal(result.report, "done\nagain");
+	assert.equal(result.report, contentText([{ type: "text", text: "done" }, { type: "text", text: "again" }]), "dream and history share the text projection");
 });
 
 test("dreamer session has exactly the jailed file-tool allowlist", async () => {

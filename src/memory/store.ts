@@ -8,6 +8,7 @@ import { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "../protocol.js";
 import { isOrigin, isScope, parseNote, serializeNote, stripLeadingFrontmatter, type NoteMeta, type Origin } from "./frontmatter.js";
 import { addressFor } from "./address.js";
 import { physicalPath, scopeDir, type Scope } from "./paths.js";
+import { earliestMatchOffsetChars } from "../tool-output.js";
 
 export type { NoteMeta, Origin, Scope };
 
@@ -27,7 +28,7 @@ export class NoteError extends Error {
 	}
 }
 
-export type NoteRow = { address: string; scope: Scope; path: string; meta: NoteMeta; sizeBytes: number };
+export type NoteRow = { address: string; scope: Scope; path: string; meta: NoteMeta; body: string; sizeBytes: number };
 export type NoteMatch = { line: number; text: string; offsetChars: number };
 export type NoteSearchRow = { address: string; scope: Scope; path: string; meta: NoteMeta; matches: NoteMatch[] };
 
@@ -253,7 +254,7 @@ export function listNotes(ctx: ExtensionContext, opts: { scope?: Scope; pattern?
 			if (matcher && !matcher.test(address)) continue;
 			const { meta, body } = parseNote(readFileSync(`${root}/${path}`, "utf8"));
 			meta.scope = scope;
-			rows.push({ address, scope, path, meta, sizeBytes: Buffer.byteLength(body, "utf8") });
+				rows.push({ address, scope, path, meta, body, sizeBytes: Buffer.byteLength(body, "utf8") });
 		}
 	}
 	rows.sort((a, b) => b.meta.updated_at - a.meta.updated_at || a.address.localeCompare(b.address));
@@ -275,12 +276,7 @@ export function searchNotes(ctx: ExtensionContext, queries: string[], opts: { sc
 			const matches: NoteMatch[] = [];
 			for (const [index, line] of body.split("\n").entries()) {
 				if (queries.some((query) => line.includes(query))) {
-					let earliest = -1;
-					for (const query of queries) {
-						const found = line.indexOf(query);
-						if (found >= 0 && (earliest < 0 || found < earliest)) earliest = found;
-					}
-					matches.push({ line: index + 1, text: line, offsetChars: baseChars + (earliest <= 0 ? 0 : Array.from(line.slice(0, earliest)).length) });
+					matches.push({ line: index + 1, text: line, offsetChars: baseChars + earliestMatchOffsetChars(line, queries) });
 				}
 				baseChars += Array.from(line).length + 1;
 			}

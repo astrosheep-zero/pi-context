@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { historyFromSession } from "./history.js";
 import { localIso } from "./notes.js";
-import { listNotes, peekNote } from "./memory/store.js";
+import { listNotes } from "./memory/store.js";
 import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, NOTE_PREVIEW_CHARS, NOTE_PREVIEW_HEAD_CHARS, NOTE_PREVIEW_TAIL_CHARS, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "./protocol.js";
 
 /** Codex-style <context_window> identity block: agent name and first/current/previous window ids only. */
@@ -25,27 +25,24 @@ function identityBlock(agentName: string, firstWindowId: string, currentWindowId
  */
 function notesIndex(ctx: ExtensionContext): string {
 	const sections: string[] = [];
-	// TOC residency ("地图在场"): explicit ordered home peeks are the one deliberate
+	const notes = listNotes(ctx, {});
+	// TOC residency ("地图在场"): explicit ordered home lookup is the one deliberate
 	// precedence operation. Stale maps are skipped rather than injected.
 	for (const scope of ["session", "project", "global"] as const) {
-		try {
-			const toc = peekNote(ctx, scope, "TOC.md");
-			if (!toc.meta.stale) {
-				if (toc.body.length > 0) sections.push(toc.body);
-				break;
-			}
-		} catch {
-			// An absent TOC is expected; continue to the next explicit home.
+		const toc = notes.find((row) => row.scope === scope && row.path === "TOC.md");
+		if (toc && !toc.meta.stale) {
+			if (toc.body.length > 0) sections.push(toc.body);
+			break;
 		}
 	}
 	// listNotes is already most-recently-updated first; stale notes never reach the index.
-	const recentNotes = listNotes(ctx, {})
+	const recentNotes = notes
 		.filter((row) => !row.meta.stale)
 		.slice(0, 5);
 	if (recentNotes.length > 0) {
 		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (up to 5, most recent first):`];
 		for (const row of recentNotes) {
-			const body = peekNote(ctx, row.meta.scope, row.path).body;
+		const body = row.body;
 			lines.push(`- ${row.address} (${body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${localIso(row.meta.updated_at)})`);
 			const chars = Array.from(body);
 			// Short notes stay whole; long notes keep both ends. head + tail <= NOTE_PREVIEW_CHARS < chars.length,

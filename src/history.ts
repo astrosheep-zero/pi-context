@@ -2,6 +2,7 @@ import type { TextContent, ToolCall } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { SessionReader } from "./session-reader.js";
 import { RESET_V2 } from "./protocol.js";
+import { HISTORY_PREVIEW_CHARS } from "./tool-output.js";
 
 type HistoryItem = {
 	windowId: string;
@@ -29,9 +30,9 @@ function isTextContent(part: unknown): part is TextContent {
 	return typeof part === "object" && part !== null && (part as TextContent).type === "text" && typeof (part as TextContent).text === "string";
 }
 
-function contentText(content: string | unknown[]): string {
+export function contentText(content: unknown): string {
 	if (typeof content === "string") return content;
-	return content.filter(isTextContent).map((part) => part.text).join("\n");
+	return Array.isArray(content) ? content.filter(isTextContent).map((part) => part.text).join("\n") : "";
 }
 
 function mapRole(role: AgentMessage["role"]): HistoryItem["role"] | undefined {
@@ -102,14 +103,19 @@ export function resetV2WindowId(details: unknown): string | undefined {
 }
 
 /** A compaction entry's window id: the extension-minted id for reset-v2, else Pi's entry id. */
-function windowIdOf(sessionId: string, entry: { id: string; details?: unknown }): string {
+export function windowIdOf(sessionId: string, entry: { id: string; details?: unknown }): string {
 	return resetV2WindowId(entry.details) ?? `pcw:${sessionId.slice(0, 8)}:${entry.id}`;
+}
+
+/** Mint the durable identity of a session's root history window. */
+export function rootWindowId(sessionId: string): string {
+	return `pcw:${sessionId.slice(0, 8)}:root`;
 }
 
 /** Build durable, on-demand history directly from every entry on the current session branch. */
 export function historyFromSession(ctx: SessionReader): HistoryWindow[] {
 	const sessionId = ctx.sessionManager.getSessionId();
-	let window: HistoryWindow = { windowId: `pcw:${sessionId.slice(0, 8)}:root`, items: [] };
+	let window: HistoryWindow = { windowId: rootWindowId(sessionId), items: [] };
 	const windows = [window];
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type === "compaction") {
@@ -153,7 +159,7 @@ export function historyFromSession(ctx: SessionReader): HistoryWindow[] {
 	return windows;
 }
 
-export function visibleItem(item: HistoryItem, maxChars = 1200) {
+export function visibleItem(item: HistoryItem, maxChars = HISTORY_PREVIEW_CHARS) {
 	const characters = Array.from(item.content);
 	const truncated = characters.length > maxChars;
 	return {
@@ -230,6 +236,5 @@ export function currentWindowId(ctx: SessionReader): string {
 		const entry = branch[i];
 		if (entry?.type === "compaction") return windowIdOf(sessionId, entry);
 	}
-	return `pcw:${sessionId.slice(0, 8)}:root`;
+	return rootWindowId(sessionId);
 }
-

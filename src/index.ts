@@ -1,10 +1,10 @@
 import { registerHistoryTools } from "./history-tools.js";
 import { registerMemoryTools } from "./memory/tools.js";
-import { registerBudget, deriveThresholds, mergePiContextSettings } from "./budget.js";
+import { registerBudget } from "./budget.js";
 import { output } from "./tool-output.js";
-export { deriveThresholds, mergePiContextSettings };
+import { deriveThresholds, mergePiContextSettings } from "./thresholds.js";
 import { STATE_TYPE, NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, WARNING_TYPE, RESET_MARKER_TYPE, CONTINUATION_TYPE, RESET_V2, MAX_NOTE_BYTES, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, WARNING_RUNWAY_TOKENS, RESET_SUMMARY, CONTINUATION, WARNING_PROMPT } from "./protocol.js";
-import { historyFromSession, hasWindowMessage, currentWindowId, resetV2WindowId } from "./history.js";
+import { historyFromSession, hasWindowMessage, currentWindowId, resetV2WindowId, rootWindowId, windowIdOf } from "./history.js";
 import { assertVirtualPath } from "./notes.js";
 import { bootBlock } from "./prompts.js";
 export { historyFromSession } from "./history.js";
@@ -25,8 +25,7 @@ export default function piContext(pi: ExtensionAPI) {
 		// The root window has no compaction entry to carry the boot block, so persist
 		// it once as a hidden custom message. Reset windows already carry theirs at
 		// position 0 in the compaction summary, so a resumed session adds nothing.
-		const sessionId = ctx.sessionManager.getSessionId();
-		const rootId = `pcw:${sessionId.slice(0, 8)}:root`;
+		const rootId = rootWindowId(ctx.sessionManager.getSessionId());
 		if (currentWindowId(ctx) !== rootId || hasWindowMessage(ctx, BOOT_TYPE)) return;
 		pi.sendMessage({ customType: BOOT_TYPE, content: bootBlock(ctx, rootId, undefined, false), display: false }, { triggerTurn: false });
 	});
@@ -70,15 +69,15 @@ export default function piContext(pi: ExtensionAPI) {
 		},
 		onReset: (entryId) => pi.appendEntry(STATE_TYPE, { version: 1, lastResetEntryId: entryId }),
 		buildReset: (event, ctx, explicit) => {
-			const session8 = ctx.sessionManager.getSessionId().slice(0, 8);
+			const sessionId = ctx.sessionManager.getSessionId();
 			// Window IDs are independent of Pi entry IDs. Avoid reusing a window
 			// identity already present on this branch.
 			const windows = historyFromSession(ctx);
 			const usedIds = new Set(windows.map((window) => window.windowId));
-			let minted = randomUUID().slice(0, 8);
-			while (usedIds.has(`pcw:${session8}:${minted}`)) minted = randomUUID().slice(0, 8);
-			const windowId = `pcw:${session8}:${minted}`;
-			const previousId = windows[windows.length - 1]?.windowId ?? `pcw:${session8}:root`;
+			let minted = { id: randomUUID().slice(0, 8) };
+			while (usedIds.has(windowIdOf(sessionId, minted))) minted = { id: randomUUID().slice(0, 8) };
+			const windowId = windowIdOf(sessionId, minted);
+			const previousId = windows[windows.length - 1]?.windowId ?? rootWindowId(sessionId);
 			// The reset marker stays as firstKeptEntryId; it no longer names the window.
 			pi.appendEntry(RESET_MARKER_TYPE, { version: 1, reason: event.reason, requested: explicit });
 			const markerId = ctx.sessionManager.getLeafId();
