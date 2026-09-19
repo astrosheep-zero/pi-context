@@ -13,7 +13,7 @@ function packageRoot(): string {
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
-	const a = args(argv); if (a.help) { console.log("dream --notes-home <dir> [--min-hours 24] [--min-sessions 3] [--force] [--dreamer-model <pattern>] [--playbook <path>]\nDefault dreamer: in-process pi SDK session with notes tools. Default playbook: <installed package root>/playbook.md; --playbook overrides it."); return 0; }
+	const a = args(argv); if (a.help) { console.log("dream --notes-home <dir> [--min-hours 24] [--min-sessions 3] [--force] [--dreamer <model pattern>] [--playbook <path>]\nDefault dreamer: in-process pi SDK session with notes tools. Default playbook: <installed package root>/playbook.md; --playbook overrides it."); return 0; }
 	const home = resolve(String(a["notes-home"] ?? process.env.PI_NOTES_HOME ?? join(homedir(), ".agents", "notes"))); process.env.PI_NOTES_HOME = home; mkdirSync(home, { recursive: true });
 	const lockPath = join(home, ".dream.lock"); const minHours = Number(a["min-hours"] ?? 24); const minSessions = Number(a["min-sessions"] ?? 3);
 	const time = timeGate(lockPath, minHours); console.log(time.reason); if (!a.force && !time.ok) return 0;
@@ -23,7 +23,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 	try {
 		const defaultBook = join(packageRoot(), "playbook.md");
 		const playbookPath = String(a.playbook ?? defaultBook);
-		const playbook = loadPlaybook(playbookPath); const result = await runDreamer(playbook, home, { modelPattern: a["dreamer-model"] ? String(a["dreamer-model"]) : undefined });
+		const playbook = loadPlaybook(playbookPath); const result = await runDreamer(playbook, home, { modelPattern: a.dreamer ? String(a.dreamer) : undefined });
 		const writes = result.writes.length ? result.writes.map((w) => `- ${w.tool}: ${w.path ?? "?"} (scope: ${w.scope ?? "default"}, stale: ${w.stale === undefined ? "unset" : String(w.stale)})`).join("\n") : "- no changes";
 		mkdirSync(join(home, "dreams"), { recursive: true }); writeFileSync(reportPath, `# Dream ${stamp}\n\n${result.report}\n\n${writes}\n`); console.log(reportPath); return 0;
 	} catch (e) { failLock(lock); console.error(e instanceof Error ? e.message : e); return 1; } finally { releaseLock(lock); }
