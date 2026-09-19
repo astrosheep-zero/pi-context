@@ -1,46 +1,93 @@
 import test from "node:test";
-import nodeAssert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync, existsSync } from "node:fs";
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
-import { defaultDreamerSessionFactory, runDreamer, READ_ONLY_TOOLS } from "../src/dream/runner.js";
+import { acquireLock, failLock } from "../src/dream/lock.js";
+import { materialGate, timeGate } from "../src/dream/gates.js";
+import { defaultDreamerSessionFactory, memoryToolDefinitions, runDreamer, DREAMER_TOOLS } from "../src/dream/runner.js";
 
-const cli = join(process.cwd(), "dist/src/dream/cli.js");
-const assert: any = nodeAssert;
-assert.match = (value: string, expected: RegExp | string) => nodeAssert.ok(typeof expected === "string" ? value.includes(expected) : expected.test(value));
-function fixture() { const home = mkdtempSync(join(tmpdir(), "dream-")); mkdirSync(join(home, "pi/session"), { recursive: true }); return home; }
-function note(home: string, session: string, name: string, body: string, window: string) { const dir = join(home, "pi/session", session); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, name), `---\nscope: session\norigin: self\nstatus: active\nsource_window: ${window}\ncreated_at: 2020-01-01T00:00:00.000Z\nupdated_at: 2020-01-01T00:00:00.000Z\nlast_accessed: 2020-01-01T00:00:00.000Z\naccess_count: 0\n---\n\n${body}`); }
-function dreamer(home: string, manifest: unknown, sentinel?: string) { const file = join(home, "dreamer.mjs"); writeFileSync(file, `import {writeFileSync} from 'node:fs'; ${sentinel ? `writeFileSync(${JSON.stringify(sentinel)}, 'spawned');` : ""} process.stdin.resume(); process.stdin.on('end',()=>process.stdout.write(${JSON.stringify(JSON.stringify(manifest))}));`); return `node ${file}`; }
-function run(home: string, extra: string[] = []) { return spawnSync(process.execPath, [cli, "--notes-home", home, ...extra], { encoding: "utf8" }); }
+function fixture() { return mkdtempSync(join(tmpdir(), "dream-")); }
 function old(path: string) { const d = new Date(Date.now() - 48 * 3600_000); utimesSync(path, d, d); }
 
-test("dream time gate skips first, names reason, and does not spawn", () => { const h=fixture(); const sentinel=join(h,"sentinel"); const lock=join(h,".dream.lock"); writeFileSync(lock,"999999"); const fresh=new Date(); utimesSync(lock,fresh,fresh); const r=run(h,["--dreamer",dreamer(h,{report:"x"},sentinel)]); assert.equal(r.status,0); assert.match(r.stdout,"time gate"); assert.equal(existsSync(sentinel),false); });
-test("material gate skips when too few session directories changed", () => { const h=fixture(); const lock=join(h,".dream.lock"); writeFileSync(lock,"999999"); old(lock); note(h,"only","a.md","a","w"); const r=run(h,["--min-sessions","3","--dreamer",dreamer(h,{report:"x"})]); assert.equal(r.status,0); assert.match(r.stdout,"material gate"); });
-test("force bypasses time and material gates and external dreamer runs", () => { const h=fixture(); const r=run(h,["--force","--dreamer",dreamer(h,{report:"forced"})]); assert.equal(r.status,0); assert.match(readFileSync(readdirSync(join(h,"dreams")).map(x=>join(h,"dreams",x))[0],"utf8"),"forced"); });
-test("live PID lock excludes and dead PID is reclaimed", () => { const h=fixture(); const lock=join(h,".dream.lock"); writeFileSync(lock,String(process.pid)); const r=run(h,["--force","--dreamer",dreamer(h,{report:"no"})]); assert.equal(r.status,0); assert.match(r.stdout,"lock gate"); writeFileSync(lock,"999999"); old(lock); const ok=run(h,["--force","--dreamer",dreamer(h,{report:"reclaimed"})]); assert.equal(ok.status,0); });
-test("external dreamer manifest merges recurrence, proposes global promotion, trashes, and reports", () => { const h=fixture(); note(h,"dream","a.md","one","window-a"); note(h,"dream","b.md","two","window-b"); note(h,"dream","trash.md","gone","window-c"); const m={merge:[{into:"a.md",from:["b.md"]}],promote:[{path:"a.md",to:"global",reason:"shared"}],trash:[{path:"trash.md",reason:"obsolete"}],report:"I dreamed on 2026-09-19."}; const r=run(h,["--force","--dreamer",dreamer(h,m)]); assert.equal(r.status,0,r.stderr); const merged=readFileSync(join(h,"pi/session/dream/a.md"),"utf8"); assert.match(merged,"one"); assert.match(merged,"two"); assert.match(merged,"recurrence_count: 1"); assert.match(readFileSync(join(h,"pi/session/dream/b.md"),"utf8"),"status: superseded"); assert.equal(existsSync(join(h,"pi/session/dream/trash.md")),false); const trash = readdirSync(join(h,"trash"))[0]!; assert.equal(readFileSync(join(h,"trash",trash,"session","trash.md"),"utf8").includes("gone"), true); const reports=readdirSync(join(h,"dreams")); const report=readFileSync(join(h,"dreams",reports[0]),"utf8"); assert.match(report,"I dreamed"); assert.match(report,"proposal: promote"); assert.match(report,"trashed"); });
-test("invalid manifest path makes zero writes and exits nonzero", () => { const h=fixture(); note(h,"s1","a.md","one","w"); const before=readFileSync(join(h,"pi/session/s1/a.md"),"utf8"); const r=run(h,["--force","--dreamer",dreamer(h,{merge:[{into:"missing.md",from:["a.md"]}],report:"bad"})]); assert.notEqual(r.status,0); assert.match(r.stderr,"missing.md"); assert.equal(readFileSync(join(h,"pi/session/s1/a.md"),"utf8"),before); assert.equal(existsSync(join(h,"dreams")),false); });
-test("failed run restores prior lock mtime", () => { const h=fixture(); const lock=join(h,".dream.lock"); writeFileSync(lock,"999999"); const prior=Date.now()-48*3600_000; utimesSync(lock,new Date(prior),new Date(prior)); const r=run(h,["--force","--dreamer",dreamer(h,{merge:[{into:"missing",from:[]}],report:"x"})]); assert.notEqual(r.status,0); assert.ok(Math.abs(statSync(lock).mtimeMs-prior)<2000); });
+test("time and material gates preserve skip decisions and reasons", () => {
+	const home = fixture();
+	const lock = join(home, ".dream.lock");
+	writeFileSync(lock, "999999");
+	const fresh = timeGate(lock, 24);
+	assert.equal(fresh.ok, false);
+	assert.equal(fresh.reason, "time gate: lock is too fresh");
+	old(lock);
+	assert.deepEqual(timeGate(lock, 24).ok, true);
+	mkdirSync(join(home, "pi/session/one"), { recursive: true });
+	writeFileSync(join(home, "pi/session/one/a.md"), "a");
+	const material = materialGate(home, statSync(lock).mtimeMs, 1);
+	assert.equal(material.ok, true);
+	assert.match(material.reason, /material gate: 1 changed sessions/);
+	assert.equal(materialGate(home, Date.now(), 2).ok, false);
+});
 
-test("SDK dreamer captures assistant event and receives read-only allowlist", async () => {
+test("live lock is excluded, dead lock is reclaimed, and failures restore mtime", () => {
+	const home = fixture();
+	const lock = join(home, ".dream.lock");
+	writeFileSync(lock, String(process.pid));
+	const live = acquireLock(lock);
+	assert.equal(live.held, false);
+	assert.equal(live.reason, "lock gate: live process holds the lock");
+	writeFileSync(lock, "999999");
+	old(lock);
+	const prior = statSync(lock).mtimeMs;
+	const reclaimed = acquireLock(lock);
+	assert.equal(reclaimed.held, true);
+	utimesSync(lock, new Date(), new Date());
+	failLock(reclaimed);
+	assert.ok(Math.abs(statSync(lock).mtimeMs - prior) < 2000);
+});
+
+test("real notes custom tools write and edit fixture files on disk", async () => {
+	const home = fixture();
+	process.env.PI_NOTES_HOME = home;
+	const ctx = { cwd: home, sessionManager: { getSessionId: () => "dream" } } as any;
+	const tools = new Map(memoryToolDefinitions().map((tool: any) => [tool.name, tool]));
+	await tools.get("notes_write")!.execute("write", { path: "survivor.md", content: "one", scope: "session" }, undefined, undefined, ctx);
+	await tools.get("notes_write")!.execute("write", { path: "absorbed.md", content: "two", scope: "session" }, undefined, undefined, ctx);
+	await tools.get("notes_edit")!.execute("edit", { path: "survivor.md", edits: [{ oldText: "one", newText: "one\ntwo" }] }, undefined, undefined, ctx);
+	await tools.get("notes_edit")!.execute("stale", { path: "absorbed.md", stale: true }, undefined, undefined, ctx);
+	const survivor = readFileSync(join(home, "pi/session/dream/survivor.md"), "utf8");
+	const absorbed = readFileSync(join(home, "pi/session/dream/absorbed.md"), "utf8");
+	assert.match(survivor, /one\ntwo/);
+	assert.match(absorbed, /stale: true/);
+	assert.equal(existsSync(join(home, "pi/session/dream/survivor.md")), true);
+	assert.equal(existsSync(join(home, "pi/session/dream/absorbed.md")), true);
+});
+
+test("dreamer allowlist contains only read tools and notes writes", async () => {
 	let configured: string[] = [];
-	const session = { subscribe(handler: (event: unknown) => void) { this.handler = handler; return () => {}; }, handler: (_event: unknown) => {}, async prompt(_text: string) { this.handler({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: '{"report":"stub"}' }] } }); }, dispose() {} };
-	const manifest = await runDreamer("playbook", "/tmp/notes", { sessionFactory: async (options) => { configured = options.tools; return session as any; } });
-	assert.deepEqual(manifest, { report: "stub" }); assert.deepEqual(configured, READ_ONLY_TOOLS); assert.equal(configured.includes("notes_write"), false); assert.equal(configured.includes("notes_edit"), false);
+	const session = {
+		subscribe(handler: (event: unknown) => void) { this.handler = handler; return () => {}; },
+		handler: (_event: unknown) => {},
+		async prompt(_text: string) { this.handler({ type: "tool_execution_start", toolName: "notes_write", args: { path: "a.md", scope: "global", stale: false } }); this.handler({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }] } }); },
+		dispose() {},
+	};
+	const result = await runDreamer("playbook", "/tmp/notes", { sessionFactory: async (options) => { configured = options.tools; return session as any; } });
+	assert.deepEqual(configured, DREAMER_TOOLS);
+	assert.equal(configured.includes("write"), false);
+	assert.equal(configured.includes("edit"), false);
+	assert.deepEqual(result.writes, [{ tool: "notes_write", path: "a.md", scope: "global", stale: false }]);
+	assert.equal(result.report, "done");
 });
 
-test("SDK dreamer surfaces provider stopReason error instead of manifest-parse lie", async () => {
-	const session = { subscribe(handler: (event: unknown) => void) { this.handler = handler; return () => {}; }, handler: (_event: unknown) => {}, async prompt(_text: string) { this.handler({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "402: {\"error\":{\"message\":\"Insufficient Balance\"}}" } }); }, dispose() {} };
+test("provider errors propagate without parsing a response", async () => {
+	const session = {
+		subscribe(handler: (event: unknown) => void) { this.handler = handler; return () => {}; },
+		handler: (_event: unknown) => {},
+		async prompt(_text: string) { this.handler({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "Insufficient Balance" } }); },
+		dispose() {},
+	};
 	await assert.rejects(() => runDreamer("playbook", "/tmp/notes", { sessionFactory: async () => session as any }), /Insufficient Balance/);
-	await assert.rejects(() => runDreamer("playbook", "/tmp/notes", { sessionFactory: async () => session as any }), /402/);
-});
-
-test("SDK dreamer parse failure keeps existing manifest message without provider error", async () => {
-	const session = { subscribe(handler: (event: unknown) => void) { this.handler = handler; return () => {}; }, handler: (_event: unknown) => {}, async prompt(_text: string) { this.handler({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "sorry, I could not do that" }] } }); }, dispose() {} };
-	await assert.rejects(() => runDreamer("playbook", "/tmp/notes", { sessionFactory: async () => session as any }), /did not return a valid JSON manifest/);
 });
 
 test("default dreamer rejects an unresolvable model pattern", async () => {
-	await assert.rejects(() => defaultDreamerSessionFactory({ cwd: "/tmp/notes", modelPattern: "definitely-not-a-real-model", tools: READ_ONLY_TOOLS }), /definitely-not-a-real-model/);
+	await assert.rejects(() => defaultDreamerSessionFactory({ cwd: "/tmp/notes", modelPattern: "definitely-not-a-real-model", tools: DREAMER_TOOLS }), /definitely-not-a-real-model/);
 });
