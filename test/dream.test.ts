@@ -112,7 +112,8 @@ test("dreamer session has exactly the jailed file-tool allowlist", async () => {
 test("playbook describes plain files and the retained frontmatter", () => {
 	const playbook = readFileSync(join(process.cwd(), "playbook.md"), "utf8");
 	assert.equal(playbook.includes("notes_"), false);
-	for (const field of ["scope", "origin", "status", "stale", "created_at", "updated_at", "last_accessed", "access_count"]) assert.match(playbook, new RegExp(`^${field}:`, "m"));
+	for (const field of ["origin", "status", "stale", "created_at", "updated_at", "last_accessed", "access_count"]) assert.match(playbook, new RegExp(`^${field}:`, "m"));
+	assert.equal(/^scope:/m.test(playbook), false, "scope is derived from the address rather than persisted");
 	assert.match(playbook, /Nothing is physically deleted/);
 });
 

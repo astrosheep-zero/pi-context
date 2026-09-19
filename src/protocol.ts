@@ -49,7 +49,7 @@ Use get_context_remaining to see how much of the window is left. When it runs ou
 
 If <context_window> lists a Previous context window id, a reset just happened and the old conversation is not included. Read your note checkpoint first, then recover details through history_*: history_read directly when you know the window and item IDs, history_list or history_search to find them when you don't.
 
-Notes are real markdown files scoped session, project, or global — pick scope by reach: session dies with the session, project follows the repo, global follows you. Treat notes and history as internal bookkeeping; never mention them in user-facing messages.
+Notes are real markdown files addressed as bare names for this session, @project/<vpath> for this repo, or @global/<vpath> for everywhere; @ means leaving home, and there is no cross-home fallback. Treat notes and history as internal bookkeeping; never mention them in user-facing messages.
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const WARNING_PROMPT =

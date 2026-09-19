@@ -87,7 +87,7 @@ for (const mode of ["golden", "write-error", "ignored-warning", "explicit", "unc
 				const call = probe ? "get_context_remaining" : checkpoint ? "notes_write" : tool ? "new_context" : undefined;
 				const message: AssistantMessage = { role: "assistant", api: model.api, provider: model.provider, model: model.id,
 					content: probe ? [{ type: "toolCall", id: "probe-call", name: "get_context_remaining", arguments: {} }]
-						: checkpoint ? [{ type: "toolCall", id: "checkpoint-call", name: "notes_write", arguments: { path: mode === "write-error" ? "../invalid.md" : "checkpoint.md", content: "CHECKPOINT_SENTINEL" } }]
+						: checkpoint ? [{ type: "toolCall", id: "checkpoint-call", name: "notes_write", arguments: { address: mode === "write-error" ? "../invalid.md" : "checkpoint.md", content: "CHECKPOINT_SENTINEL" } }]
 						: tool ? [{ type: "toolCall", id: "reset-call", name: "new_context", arguments: {} }]
 						: [{ type: "text", text: fresh ? "Resumed." : "Working." }],
 					stopReason: call ? "toolUse" : "stop", timestamp: Date.now(),

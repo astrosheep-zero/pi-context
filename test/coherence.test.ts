@@ -59,6 +59,10 @@ function context(sessionManager: SessionManager): ExtensionContext {
 async function call(captured: Captured, name: string, params: Record<string, unknown>, ctx: ExtensionContext) {
 	const tool = captured.tools.get(name);
 	assert.ok(tool, `registered ${name}`);
+	if ((name === "notes_write" || name === "notes_read") && "path" in params && !("address" in params)) {
+		const { path, ...rest } = params;
+		return tool.execute("call-1", { ...rest, address: path }, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
+	}
 	return tool.execute("call-1", params, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
 }
 

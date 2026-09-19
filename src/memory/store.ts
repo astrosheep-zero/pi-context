@@ -6,6 +6,7 @@ import { generateDiffString } from "@earendil-works/pi-coding-agent";
 import { assertGlobPattern, assertVirtualPath, globToRegExp } from "../notes.js";
 import { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "../protocol.js";
 import { isOrigin, isScope, parseNote, serializeNote, stripLeadingFrontmatter, type NoteMeta, type Origin } from "./frontmatter.js";
+import { addressFor } from "./address.js";
 import { physicalPath, scopeDir, type Scope } from "./paths.js";
 
 export type { NoteMeta, Origin, Scope };
@@ -26,9 +27,9 @@ export class NoteError extends Error {
 	}
 }
 
-export type NoteRow = { path: string; meta: NoteMeta; sizeBytes: number };
+export type NoteRow = { address: string; scope: Scope; path: string; meta: NoteMeta; sizeBytes: number };
 export type NoteMatch = { line: number; text: string; offsetChars: number };
-export type NoteSearchRow = { path: string; scope: Scope; meta: NoteMeta; matches: NoteMatch[] };
+export type NoteSearchRow = { address: string; scope: Scope; path: string; meta: NoteMeta; matches: NoteMatch[] };
 
 const SCOPE_ORDER: readonly Scope[] = ["session", "project", "global"];
 
@@ -40,22 +41,6 @@ function assertScope(value: unknown): Scope {
 function assertOrigin(value: unknown): Origin {
 	if (!isOrigin(value)) throw new NoteError("invalid_origin", `origin must be one of user, self, external (got ${JSON.stringify(value)})`);
 	return value;
-}
-
-function scopeList(scope?: unknown): Scope[] {
-	if (scope === undefined || scope === null) return [...SCOPE_ORDER];
-	return [assertScope(scope)];
-}
-
-type Resolved = { scope: Scope; path: string; raw: string };
-
-/** First existing file by precedence session → project → global, or only `scope` when given. */
-function resolve(ctx: ExtensionContext, vpath: string, scope?: unknown): Resolved | undefined {
-	for (const candidate of scopeList(scope)) {
-		const path = physicalPath(candidate, vpath, ctx);
-		if (existsSync(path)) return { scope: candidate, path, raw: readFileSync(path, "utf8") };
-	}
-	return undefined;
 }
 
 /** Recursively list `.md` files under `dir` as forward-slash virtual paths relative to `base`. */
@@ -160,7 +145,7 @@ export function writeNote(ctx: ExtensionContext, vpath: string, body: string, op
 }
 
 export type EditOperation = { oldText: string; newText: string };
-export type EditOptions = { scope?: Scope; origin?: Origin; stale?: boolean; replaceAll?: boolean };
+export type EditOptions = { origin?: Origin; stale?: boolean; replaceAll?: boolean };
 
 /** Dream harness mutation: metadata changes still use the store's atomic writer. */
 export function updateNoteMeta(ctx: ExtensionContext, vpath: string, scope: Scope, mutate: (meta: NoteMeta) => void): { meta: NoteMeta; body: string } {
@@ -177,17 +162,19 @@ export function updateNoteMeta(ctx: ExtensionContext, vpath: string, scope: Scop
 	return { meta, body: parsed.body };
 }
 
-/** Apply body-only edits against one snapshot, then optionally move via the scope/origin/stale setters. */
-export function editNote(ctx: ExtensionContext, vpath: string, edits: EditOperation[] | undefined, opts: EditOptions = {}): { meta: NoteMeta; applied: number; resolved_scope: Scope; diff: string } {
+/** Apply body-only edits against one explicit home; origin and stale are its metadata setters. */
+export function editNote(ctx: ExtensionContext, vpath: string, scope: Scope, edits: EditOperation[] | undefined, opts: EditOptions = {}): { meta: NoteMeta; applied: number; resolved_scope: Scope; diff: string } {
 	assertVirtualPath(vpath);
 	assertWritablePath(vpath);
 	const operations = edits ?? [];
-	if (operations.length === 0 && opts.scope === undefined && opts.origin === undefined && opts.stale === undefined) {
-		throw new NoteError("nothing_to_do", "nothing to do: provide edits or at least one of scope, origin, stale");
+	if (operations.length === 0 && opts.origin === undefined && opts.stale === undefined) {
+		throw new NoteError("nothing_to_do", "nothing to do: provide edits or at least one of origin, stale");
 	}
-	const found = resolve(ctx, vpath);
-	if (!found) throw new NoteError("not_found", "note not found");
-	const { meta, body } = parseNote(found.raw);
+	const path = physicalPath(scope, vpath, ctx);
+	if (!existsSync(path)) throw new NoteError("not_found", "note not found");
+	const raw = readFileSync(path, "utf8");
+	const { meta, body } = parseNote(raw);
+	meta.scope = scope;
 	// Snapshot the pre-edit frontmatter so the diff can name exactly what the setters changed.
 	const beforeMeta: NoteMeta = { ...meta };
 	// Every edit runs against this one snapshot; nothing is written until all of them succeed,
@@ -212,53 +199,39 @@ export function editNote(ctx: ExtensionContext, vpath: string, edits: EditOperat
 			next = next.substring(0, matchIndex) + newText + next.substring(matchIndex + oldText.length);
 		}
 	});
-	const destScope = opts.scope === undefined ? found.scope : assertScope(opts.scope);
 	if (opts.origin !== undefined) meta.origin = assertOrigin(opts.origin);
 	if (opts.stale !== undefined) meta.stale = opts.stale;
-	meta.scope = destScope;
 	meta.updated_at = Date.now();
-	const dest = physicalPath(destScope, vpath, ctx);
-	const moving = dest !== found.path;
-	if (moving && existsSync(dest)) {
-		throw new NoteError("target_exists", `a note already exists at ${vpath} in scope ${destScope}; the move was refused and both files are unchanged`);
-	}
 	const serialized = serializeNote(meta, next);
 	assertSerializedSize(serialized);
 	// pi-edit-style diff: body only for a content edit, frontmatter only for a metadata-only
-	// update, one combined file diff when both moved.
+	// update, one combined file diff when both change.
 	const bodyChanged = body !== next;
-	const metadataChanged = beforeMeta.scope !== meta.scope || beforeMeta.origin !== meta.origin || beforeMeta.stale !== meta.stale;
+	const metadataChanged = beforeMeta.origin !== meta.origin || beforeMeta.stale !== meta.stale;
 	const diff = bodyChanged && metadataChanged
-		? generateDiffString(found.raw, serialized).diff
+		? generateDiffString(raw, serialized).diff
 		: bodyChanged
 			? generateDiffString(body, next).diff
 			: metadataChanged
 				? generateDiffString(frontmatterOf(beforeMeta), frontmatterOf(meta)).diff
 				: "";
-	atomicWrite(dest, serialized);
-	if (moving) rmSync(found.path);
-	return { meta, applied: operations.length, resolved_scope: found.scope, diff };
+	atomicWrite(path, serialized);
+	return { meta, applied: operations.length, resolved_scope: scope, diff };
 }
 
 /** Read a note and, as a side effect, bump last_accessed/access_count in the file. */
-export function readNote(ctx: ExtensionContext, vpath: string, opts: { scope?: Scope } = {}): { meta: NoteMeta; body: string; resolvedScope: Scope } | undefined {
+export function readNote(ctx: ExtensionContext, vpath: string, scope: Scope): { meta: NoteMeta; body: string; resolvedScope: Scope } | undefined {
 	assertVirtualPath(vpath);
-	const found = resolve(ctx, vpath, opts.scope);
-	if (!found) return undefined;
+	const path = physicalPath(scope, vpath, ctx);
+	if (!existsSync(path)) return undefined;
 	const now = Date.now();
-	const { meta, body } = parseNote(found.raw, now);
-	meta.scope = found.scope;
+	const { meta, body } = parseNote(readFileSync(path, "utf8"), now);
+	meta.scope = scope;
 	// Only the two access keys move; updated_at and every other key keep their bytes.
 	meta.last_accessed = now;
 	meta.access_count = (typeof meta.access_count === "number" ? meta.access_count : 0) + 1;
-	atomicWrite(found.path, serializeNote(meta, body));
-	return { meta, body, resolvedScope: found.scope };
-}
-
-/** The scope that holds `vpath` first by precedence, without reading or mutating the file. */
-export function resolveNoteScope(ctx: ExtensionContext, vpath: string, scope?: Scope): { scope: Scope; path: string } | undefined {
-	const found = resolve(ctx, vpath, scope);
-	return found ? { scope: found.scope, path: found.path } : undefined;
+	atomicWrite(path, serializeNote(meta, body));
+	return { meta, body, resolvedScope: scope };
 }
 
 /** Read a note's meta and body without the read side effect (used by the boot index). */
@@ -269,20 +242,21 @@ export function peekNote(ctx: ExtensionContext, scope: Scope, vpath: string): { 
 	return { meta, body };
 }
 
-/** Merged rows across scopes, most recently updated first (path then scope break ties). */
+/** Merged rows across homes, most recently updated first (address breaks ties). */
 export function listNotes(ctx: ExtensionContext, opts: { scope?: Scope; pattern?: string } = {}): NoteRow[] {
 	const matcher = matcherFor(opts.pattern);
 	const rows: NoteRow[] = [];
-	for (const scope of scopeList(opts.scope)) {
+	for (const scope of opts.scope === undefined ? SCOPE_ORDER : [opts.scope]) {
 		const root = scopeDir(scope, ctx);
 		for (const path of walkMarkdown(root)) {
-			if (matcher && !matcher.test(path)) continue;
+			const address = addressFor(scope, path);
+			if (matcher && !matcher.test(address)) continue;
 			const { meta, body } = parseNote(readFileSync(`${root}/${path}`, "utf8"));
 			meta.scope = scope;
-			rows.push({ path, meta, sizeBytes: Buffer.byteLength(body, "utf8") });
+			rows.push({ address, scope, path, meta, sizeBytes: Buffer.byteLength(body, "utf8") });
 		}
 	}
-	rows.sort((a, b) => b.meta.updated_at - a.meta.updated_at || a.path.localeCompare(b.path) || a.meta.scope.localeCompare(b.meta.scope));
+	rows.sort((a, b) => b.meta.updated_at - a.meta.updated_at || a.address.localeCompare(b.address));
 	return rows;
 }
 
@@ -290,10 +264,11 @@ export function listNotes(ctx: ExtensionContext, opts: { scope?: Scope; pattern?
 export function searchNotes(ctx: ExtensionContext, queries: string[], opts: { scope?: Scope; pattern?: string } = {}): NoteSearchRow[] {
 	const matcher = matcherFor(opts.pattern);
 	const rows: NoteSearchRow[] = [];
-	for (const scope of scopeList(opts.scope)) {
+	for (const scope of opts.scope === undefined ? SCOPE_ORDER : [opts.scope]) {
 		const root = scopeDir(scope, ctx);
 		for (const path of walkMarkdown(root)) {
-			if (matcher && !matcher.test(path)) continue;
+			const address = addressFor(scope, path);
+			if (matcher && !matcher.test(address)) continue;
 			const { meta, body } = parseNote(readFileSync(`${root}/${path}`, "utf8"));
 			meta.scope = scope;
 			let baseChars = 0;
@@ -309,9 +284,9 @@ export function searchNotes(ctx: ExtensionContext, queries: string[], opts: { sc
 				}
 				baseChars += Array.from(line).length + 1;
 			}
-			if (matches.length > 0) rows.push({ path, scope, meta, matches });
+			if (matches.length > 0) rows.push({ address, path, scope, meta, matches });
 		}
 	}
-	rows.sort((a, b) => a.path.localeCompare(b.path) || a.scope.localeCompare(b.scope));
+	rows.sort((a, b) => a.address.localeCompare(b.address));
 	return rows;
 }

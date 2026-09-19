@@ -174,13 +174,38 @@ export async function call(
 ): Promise<AgentToolResult<unknown>> {
 	const tool = captured.tools.get(name);
 	assert.ok(tool, `registered ${name}`);
+	// Most pre-redesign coverage names session notes by their bare address. Keep these old
+	// fixture call sites readable while routing the direct tool invocation through its new
+	// address-shaped input; contract-specific tests below pass address themselves.
+	const noteCall = name === "notes_write" || name === "notes_edit" || name === "notes_read";
+	if (noteCall && "path" in params && !("address" in params)) {
+		const { path, scope, ...rest } = params;
+		assert.equal(typeof path, "string", "legacy note fixture path is a string");
+		const address = scope === "project" ? `@project/${path}` : scope === "global" ? `@global/${path}` : path;
+		return tool.execute("call-1", { ...rest, address }, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
+	}
+	if ((name === "notes_list" || name === "notes_search") && params.scope === "global") {
+		const { scope: _scope, pattern, ...rest } = params;
+		return tool.execute("call-1", { ...rest, pattern: `@global/${typeof pattern === "string" ? pattern : "**"}` }, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
+	}
+	if ((name === "notes_list" || name === "notes_search") && params.scope === "session") {
+		const { scope: _scope, pattern, ...rest } = params;
+		return tool.execute("call-1", { ...rest, pattern: typeof pattern === "string" ? pattern : "*.md" }, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
+	}
 	return tool.execute("call-1", params, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
 }
 
 export function resultJson<T>(result: AgentToolResult<unknown>): T {
 	const text = result.content[0];
 	assert.ok(text && text.type === "text", "tool result carries text");
-	return JSON.parse(text.text) as T;
+	const value = JSON.parse(text.text) as Record<string, unknown>;
+	const suffix = (address: string) => address.startsWith("@project/") ? address.slice("@project/".length) : address.startsWith("@global/") ? address.slice("@global/".length) : address;
+	const legacyPath = (row: Record<string, unknown>) => {
+		if (typeof row.address === "string" && row.path === undefined) Object.defineProperty(row, "path", { value: suffix(row.address), enumerable: false });
+	};
+	legacyPath(value);
+	if (Array.isArray(value.files)) for (const file of value.files) if (file && typeof file === "object") legacyPath(file as Record<string, unknown>);
+	return value as T;
 }
 
 /** Assert the delivered wire text fits the tool-output budget, header included for raw reads. */
@@ -336,11 +361,13 @@ test("schemas cover the History/Notes actions plus reset controls", () => {
 	// The write surface requires its body; the edit surface requires its anchors.
 	const writeSchema = captured.tools.get("notes_write")?.parameters as { properties?: Record<string, unknown>; required?: string[] } | undefined;
 	assert.ok(writeSchema?.properties?.content, "notes_write exposes content");
-	assert.ok(writeSchema?.properties?.path, "notes_write exposes path");
-	assert.deepEqual([...(writeSchema?.required ?? [])].sort(), ["content", "path"], "notes_write requires path and content");
+	assert.ok(writeSchema?.properties?.address, "notes_write exposes address");
+	assert.equal(writeSchema?.properties?.scope, undefined, "notes_write has no scope parameter");
+	assert.deepEqual([...(writeSchema?.required ?? [])].sort(), ["address", "content"], "notes_write requires address and content");
 	const editSchema = captured.tools.get("notes_edit")?.parameters as { properties?: Record<string, unknown>; required?: string[] } | undefined;
 	assert.ok(editSchema?.properties?.edits, "notes_edit exposes edits");
-	assert.deepEqual([...(editSchema?.required ?? [])].sort(), ["path"], "notes_edit requires only path; edits are optional for metadata-only updates");
+	assert.equal(editSchema?.properties?.scope, undefined, "notes_edit has no scope parameter");
+	assert.deepEqual([...(editSchema?.required ?? [])].sort(), ["address"], "notes_edit requires only address; edits are optional for metadata-only updates");
 	// The history ordering switch is documented as newest-first by default.
 	for (const name of ["history_windows", "history_list", "history_search"]) {
 		const schema = captured.tools.get(name)?.parameters as { properties?: Record<string, { description?: string }> } | undefined;
@@ -360,7 +387,12 @@ test("schemas cover the History/Notes actions plus reset controls", () => {
 		assert.equal(schema?.properties?.limit_chars?.maximum, 50000, `${name} caps limit_chars at 50000`);
 	}
 	const noteReadSchema = captured.tools.get("notes_read")?.parameters as { properties?: Record<string, unknown> } | undefined;
-	assert.deepEqual(Object.keys(noteReadSchema?.properties ?? {}).sort(), ["limit_chars", "offset_chars", "path", "scope"], "notes_read exposes exactly the character-window params plus scope");
+	assert.deepEqual(Object.keys(noteReadSchema?.properties ?? {}).sort(), ["address", "limit_chars", "offset_chars"], "notes_read exposes exactly address and character-window params");
+	for (const name of ["notes_write", "notes_edit", "notes_read", "notes_list", "notes_search"]) {
+		const schema = captured.tools.get(name)?.parameters as { properties?: Record<string, unknown>; additionalProperties?: boolean } | undefined;
+		assert.equal(schema?.properties?.scope, undefined, `${name} has no scope property`);
+		assert.equal(schema?.additionalProperties, false, `${name} rejects scope as an additional property`);
+	}
 	assert.equal(/start_|stop_line|total_lines/.test(captured.tools.get("notes_read")?.description ?? ""), false, "notes_read prose carries no line surface");
 });
 
@@ -379,12 +411,12 @@ test("notes_list is most-recently-updated first across merged scopes", async () 
 	put("project", "c.md", base + 5);
 	put("global", "e.md", base + 20);
 	const files = async (params: Record<string, unknown>) =>
-		resultJson<{ files: Array<{ path: string; scope: string }> }>(await call(captured, "notes_list", params, ctx)).files;
-	assert.deepEqual((await files({})).map((file) => file.path), ["e.md", "a.md", "b.md", "c.md"], "updated_at descending with path ascending as the tiebreak");
+		resultJson<{ files: Array<{ address: string; scope: string }> }>(await call(captured, "notes_list", params, ctx)).files;
+	assert.deepEqual((await files({})).map((file) => file.address), ["@global/e.md", "a.md", "b.md", "@project/c.md"], "updated_at descending with address ascending as the tiebreak");
 	// A same-path pair in two scopes keeps both rows; equal timestamps tie-break by scope name.
 	put("global", "a.md", base + 10);
-	assert.deepEqual((await files({})).filter((file) => file.path === "a.md").map((file) => file.scope), ["global", "session"], "equal timestamps tie-break by scope name");
-	assert.deepEqual((await files({ scope: "session" })).map((file) => file.path), ["a.md", "b.md"], "a scope filter narrows the set");
+	assert.deepEqual((await files({})).filter((file) => file.address.endsWith("a.md")).map((file) => file.scope), ["global", "session"], "equal timestamps tie-break by full address");
+	assert.deepEqual((await files({ pattern: "*.md" })).map((file) => file.address), ["a.md", "b.md"], "a bare pattern narrows to the session home");
 });
 
 test("notes are real files that persist across sessions and round-trip Unicode", async () => {
@@ -400,7 +432,7 @@ test("notes are real files that persist across sessions and round-trip Unicode",
 	const restoredCtx = context(restored);
 	const rawRead = await call(restoredCaptured, "notes_read", { path: "checkpoint/进度.md", scope: "global", offset_chars: -4 }, restoredCtx);
 	const read = resultRead(rawRead);
-	assert.equal(read.details.path, "checkpoint/进度.md");
+	assert.equal(read.details.address, "@global/checkpoint/进度.md");
 	assert.equal(read.content, "Café", "a negative offset reads the body tail in one call");
 	assert.equal(read.details.scope, "global");
 	const searched = resultJson<{ files: Array<{ path: string; created_at: unknown; updated_at: unknown; matches: Array<{ line: number }> }> }>(
@@ -492,10 +524,10 @@ test("the boot notes index omits itself when every note is stale", async () => {
 test("the boot block gives awake agents the notes-home file layout", () => {
 	const session = manager();
 	const rendered = bootBlock(context(session), "pcw:test:root", undefined, false);
-	assert.ok(rendered.includes(process.env.PI_NOTES_HOME ?? "the notes home"));
-	assert.match(rendered, /global\/, project\/<name>-<8hex>\/, pi\/session\/<id>\/, dreams\//);
-	assert.match(rendered, /notes_\* tools reach only their own three homes/);
-	assert.match(rendered, /any other note is a plain file — use the file tools/);
+	assert.equal(rendered.includes(process.env.PI_NOTES_HOME ?? ""), false, "the absolute notes home is never exposed");
+	assert.match(rendered, /bare <vpath>.*@project\/<vpath>.*@global\/<vpath>/);
+	assert.match(rendered, /there is no cross-home fallback/);
+	assert.match(rendered, /Any other note is a plain file — use the file tools/);
 });
 
 
@@ -760,8 +792,8 @@ test("an over-budget note is delivered as a prefix and resumed by next_offset_ch
 	assert.ok(first.content.length > 0, "the page is not empty");
 	assert.equal(first.content.includes("…"), false, "the payload is a plain prefix with no marker");
 	assert.ok(first.content.startsWith("---\n"), "the frontmatter is delivered first");
-	assert.equal(first.header, `[huge.md · chars 0-${first.next_offset_chars} of ${first.total_chars} · continue at offset_chars=${first.next_offset_chars} · session · created ${String(first.details.created_at)} · updated ${String(first.details.updated_at)}]`, "the raw header names the file, the delivered range, the resume cursor, the scope and the timestamps");
-	assert.deepEqual(Object.keys(first.details).sort(), ["created_at", "limit_chars", "next_offset_chars", "offset_chars", "path", "scope", "total_chars", "updated_at"], "notes_read details carries exactly the slim window metadata plus scope");
+	assert.equal(first.header, `[huge.md · chars 0-${first.next_offset_chars} of ${first.total_chars} · continue at offset_chars=${first.next_offset_chars} · session · created ${String(first.details.created_at)} · updated ${String(first.details.updated_at)}]`, "the raw header names the address, delivered range, resume cursor, scope and timestamps");
+	assert.deepEqual(Object.keys(first.details).sort(), ["address", "created_at", "limit_chars", "next_offset_chars", "offset_chars", "scope", "total_chars", "updated_at"], "notes_read details carries exactly the slim window metadata plus scope");
 	assert.equal("content" in first.details, false, "details never duplicates the payload");
 	assert.equal(first.offset_chars, 0, "the default window starts at the resolved offset 0");
 	// Following the cursor reconstructs frontmatter + body by plain concatenation.
@@ -780,7 +812,7 @@ test("an over-budget note is delivered as a prefix and resumed by next_offset_ch
 	// A success carries structured details; an error stays a JSON envelope with no details.
 	const missingResult = await call(captured, "notes_read", { path: "no-such.md" }, ctx);
 	const missing = resultJson<Record<string, unknown>>(missingResult);
-	assert.deepEqual(Object.keys(missing).sort(), ["error", "path"], "the read error carries exactly error and path");
+	assert.deepEqual(Object.keys(missing).sort(), ["address", "error"], "the read error carries exactly error and address");
 	assert.equal(missing.error, "note not found");
 	assert.equal(missingResult.details, undefined, "a JSON error carries no details metadata");
 });
@@ -1931,13 +1963,13 @@ test("argument footguns die loudly and tool-run metadata surfaces (A1/A2/A3/B4/B
 	const target = listed.items.find((candidate) => candidate.total_chars === "hello world".length);
 	assert.ok(target, "the user item is listed");
 	const noteTotal = resultRead(await call(captured, "notes_read", { path: "a.md" }, ctx)).total_chars;
-	const notePastEnd = resultJson<{ error?: string; offset_chars?: number; total_chars?: number; path?: string }>(
+	const notePastEnd = resultJson<{ error?: string; offset_chars?: number; total_chars?: number; address?: string }>(
 		await call(captured, "notes_read", { path: "a.md", offset_chars: noteTotal + 1 }, ctx),
 	);
 	assert.match(notePastEnd.error ?? "", /past the end/, "notes: past-end offset is a named error");
 	assert.equal(notePastEnd.offset_chars, noteTotal + 1, "notes: the error echoes the offending offset");
 	assert.equal(notePastEnd.total_chars, noteTotal, "notes: the error names the real length");
-	assert.equal(notePastEnd.path, "a.md", "notes: the error echoes the path");
+	assert.equal(notePastEnd.address, "a.md", "notes: the error echoes the address");
 	const noteEnd = resultRead(await call(captured, "notes_read", { path: "a.md", offset_chars: noteTotal }, ctx));
 	assert.equal(noteEnd.content, "", "notes: offset == total is the legal empty end-read");
 	assert.equal(noteEnd.next_offset_chars, null, "notes: the end-read terminates");

@@ -30,7 +30,7 @@ const ORIGINS: readonly Origin[] = ["user", "self", "external"];
 const STATUSES: readonly NoteStatus[] = ["active", "superseded", "pending", "archived"];
 const TIMESTAMP_KEYS = ["created_at", "updated_at", "last_accessed"] as const;
 /** Emission order, exactly the Design's key list. */
-const KNOWN_KEYS = ["scope", "origin", "status", "stale", "created_at", "updated_at", "last_accessed", "access_count", "source_window", "supersedes", "recurrence_count", "recurrence_windows"] as const;
+const KNOWN_KEYS = ["origin", "status", "stale", "created_at", "updated_at", "last_accessed", "access_count", "source_window", "supersedes", "recurrence_count", "recurrence_windows"] as const;
 
 export function isScope(value: unknown): value is Scope {
 	return typeof value === "string" && (SCOPES as readonly string[]).includes(value);
@@ -140,7 +140,9 @@ export function serializeNote(meta: NoteMeta, body: string): string {
 		else lines.push(`${key}: ${yamlScalar(value)}`);
 	}
 	for (const key of Object.keys(meta)) {
-		if ((KNOWN_KEYS as readonly string[]).includes(key)) continue;
+		// scope is a legacy on-disk field. Store callers derive it from the home's location,
+		// but serialization intentionally drops it on the next write.
+		if (key === "scope" || (KNOWN_KEYS as readonly string[]).includes(key)) continue;
 		if (meta[key] === undefined) continue;
 		lines.push(`${key}: ${yamlScalar(meta[key])}`);
 	}

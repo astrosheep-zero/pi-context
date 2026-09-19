@@ -1,9 +1,7 @@
-import { existsSync } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { historyFromSession } from "./history.js";
 import { localIso } from "./notes.js";
-import { listNotes, peekNote, resolveNoteScope } from "./memory/store.js";
-import { notesRoot } from "./memory/paths.js";
+import { listNotes, peekNote } from "./memory/store.js";
 import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, NOTE_PREVIEW_CHARS, NOTE_PREVIEW_HEAD_CHARS, NOTE_PREVIEW_TAIL_CHARS, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "./protocol.js";
 
 /** Codex-style <context_window> identity block: agent name and first/current/previous window ids only. */
@@ -27,11 +25,18 @@ function identityBlock(agentName: string, firstWindowId: string, currentWindowId
  */
 function notesIndex(ctx: ExtensionContext): string {
 	const sections: string[] = [];
-	// TOC residency ("地图在场"): the map, when present, is injected whole ahead of the list.
-	const toc = resolveNoteScope(ctx, "TOC.md");
-	if (toc) {
-		const body = peekNote(ctx, toc.scope, "TOC.md").body;
-		if (body.length > 0) sections.push(body);
+	// TOC residency ("地图在场"): explicit ordered home peeks are the one deliberate
+	// precedence operation. Stale maps are skipped rather than injected.
+	for (const scope of ["session", "project", "global"] as const) {
+		try {
+			const toc = peekNote(ctx, scope, "TOC.md");
+			if (!toc.meta.stale) {
+				if (toc.body.length > 0) sections.push(toc.body);
+				break;
+			}
+		} catch {
+			// An absent TOC is expected; continue to the next explicit home.
+		}
 	}
 	// listNotes is already most-recently-updated first; stale notes never reach the index.
 	const recentNotes = listNotes(ctx, {})
@@ -41,7 +46,7 @@ function notesIndex(ctx: ExtensionContext): string {
 		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (up to 5, most recent first):`];
 		for (const row of recentNotes) {
 			const body = peekNote(ctx, row.meta.scope, row.path).body;
-			lines.push(`- ${row.path} (${body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${localIso(row.meta.updated_at)})`);
+			lines.push(`- ${row.address} (${body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${localIso(row.meta.updated_at)})`);
 			const chars = Array.from(body);
 			// Short notes stay whole; long notes keep both ends. head + tail <= NOTE_PREVIEW_CHARS < chars.length,
 			// so the slices are disjoint and no character is shown twice.
@@ -56,9 +61,7 @@ function notesIndex(ctx: ExtensionContext): string {
 }
 
 function notesHomeBlock(): string {
-	const home = notesRoot();
-	const location = existsSync(home) ? home : "the notes home";
-	return `Notes live at ${location} (global/, project/<name>-<8hex>/, pi/session/<id>/, dreams/); notes_* tools reach only their own three homes; any other note is a plain file — use the file tools.`;
+	return "Notes_* addresses have three homes: bare <vpath> is this session, @project/<vpath> is this project, and @global/<vpath> is global. @ means leaving home; there is no cross-home fallback. Any other note is a plain file — use the file tools.";
 }
 
 /**
