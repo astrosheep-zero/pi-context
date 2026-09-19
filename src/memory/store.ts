@@ -203,7 +203,14 @@ export function editNote(ctx: ExtensionContext, vpath: string, edits: EditOperat
 		if (lines.length > 1 && !opts.replaceAll) {
 			throw new NoteError("ambiguous_edit", `edit ${index}: oldText occurs ${lines.length} times (lines ${lines.join(", ")}); pass replace_all to replace every occurrence`, { line_numbers: lines, edit_index: index });
 		}
-		next = opts.replaceAll ? next.split(oldText).join(newText) : next.replace(oldText, newText);
+		// Single replacement is positional splicing, never String.replace: user text must be
+		// inserted byte-for-byte, without $-pattern substitution ($&, $`, $', $1, $$).
+		if (opts.replaceAll) {
+			next = next.split(oldText).join(newText);
+		} else {
+			const matchIndex = next.indexOf(oldText);
+			next = next.substring(0, matchIndex) + newText + next.substring(matchIndex + oldText.length);
+		}
 	});
 	const destScope = opts.scope === undefined ? found.scope : assertScope(opts.scope);
 	if (opts.origin !== undefined) meta.origin = assertOrigin(opts.origin);

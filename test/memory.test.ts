@@ -132,6 +132,35 @@ test("edit is body-scoped with named failures and a replace_all escape hatch", a
 	assert.equal(frontmatterOnly.edit_index, 0, "a frontmatter-only anchor is not a body match");
 });
 
+test("a single edit inserts newText byte-for-byte: no $-pattern substitution", async () => {
+	freshRoot();
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+
+	// Each pattern is a JS String.replace replacement token. With positional splicing the whole
+	// two-character (or two-dollar) sequence lands literally; with String.replace it would expand,
+	// and the prefix token ($`) would splice in the entire document prefix.
+	const cases = ["$&", "$`", "$'", "$1", "$$"];
+	for (const token of cases) {
+		const newText = `pre${token}post`;
+		await call(captured, "notes_write", { path: "literal.md", content: "alpha\nbeta\ngamma" }, ctx);
+		const edited = resultJson<{ applied: number }>(
+			await call(captured, "notes_edit", { path: "literal.md", edits: [{ oldText: "beta", newText }] }, ctx),
+		);
+		assert.equal(edited.applied, 1, `the single edit for ${JSON.stringify(token)} applied`);
+		const body = resultRead(await call(captured, "notes_read", { path: "literal.md" }, ctx)).content;
+		assert.equal(body.endsWith(`alpha\n${newText}\ngamma`), true, `${JSON.stringify(token)} is inserted literally`);
+		assert.equal(body.endsWith(`alpha\nalpha\npre${token}post\ngamma`), false, `${JSON.stringify(token)} does not splice in the document prefix`);
+	}
+
+	// The replace_all branch (split/join) is likewise literal, so both branches agree.
+	await call(captured, "notes_write", { path: "literal-all.md", content: "one X two X three" }, ctx);
+	await call(captured, "notes_edit", { path: "literal-all.md", edits: [{ oldText: "X", newText: "$`$&$1$$" }], replace_all: true }, ctx);
+	const allBody = resultRead(await call(captured, "notes_read", { path: "literal-all.md" }, ctx)).content;
+	assert.equal(allBody.endsWith("one $`$&$1$$ two $`$&$1$$ three"), true, "replace_all inserts $-patterns literally too");
+});
+
 test("metadata-only edit updates setters without touching the body", async () => {
 	freshRoot();
 	const session = manager();
