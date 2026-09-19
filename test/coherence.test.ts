@@ -19,7 +19,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { type ExtensionAPI, type ExtensionContext, SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import piContext, { historyFromSession } from "../src/index.js";
 import { TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
-import { stripLeadingFrontmatter } from "../src/memory/frontmatter.js";
+import { stripLeadingFrontmatter } from "../src/notes/frontmatter.js";
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pc-coherence-agent-"));
 process.env.PI_NOTES_HOME = mkdtempSync(join(tmpdir(), "pc-coherence-notes-"));

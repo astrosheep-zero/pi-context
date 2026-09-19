@@ -18,9 +18,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import piContext, { historyFromSession, internal, notesFromSession } from "../src/index.js";
 import { bootBlock } from "../src/prompts.js";
-import { localIso } from "../src/notes.js";
-import { physicalPath } from "../src/memory/paths.js";
-import { listNotes } from "../src/memory/store.js";
+import { localIso } from "../src/notes/model.js";
+import { physicalPath } from "../src/notes/paths.js";
+import { listNotes } from "../src/notes/store.js";
 import { middleTruncate, page, TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
 import { NOTE_TYPE, MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
 

@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { historyFromSession } from "./history.js";
-import { localIso } from "./notes.js";
-import { listNotes } from "./memory/store.js";
+import { localIso } from "./notes/model.js";
+import { listNotes } from "./notes/store.js";
 import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, NOTE_PREVIEW_CHARS, NOTE_PREVIEW_HEAD_CHARS, NOTE_PREVIEW_TAIL_CHARS, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "./protocol.js";
 
 /** Codex-style <context_window> identity block: agent name and first/current/previous window ids only. */

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, w
 import { dirname } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { generateDiffString } from "@earendil-works/pi-coding-agent";
-import { assertGlobPattern, assertVirtualPath, globToRegExp } from "../notes.js";
+import { assertGlobPattern, assertVirtualPath, globToRegExp } from "./model.js";
 import { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "../protocol.js";
 import { isOrigin, isScope, parseNote, serializeNote, stripLeadingFrontmatter, type NoteMeta, type Origin } from "./frontmatter.js";
 import { addressFor } from "./address.js";

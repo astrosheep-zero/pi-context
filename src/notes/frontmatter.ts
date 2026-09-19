@@ -1,4 +1,4 @@
-import { localIso } from "../notes.js";
+import { localIso } from "./model.js";
 import type { Scope } from "./paths.js";
 
 export type NoteStatus = "active" | "superseded" | "pending" | "archived";

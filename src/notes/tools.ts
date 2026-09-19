@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { localIso } from "../notes.js";
+import { localIso } from "./model.js";
 import { characterWindowHeader, DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS, middleTruncate, output, outputRaw, page, prefixFit, readCharacterWindow, withinTextBudget } from "../tool-output.js";
 import { cursor, nullableString, positiveInteger, searchQueries, searchQuery } from "../tool-schema.js";
 import { assertAddress } from "./address.js";
@@ -26,7 +26,7 @@ function failure(error: unknown) {
 	throw error;
 }
 
-export function registerMemoryTools(pi: ExtensionAPI) {
+export function registerNotesTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_write", label: "Notes write",
 		description: `Create or replace a note as a real markdown file. ${ADDRESS_DESCRIPTION} Keep notes small and split by topic — by what the note is about, never by who said it (authorship is origin's job); a rewrite replaces the body whole while preserving created_at and every other frontmatter key. stale: true marks the note closed so it leaves the boot index but stays readable and searchable.`,

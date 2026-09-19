@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { acquireLock, failLock, releaseLock } from "./lock.js";
 import { materialGate, timeGate } from "./gates.js";
 import { loadPlaybook, runDreamer } from "./runner.js";
-import { notesRoot } from "../memory/paths.js";
+import { notesRoot } from "../notes/paths.js";
 
 function args(argv: string[]) { const out: Record<string, string | boolean> = {}; for (let i=0;i<argv.length;i++) { const a=argv[i]!; if (a === "--force" || a === "--help") out[a.slice(2)] = true; else if (a.startsWith("--")) out[a.slice(2)] = argv[++i] ?? ""; } return out; }
 function packageRoot(): string {

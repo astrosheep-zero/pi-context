@@ -1,4 +1,4 @@
-import { assertVirtualPath } from "../notes.js";
+import { assertVirtualPath } from "./model.js";
 import type { Scope } from "./paths.js";
 
 export type NoteAddress = { scope: Scope; path: string };

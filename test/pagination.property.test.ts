@@ -23,7 +23,7 @@ import test from "node:test";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
 import { historyFromSession } from "../src/index.js";
-import { listNotes, searchNotes, type NoteRow, type NoteSearchRow } from "../src/memory/store.js";
+import { listNotes, searchNotes, type NoteRow, type NoteSearchRow } from "../src/notes/store.js";
 import { TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
 import { MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
 import { appendText, call, context, makeExtension, manager, resultJson, type Captured } from "./integration.test.js";

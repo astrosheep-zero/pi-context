@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { sessionHomesRoot } from "../memory/paths.js";
+import { sessionHomesRoot } from "../notes/paths.js";
 
 export type GateResult = { ok: boolean; reason: string };
 export function timeGate(lockPath: string, minHours: number, now = Date.now()): GateResult {

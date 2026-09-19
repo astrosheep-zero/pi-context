@@ -11,12 +11,12 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { physicalPath, projectKey, scopeDir } from "../src/memory/paths.js";
-import { listNotes } from "../src/memory/store.js";
+import { physicalPath, projectKey, scopeDir } from "../src/notes/paths.js";
+import { listNotes } from "../src/notes/store.js";
 import { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES, PROTOCOL_BLOCK } from "../src/protocol.js";
 import { call, context, makeExtension, manager, resultJson, resultRead, runHandlers } from "./integration.test.js";
 
-process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-context-memory-agent-"));
+process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-context-notes-agent-"));
 
 function freshRoot(): string {
 	const root = mkdtempSync(join(tmpdir(), "pi-context-notes-"));
