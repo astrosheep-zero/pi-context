@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { mkdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createAgentSession, createEditToolDefinition, createWriteToolDefinition, ModelRuntime, resolveModelScopeWithDiagnostics, SessionManager, type AgentSession, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -22,7 +22,8 @@ async function jailWritePath(notesHome: string, path: string): Promise<void> {
 	} catch {
 		throw new Error(`write jail: cannot resolve notes home ${notesHome}`);
 	}
-	const targetParent = dirname(resolve(realNotesHome, path));
+	const target = resolve(realNotesHome, path);
+	const targetParent = dirname(target);
 	if (isOutside(realNotesHome, targetParent)) throw new Error(`write jail: ${path} is outside notes home ${notesHome}`);
 	// write creates parent directories itself. Create only after the lexical check, then
 	// canonicalize the parent so a symlink cannot lead the underlying tool out of home.
@@ -34,6 +35,22 @@ async function jailWritePath(notesHome: string, path: string): Promise<void> {
 		throw new Error(`write jail: cannot resolve target parent in notes home ${notesHome}`);
 	}
 	if (isOutside(realNotesHome, realTargetParent)) throw new Error(`write jail: ${path} is outside notes home ${notesHome}`);
+	let targetStats;
+	try {
+		targetStats = await lstat(target);
+	} catch (error: any) {
+		if (error.code !== "ENOENT") throw new Error(`write jail: cannot inspect target in notes home ${notesHome}`);
+	}
+	if (targetStats?.isSymbolicLink()) {
+		let realTarget: string;
+		try {
+			realTarget = await realpath(target);
+		} catch {
+			throw new Error(`write jail: cannot resolve target in notes home ${notesHome}`);
+		}
+		if (isOutside(realNotesHome, realTarget)) throw new Error(`write jail: ${path} is outside notes home ${notesHome}`);
+	}
+	if (targetStats && targetStats.nlink > 1) throw new Error(`write jail: ${path} has hard links and is not allowed in notes home ${notesHome}`);
 }
 
 function jailToolDefinition<T extends ToolDefinition<any, any, any>>(definition: T, notesHome: string): T {

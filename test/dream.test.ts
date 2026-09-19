@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -66,6 +66,22 @@ test("dreamer write jail accepts home files and refuses escapes", async () => {
 	await rejectsOutsideHome("write", "escape/outside.md");
 	await rejectsOutsideHome("edit", "escape/outside.md");
 	assert.equal(existsSync(join(outside, "outside.md")), false, "the jail does not write through an in-home symlink");
+
+	const outsideFile = join(outside, "outside.md");
+	writeFileSync(outsideFile, "outside");
+	symlinkSync(outsideFile, join(home, "global/outside-link.md"));
+	await rejectsOutsideHome("write", "global/outside-link.md");
+	assert.equal(readFileSync(outsideFile, "utf8"), "outside", "the jail does not write through a symlinked file outside home");
+
+	linkSync(outsideFile, join(home, "global/hardlink.md"));
+	await rejectsOutsideHome("write", "global/hardlink.md");
+	assert.equal(readFileSync(outsideFile, "utf8"), "outside", "the jail does not write through a hardlinked file outside home");
+
+	const insideFile = join(home, "global/inside.md");
+	writeFileSync(insideFile, "inside");
+	symlinkSync(insideFile, join(home, "global/inside-link.md"));
+	await tools.get("write")!.execute("write", { path: "global/inside-link.md", content: "updated" }, undefined, undefined, ctx);
+	assert.equal(readFileSync(insideFile, "utf8"), "updated", "the jail permits a symlinked file that resolves inside home");
 });
 
 test("dreamer allowlist contains only the file tools and reports their writes", async () => {
