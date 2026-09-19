@@ -235,14 +235,6 @@ export function readNote(ctx: ExtensionContext, vpath: string, scope: Scope): { 
 	return { meta, body, resolvedScope: scope };
 }
 
-/** Read a note's meta and body without the read side effect (used by the boot index). */
-export function peekNote(ctx: ExtensionContext, scope: Scope, vpath: string): { meta: NoteMeta; body: string } {
-	const path = physicalPath(scope, vpath, ctx);
-	const { meta, body } = parseNote(readFileSync(path, "utf8"));
-	meta.scope = scope;
-	return { meta, body };
-}
-
 /** Merged rows across homes, most recently updated first (address breaks ties). */
 export function listNotes(ctx: ExtensionContext, opts: { scope?: Scope; pattern?: string } = {}): NoteRow[] {
 	const matcher = matcherFor(opts.pattern);
@@ -254,7 +246,7 @@ export function listNotes(ctx: ExtensionContext, opts: { scope?: Scope; pattern?
 			if (matcher && !matcher.test(address)) continue;
 			const { meta, body } = parseNote(readFileSync(`${root}/${path}`, "utf8"));
 			meta.scope = scope;
-				rows.push({ address, scope, path, meta, body, sizeBytes: Buffer.byteLength(body, "utf8") });
+			rows.push({ address, scope, path, meta, body, sizeBytes: Buffer.byteLength(body, "utf8") });
 		}
 	}
 	rows.sort((a, b) => b.meta.updated_at - a.meta.updated_at || a.address.localeCompare(b.address));

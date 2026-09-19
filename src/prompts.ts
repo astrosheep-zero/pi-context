@@ -42,7 +42,7 @@ function notesIndex(ctx: ExtensionContext): string {
 	if (recentNotes.length > 0) {
 		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (up to 5, most recent first):`];
 		for (const row of recentNotes) {
-		const body = row.body;
+			const body = row.body;
 			lines.push(`- ${row.address} (${body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${localIso(row.meta.updated_at)})`);
 			const chars = Array.from(body);
 			// Short notes stay whole; long notes keep both ends. head + tail <= NOTE_PREVIEW_CHARS < chars.length,
