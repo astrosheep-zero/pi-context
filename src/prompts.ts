@@ -1,7 +1,9 @@
+import { existsSync } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { historyFromSession } from "./history.js";
 import { localIso } from "./notes.js";
 import { listNotes, peekNote, resolveNoteScope } from "./memory/store.js";
+import { notesRoot } from "./memory/paths.js";
 import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, NOTE_PREVIEW_CHARS, NOTE_PREVIEW_HEAD_CHARS, NOTE_PREVIEW_TAIL_CHARS, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "./protocol.js";
 
 /** Codex-style <context_window> identity block: agent name and first/current/previous window ids only. */
@@ -53,6 +55,12 @@ function notesIndex(ctx: ExtensionContext): string {
 	return sections.join("\n\n");
 }
 
+function notesHomeBlock(): string {
+	const home = notesRoot();
+	const location = existsSync(home) ? home : "the notes home";
+	return `Notes live at ${location} (global/, project/<name>-<8hex>/, pi/session/<id>/, dreams/); notes_* tools reach only their own three homes; any other note is a plain file — use the file tools.`;
+}
+
 /**
  * Assemble the static, once-per-window boot block: the reset line for resets, the
  * <context_window> identity block, the recent-notes index at window-open time, and
@@ -66,6 +74,7 @@ export function bootBlock(ctx: ExtensionContext, currentId: string, previousId: 
 	parts.push(identityBlock(ctx.sessionManager.getSessionName() ?? "root", firstId, currentId, previousId));
 	const index = notesIndex(ctx);
 	if (index) parts.push(index);
+	parts.push(notesHomeBlock());
 	parts.push(PROTOCOL_BLOCK);
 	return parts.join("\n\n");
 }
@@ -78,4 +87,3 @@ export function bootBlock(ctx: ExtensionContext, currentId: string, previousId: 
 export function tokenBudgetGuidance(remaining: number): string {
 	return `${GUIDANCE_OPEN_TAG}\nYour brain is almost out of room — ${remaining} tokens left, and then your memory gets wiped. The wipe is automatic: there is no final turn to write then. Grab the notebook now — the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. Replacing an older checkpoint? Mark it stale. Then end the window yourself — anything you do after the checkpoint isn't in it.\n${GUIDANCE_CLOSE_TAG}`;
 }
-

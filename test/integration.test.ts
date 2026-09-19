@@ -17,6 +17,7 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import piContext, { historyFromSession, internal, notesFromSession } from "../src/index.js";
+import { bootBlock } from "../src/prompts.js";
 import { localIso } from "../src/notes.js";
 import { physicalPath } from "../src/memory/paths.js";
 import { listNotes } from "../src/memory/store.js";
@@ -486,6 +487,15 @@ test("the boot notes index omits itself when every note is stale", async () => {
 	assert.equal(text.includes("done.md"), false, "no stale note is indexed");
 	assert.equal(text.includes("finished"), false, "no stale preview is rendered");
 	assert.ok(text.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG), "the rest of the boot block still renders");
+});
+
+test("the boot block gives awake agents the notes-home file layout", () => {
+	const session = manager();
+	const rendered = bootBlock(context(session), "pcw:test:root", undefined, false);
+	assert.ok(rendered.includes(process.env.PI_NOTES_HOME ?? "the notes home"));
+	assert.match(rendered, /global\/, project\/<name>-<8hex>\/, pi\/session\/<id>\/, dreams\//);
+	assert.match(rendered, /notes_\* tools reach only their own three homes/);
+	assert.match(rendered, /any other note is a plain file — use the file tools/);
 });
 
 

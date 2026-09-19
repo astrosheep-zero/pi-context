@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireLock, failLock } from "../src/dream/lock.js";
 import { materialGate, timeGate } from "../src/dream/gates.js";
-import { defaultDreamerSessionFactory, memoryToolDefinitions, runDreamer, DREAMER_TOOLS } from "../src/dream/runner.js";
+import { defaultDreamerSessionFactory, dreamerWriteToolDefinitions, runDreamer, DREAMER_TOOLS } from "../src/dream/runner.js";
 
 function fixture() { return mkdtempSync(join(tmpdir(), "dream-")); }
 function old(path: string) { const d = new Date(Date.now() - 48 * 3600_000); utimesSync(path, d, d); }
@@ -45,37 +45,59 @@ test("live lock is excluded, dead lock is reclaimed, and failures restore mtime"
 	assert.ok(Math.abs(statSync(lock).mtimeMs - prior) < 2000);
 });
 
-test("real notes custom tools write and edit fixture files on disk", async () => {
+test("dreamer write jail accepts home files and refuses escapes", async () => {
 	const home = fixture();
-	process.env.PI_NOTES_HOME = home;
-	const ctx = { cwd: home, sessionManager: { getSessionId: () => "dream" } } as any;
-	const tools = new Map(memoryToolDefinitions().map((tool: any) => [tool.name, tool]));
-	await tools.get("notes_write")!.execute("write", { path: "survivor.md", content: "one", scope: "session" }, undefined, undefined, ctx);
-	await tools.get("notes_write")!.execute("write", { path: "absorbed.md", content: "two", scope: "session" }, undefined, undefined, ctx);
-	await tools.get("notes_edit")!.execute("edit", { path: "survivor.md", edits: [{ oldText: "one", newText: "one\ntwo" }] }, undefined, undefined, ctx);
-	await tools.get("notes_edit")!.execute("stale", { path: "absorbed.md", stale: true }, undefined, undefined, ctx);
-	const survivor = readFileSync(join(home, "pi/session/dream/survivor.md"), "utf8");
-	const absorbed = readFileSync(join(home, "pi/session/dream/absorbed.md"), "utf8");
-	assert.match(survivor, /one\ntwo/);
-	assert.match(absorbed, /stale: true/);
-	assert.equal(existsSync(join(home, "pi/session/dream/survivor.md")), true);
-	assert.equal(existsSync(join(home, "pi/session/dream/absorbed.md")), true);
+	const tools = new Map(dreamerWriteToolDefinitions(home).map((tool) => [tool.name, tool]));
+	const ctx = { cwd: home } as any;
+	await tools.get("write")!.execute("write", { path: "global/x.md", content: "one" }, undefined, undefined, ctx);
+	assert.equal(readFileSync(join(home, "global/x.md"), "utf8"), "one");
+
+	const rejectsOutsideHome = async (tool: "write" | "edit", path: string) => {
+		const params = tool === "write" ? { path, content: "outside" } : { path, edits: [{ oldText: "one", newText: "outside" }] };
+		await assert.rejects(() => tools.get(tool)!.execute("escape", params as any, undefined, undefined, ctx), (error: Error) => error.message.includes(home));
+	};
+	for (const tool of ["write", "edit"] as const) {
+		await rejectsOutsideHome(tool, "/tmp/dream-jail-outside.md");
+		await rejectsOutsideHome(tool, "../dream-jail-outside.md");
+	}
+
+	const outside = fixture();
+	symlinkSync(outside, join(home, "escape"));
+	await rejectsOutsideHome("write", "escape/outside.md");
+	await rejectsOutsideHome("edit", "escape/outside.md");
+	assert.equal(existsSync(join(outside, "outside.md")), false, "the jail does not write through an in-home symlink");
 });
 
-test("dreamer allowlist contains only read tools and notes writes", async () => {
+test("dreamer allowlist contains only the file tools and reports their writes", async () => {
 	let configured: string[] = [];
 	const session = {
 		subscribe(handler: (event: unknown) => void) { this.handler = handler; return () => {}; },
 		handler: (_event: unknown) => {},
-		async prompt(_text: string) { this.handler({ type: "tool_execution_start", toolName: "notes_write", args: { path: "a.md", scope: "global", stale: false } }); this.handler({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }] } }); },
+		async prompt(_text: string) { this.handler({ type: "tool_execution_start", toolName: "write", args: { path: "global/a.md", content: "a" } }); this.handler({ type: "tool_execution_start", toolName: "edit", args: { path: "project/p.md", edits: [] } }); this.handler({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }] } }); },
 		dispose() {},
 	};
 	const result = await runDreamer("playbook", "/tmp/notes", { sessionFactory: async (options) => { configured = options.tools; return session as any; } });
 	assert.deepEqual(configured, DREAMER_TOOLS);
-	assert.equal(configured.includes("write"), false);
-	assert.equal(configured.includes("edit"), false);
-	assert.deepEqual(result.writes, [{ tool: "notes_write", path: "a.md", scope: "global", stale: false }]);
+	assert.deepEqual(configured, ["read", "grep", "find", "ls", "write", "edit"]);
+	assert.equal(configured.some((tool) => tool.startsWith("notes_")), false);
+	assert.deepEqual(result.writes, [{ tool: "write", path: "global/a.md" }, { tool: "edit", path: "project/p.md" }]);
 	assert.equal(result.report, "done");
+});
+
+test("dreamer session has exactly the jailed file-tool allowlist", async () => {
+	const session = await defaultDreamerSessionFactory({ cwd: fixture(), tools: DREAMER_TOOLS });
+	try {
+		assert.deepEqual((session as any).agent.state.tools.map((tool: { name: string }) => tool.name).sort(), [...DREAMER_TOOLS].sort());
+	} finally {
+		session.dispose();
+	}
+});
+
+test("playbook describes plain files and the retained frontmatter", () => {
+	const playbook = readFileSync(join(process.cwd(), "playbook.md"), "utf8");
+	assert.equal(playbook.includes("notes_"), false);
+	for (const field of ["scope", "origin", "status", "stale", "created_at", "updated_at", "last_accessed", "access_count"]) assert.match(playbook, new RegExp(`^${field}:`, "m"));
+	assert.match(playbook, /Nothing is physically deleted/);
 });
 
 test("provider errors propagate without parsing a response", async () => {
