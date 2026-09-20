@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { acquireLock, failLock } from "../src/dream/lock.js";
 import { materialGate, timeGate } from "../src/dream/gates.js";
 import { defaultDreamerSessionFactory, dreamerWriteToolDefinitions, runDreamer, DREAMER_TOOLS } from "../src/dream/runner.js";
+import { gitCommit } from "../src/dream/git.js";
+import { execFileSync } from "node:child_process";
 import { contentText } from "../src/history.js";
 
 function fixture() { return mkdtempSync(join(tmpdir(), "dream-")); }
@@ -131,4 +133,24 @@ test("provider errors propagate without parsing a response", async () => {
 
 test("default dreamer rejects an unresolvable model pattern", async () => {
 	await assert.rejects(() => defaultDreamerSessionFactory({ cwd: "/tmp/notes", modelPattern: "definitely-not-a-real-model", tools: DREAMER_TOOLS }), /definitely-not-a-real-model/);
+});
+
+test("git audit layer commits baseline and dream, stays silent when clean, keeps file content", () => {
+	const home = fixture();
+	writeFileSync(join(home, "a.md"), "one");
+	gitCommit(home, "baseline t");
+	gitCommit(home, "dream t"); // clean tree — no empty commit
+	const log1 = execFileSync("git", ["log", "--format=%s"], { cwd: home, encoding: "utf8" }).trim();
+	assert.equal(log1, "baseline t");
+	writeFileSync(join(home, "a.md"), "two");
+	gitCommit(home, "dream t2");
+	const log2 = execFileSync("git", ["log", "--format=%s"], { cwd: home, encoding: "utf8" }).trim();
+	assert.equal(log2, "dream t2\nbaseline t");
+	assert.equal(readFileSync(join(home, "a.md"), "utf8"), "two"); // notes themselves untouched by the layer
+	const before = execFileSync("git", ["show", "HEAD~1:a.md"], { cwd: home, encoding: "utf8" }).trim();
+	assert.equal(before, "one"); // rollback information actually recorded
+});
+
+test("git audit layer never breaks the run when git itself fails", () => {
+	gitCommit(join(fixture(), "missing", "home"), "x"); // init on a missing cwd throws inside — swallowed
 });
