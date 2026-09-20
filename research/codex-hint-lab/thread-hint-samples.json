@@ -1,0 +1,95 @@
+{
+  "record-4": {
+    "method": "POST",
+    "path": "/backend-api/codex/alpha/notes/v2/thread_hint",
+    "request_headers_subset": {
+      "x-openai-tool-output-truncation-policy": "{\"mode\":\"bytes\",\"limit\":4000}",
+      "originator": "codex_exec"
+    },
+    "request_body": {
+      "context": {
+        "session_id": "01a0bd4f-8b38-7860-8aea-856a1ca97e35",
+        "current_agent_name": "/root"
+      }
+    },
+    "response_status": 200,
+    "response_body": {
+      "text": ""
+    }
+  },
+  "record-8": {
+    "method": "POST",
+    "path": "/backend-api/codex/alpha/notes/v2/thread_hint",
+    "request_headers_subset": {
+      "x-openai-tool-output-truncation-policy": "{\"mode\":\"bytes\",\"limit\":4000}",
+      "originator": "codex_exec"
+    },
+    "request_body": {
+      "context": {
+        "session_id": "01a0bd52-fcc0-71d3-91cd-8967ba7d5b1d",
+        "current_agent_name": "/root"
+      }
+    },
+    "response_status": 200,
+    "response_body": {
+      "text": ""
+    }
+  },
+  "record-10": {
+    "method": "POST",
+    "path": "/backend-api/codex/alpha/notes/v2/write_file",
+    "request_headers_subset": {
+      "x-openai-tool-output-truncation-policy": "{\"mode\":\"tokens\",\"limit\":10000}",
+      "x-openai-encrypted-tool-arguments": "true",
+      "originator": "codex_exec"
+    },
+    "request_body": {
+      "path": "checkpoint.md",
+      "text": "gAAAAABqr3FxMtALn8htpLhpXYWwGwgVHJ7X5niiDKV01SzNaCJKGNccLcBvKJskIpzTdOrAbYAzdpK1pyWBG8BiamvAA0R8J1jLM6S7JD13kkmPOdQi0Hp-KSTWzXCpcq6d-SKYnhY97k5N90l5MQHBB5gRg_V4lTZ1pCQ4Mp9Ha4P-9vWtywAbSCku5ykGCtd-hvJfLhCSadnRaQkKr1tbzdQ-YhPmWg==",
+      "context": {
+        "session_id": "01a0bd52-fcc0-71d3-91cd-8967ba7d5b1d",
+        "current_agent_name": "/root"
+      }
+    },
+    "response_status": 200,
+    "response_body": {
+      "encrypted_output": "gAAAAABqr3Fypk2QPTN72GgcoO9zvFyehWvezZEyNhdQWwXJu6HQ838A1gkarsuFNw65p5YJExYoEtlVCoj22_IIOlny3QHeh-NKIA3C9SkCTDnPpHT8qRLjQz1ipbofOaYL2NYlrzUv1VFys6rg3I91yxiFAZgi7lzxBB1mxJc92P8_3oixa3H7YueZh1CMS1svNi0pJcK3pdxWEza-H_pmlkDou3U9qRzfNuAKnryIvyaUMnpghR1M1PKkyu68k60ZVYqOgLhWOIDIJkTwOXe5oL9EELpxfg=="
+    }
+  },
+  "record-14": {
+    "method": "POST",
+    "path": "/backend-api/codex/alpha/notes/v2/thread_hint",
+    "request_headers_subset": {
+      "x-openai-tool-output-truncation-policy": "{\"mode\":\"bytes\",\"limit\":4000}",
+      "originator": "codex_exec"
+    },
+    "request_body": {
+      "context": {
+        "session_id": "01a0bd54-16ce-7b61-91df-4cd55ed77df7",
+        "current_agent_name": "/root"
+      }
+    },
+    "response_status": 200,
+    "response_body": {
+      "text": ""
+    }
+  },
+  "record-22": {
+    "method": "POST",
+    "path": "/backend-api/codex/alpha/notes/v2/thread_hint",
+    "request_headers_subset": {
+      "x-openai-tool-output-truncation-policy": "{\"mode\":\"bytes\",\"limit\":4000}",
+      "originator": "codex_exec"
+    },
+    "request_body": {
+      "context": {
+        "session_id": "01a0bd52-fcc0-71d3-91cd-8967ba7d5b1d",
+        "current_agent_name": "/root"
+      }
+    },
+    "response_status": 200,
+    "response_body": {
+      "text": "Recent notes (up to 5, most-recent first):\n- /root/notes/checkpoint.md (1 lines, 78 UTF-8 bytes)"
+    }
+  }
+}

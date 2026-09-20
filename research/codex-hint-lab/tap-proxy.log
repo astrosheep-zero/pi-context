@@ -1,0 +1,6 @@
+🌐 Dashboard: http://127.0.0.1:19527 (shared)
+🔍 claude-tap v0.1.dev1 listening on http://127.0.0.1:18927
+📁 Trace session: 3e817077-6a85-46bb-aa2b-915d4c2c6ccc
+🗄️  Trace database: /Users/astrosheep/.local/share/claude-tap/traces.sqlite3
+
+--no-launch mode: proxy running. Press Ctrl+C to stop.
