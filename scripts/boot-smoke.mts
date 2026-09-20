@@ -3,7 +3,7 @@
 import { bootBlock } from "../src/prompts.ts";
 
 const ctx = {
-	cwd: "/Users/astrosheep/playground",
+	cwd: process.argv[2] ?? "/Users/astrosheep/playground",
 	sessionManager: {
 		getSessionName: () => "root",
 		getSessionId: () => "smoke-live-check",
