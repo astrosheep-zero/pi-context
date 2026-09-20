@@ -67,3 +67,27 @@ evidence→无网proposer沙盒(凭据不进沙盒)→bounded Cordis插件candid
 
 ### 修正后结论
 管线以**零件**形式存在了：①捕获(SIx/agentlint journal) → ②提案(dsh-self-evolving的proposer, 但benchmark驱动非摩擦驱动) → ③着陆(rulehook/agentlint机制+咱们keiyaku review)。**仍没人把摩擦→提案接上**——咱们的差异化活着：user当裁判+摩擦当driver。
+
+## dream 三分法 (2026-09-20, user令"分清楚"——三个常被混为一谈的东西)
+
+**① Claude 泄漏的 autoDream —— 未发布, 只在泄漏源码里。**
+`src/services/autoDream/autoDream.ts` (github.com/davccavalcante/claude-code-leaked)。flag `autoDreamEnabled` 默认关, `/memory` 里能看到 "auto-dream: off" toggle。三重门(最便宜先查): 距上次整理≥minHours → transcript数≥minSessions → 无并发锁。过门后 fork DreamTask subagent 跑 `/dream` prompt: 读近期transcript、查旧记忆staleness、merge新信号、prune矛盾、相对日期转绝对、维护MEMORY.md索引。**整理时只读**(Bash被禁)。搭档 `extractMemories` 每轮对话结束即时抓(只看最近一轮)——白班即时抓+夜班跨session整理, 人家本来就分两层。
+
+**② hermes 的 dreaming —— 实装了, 但不在core, 是社区插件。**
+PR #25314 (dreaming进core) **被关未合**, issue #25309 还开着, hermes-agent主仓plugins/里至今没有dreaming。实装=独立插件仓 `alejandroiglesias/hermes-dreaming` (11★)。三阶段睡眠: Light(扫近期session/去重/stage候选, 不写)→REM(提炼主题写DREAMS.md日记, 不进记忆)→Deep(打分晋升MEMORY.md, 唯一写口)。加权评分: relevance30%/frequency24%/query-diversity15%/recency15%/consolidation10%/conceptual-richness6%。cron默认凌晨3点, opt-in默认关, CLI `hermes dream run/status/diary`。灵感写明来自OpenClaw Dreaming。
+
+**③ Claude plain memory —— 现役、文档化、纯白班。**
+per-project `~/.claude/projects/<slug>/memory/MEMORY.md` 永远加载前200行/25KB + topic文件, 模型自己用文件工具写; 全局层=手写 `~/.claude/CLAUDE.md`。**没有任何后台整理agent**。
+
+**要点**: 三处"dream"指的都是夜班整理层; TOC/MAP机制是③白班索引层的事, 拿dream证据裁决白班设计=串台。咱们pi-context的dream模块是②同族(harness实装派), 但门在user手里。每家角色对照: 白班即时捕获(extractMemories/memory工具/咱们醒着写notes) + 常驻小索引(MEMORY.md/MAP.md) + 夜班整理(autoDream/hermes-dreaming/咱们dreamer) —— 三层缺一个都不完整。
+
+## 四家harness全局记忆注入实测 (2026-09-20, MAP分层设计的决策证据)
+
+**四家全部每次session常驻注入全局层, 无一例外; 成本控制靠尺寸不靠开关; 大宗档案全部走工具按需取。**
+
+- **Claude Code**: `~/.claude/CLAUDE.md`全文+项目CLAUDE.md+MEMORY.md(200行/25KB), 多scope**拼接非覆盖**, 最宽scope在前。官方劝每个文件<200行(烧context+降遵从)。
+- **Codex**: `~/.codex/AGENTS.md`+项目AGENTS.md链式叠加。issue #18189/#8759在骂repo文件shadow全局文件——shadowing是公认bug, 咱们同款病已拆(932f4c6)。
+- **Hermes**: MEMORY.md硬cap 2200字符+USER.md 1375字符(~/.hermes/memories/), 冻结快照注入system prompt; session中途改写只落盘不改prompt。
+- **OpenClaw**: MEMORY.md全文注入; `memory/YYYY-MM-DD.md`日志档**不注入**, 走memory_search/memory_get工具。(文档曾撒谎说不注入, 用户开issue #12909/#26949骂token。)
+
+推论: 常驻层必须小而策展(一行一条目的索引天然合形); "要不要两张地图都常驻"的答案=常驻, 因为所有家都常驻, 且从来没人靠不注入省钱。
