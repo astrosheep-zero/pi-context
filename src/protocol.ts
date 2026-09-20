@@ -7,6 +7,9 @@ export const RESET_MARKER_TYPE = "pi-context/reset-marker";
 export const CONTINUATION_TYPE = "pi-context/continuation";
 export const RESET_V2 = "reset-v2";
 export const MAX_NOTE_BYTES = 1_000_000;
+export const POCKET_SESSION_LIMIT = 5;
+export const POCKET_PROJECT_LIMIT = 2;
+export const POCKET_GLOBAL_LIMIT = 2;
 // Write-time cap on a virtual note path. Deliberately NOT enforced by assertVirtualPath:
 // notesFromSession replays already-persisted operations, which must keep loading sessions
 // that contain a longer legacy path. Reads and replay stay un-capped.

@@ -530,6 +530,20 @@ test("the boot block gives awake agents the notes-home file layout", () => {
 	assert.match(rendered, /Any other note is a plain file — use the file tools/);
 });
 
+test("the boot block keeps fresh global and project maps resident, never a session map", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	await call(captured, "notes_write", { address: "MAP.md", content: "MAP: session" }, ctx);
+	await call(captured, "notes_write", { address: "@project/MAP.md", content: "MAP: project" }, ctx);
+	await call(captured, "notes_write", { address: "@global/MAP.md", content: "MAP: global" }, ctx);
+	const rendered = bootBlock(ctx, "pcw:test:root", undefined, false);
+	assert.ok(rendered.includes("MAP: global"));
+	assert.ok(rendered.includes("MAP: project"));
+	assert.equal(rendered.includes("MAP: session"), false);
+	assert.ok(rendered.indexOf("MAP: global") < rendered.indexOf("MAP: project"), "global map precedes project map");
+});
+
 
 test("paged tool outputs stay bounded and cursors reconstruct history and notes", async () => {
 	const session = manager();

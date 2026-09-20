@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { physicalPath, projectKey, scopeDir } from "../src/notes/paths.js";
-import { listNotes } from "../src/notes/store.js";
+import { listNotes, type Scope } from "../src/notes/store.js";
 import { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES, PROTOCOL_BLOCK } from "../src/protocol.js";
 import { call, context, makeExtension, manager, resultJson, resultRead, runHandlers } from "./integration.test.js";
 
@@ -22,6 +22,12 @@ function freshRoot(): string {
 	const root = mkdtempSync(join(tmpdir(), "pi-context-notes-"));
 	process.env.PI_NOTES_HOME = root;
 	return root;
+}
+
+function setUpdatedAt(scope: Scope, path: string, ctx: ReturnType<typeof context>, timestamp: number): void {
+	const file = physicalPath(scope, path, ctx);
+	const raw = readFileSync(file, "utf8");
+	writeFileSync(file, raw.replace(/^updated_at: .*$/m, `updated_at: ${new Date(timestamp).toISOString()}`));
 }
 
 type Meta = Record<string, unknown>;
@@ -101,7 +107,7 @@ test("overwrite preserves created_at and unknown keys, bumps updated_at, and cle
 	assert.equal(listed.meta.status, "active");
 });
 
-test("listNotes retains each parsed body for TOC injection", async () => {
+test("listNotes retains each parsed body for MAP injection", async () => {
 	freshRoot();
 	const session = manager();
 	const captured = makeExtension(session);
@@ -421,48 +427,55 @@ test("write-time caps refuse an oversized vpath or serialized file, and edit ref
 	assert.match(refusedEdit.error, new RegExp(String(MAX_NOTE_BYTES)), "an edit that would exceed the cap is refused");
 });
 
-test("a global TOC.md body is injected ahead of the recent-notes list", async () => {
+test("fresh global and project MAP.md bodies are both resident before the pocket", async () => {
 	freshRoot();
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
-	await call(captured, "notes_write", { path: "TOC.md", content: "MAP: global\nMAP: second", scope: "global" }, ctx);
+	await call(captured, "notes_write", { address: "MAP.md", content: "MAP: session" }, ctx);
+	await call(captured, "notes_write", { address: "@project/MAP.md", content: "MAP: project" }, ctx);
+	await call(captured, "notes_write", { address: "@global/MAP.md", content: "MAP: global\nMAP: second" }, ctx);
 	await call(captured, "notes_write", { path: "recent.md", content: "recent body" }, ctx);
 	runHandlers(captured, "session_start", {}, ctx);
 	const boot = typeof captured.sent.at(-1)?.message.content === "string" ? (captured.sent.at(-1)!.message.content as string) : "";
-	assert.ok(boot.includes("MAP: global"), "a global TOC is injected");
-	assert.ok(boot.indexOf("MAP: global") < boot.indexOf("crumpled note"), "the TOC body precedes the recent-notes list");
+	assert.ok(boot.includes("MAP: global"), "the global map is injected");
+	assert.ok(boot.includes("MAP: project"), "the project map is injected");
+	assert.equal(boot.includes("MAP: session"), false, "the session map is never injected");
+	assert.ok(boot.indexOf("MAP: global") < boot.indexOf("MAP: project"), "the global map precedes the project map");
+	assert.ok(boot.indexOf("MAP: project") < boot.indexOf("crumpled note"), "both map bodies precede the pocket");
 	assert.ok(PROTOCOL_BLOCK.includes("notes_write"), "the protocol text still rides along");
 });
 
-test("a session TOC.md wins precedence over the global map", async () => {
+test("the boot pocket applies per-home quotas in session, project, global order", async () => {
 	freshRoot();
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
-	await call(captured, "notes_write", { path: "TOC.md", content: "MAP: global", scope: "global" }, ctx);
-	await call(captured, "notes_write", { path: "TOC.md", content: "MAP: session", scope: "session" }, ctx);
-	runHandlers(captured, "session_start", {}, ctx);
-	const boot = typeof captured.sent.at(-1)?.message.content === "string" ? (captured.sent.at(-1)!.message.content as string) : "";
-	const injected = boot.slice(0, boot.indexOf("crumpled note") === -1 ? boot.length : boot.indexOf("crumpled note"));
-	assert.ok(injected.includes("MAP: session"), "the session TOC wins the precedence");
-	assert.equal(injected.includes("MAP: global"), false, "only the first-hit TOC is injected");
-});
-
-test("the boot index admits up to five fresh notes and the protocol carries the exact stale line", async () => {
-	freshRoot();
-	const session = manager();
-	const captured = makeExtension(session);
-	const ctx = context(session);
-	for (let index = 0; index < 6; index++) {
-		await call(captured, "notes_write", { path: `fresh-${index}.md`, content: `body ${index}` }, ctx);
+	const base = Date.parse("2026-01-01T00:00:00.000Z");
+	for (const [scope, count] of [["session", 6], ["project", 3], ["global", 3]] as const) {
+		for (let index = 0; index < count; index++) {
+			const path = `${scope}-${index}.md`;
+			await call(captured, "notes_write", { path, content: `${scope} body`, scope }, ctx);
+			setUpdatedAt(scope, path, ctx, base + index * 1_000);
+		}
 	}
+	await call(captured, "notes_write", { address: "MAP.md", content: "MAP: session" }, ctx);
+	await call(captured, "notes_write", { address: "@project/MAP.md", content: "MAP: project" }, ctx);
+	await call(captured, "notes_write", { address: "@global/MAP.md", content: "MAP: global" }, ctx);
 	runHandlers(captured, "session_start", {}, ctx);
 	const boot = typeof captured.sent.at(-1)?.message.content === "string" ? (captured.sent.at(-1)!.message.content as string) : "";
-	assert.match(boot, /\(up to 5, most recent first\)/, "the pocket line says up to 5");
-	assert.equal((boot.match(/^- /gm) ?? []).length, 5, "exactly five fresh notes are indexed, not six");
-	assert.ok(PROTOCOL_BLOCK.includes("Mark outdated or unneeded notes stale — leave them, and they will keep misleading you."), "the protocol block carries the v2 stale line verbatim");
-	assert.equal(PROTOCOL_BLOCK.split("Mark outdated or unneeded notes stale — leave them, and they will keep misleading you.").length - 1, 1, "the stale line appears exactly once");
+	assert.ok(boot.includes("You find 9 crumpled notes in your pocket (most recent first — up to 5 from this session, 2 from this project, 2 from global). A note's content never appears here, so its name has to say what the note is about:"), "the pocket line matches the dictated copy");
+	for (const name of ["session-5.md", "session-4.md", "session-3.md", "session-2.md", "session-1.md", "@project/project-2.md", "@project/project-1.md", "@global/global-2.md", "@global/global-1.md"]) {
+		assert.ok(boot.includes(name), `${name} stays in the pocket`);
+	}
+	for (const name of ["session-0.md", "@project/project-0.md", "@global/global-0.md", "MAP.md", "MAP: session"]) {
+		assert.equal(boot.includes(name), false, `${name} is not a pocket entry`);
+	}
+	assert.ok(boot.indexOf("session-5.md") < boot.indexOf("session-4.md"), "session notes are most-recent-first");
+	assert.ok(boot.indexOf("@project/project-2.md") < boot.indexOf("@project/project-1.md"), "project notes are most-recent-first");
+	assert.ok(boot.indexOf("@global/global-2.md") < boot.indexOf("@global/global-1.md"), "global notes are most-recent-first");
+	assert.ok(boot.indexOf("session-1.md") < boot.indexOf("@project/project-2.md"), "session notes precede project notes");
+	assert.ok(boot.indexOf("@project/project-1.md") < boot.indexOf("@global/global-2.md"), "project notes precede global notes");
 });
 
 test("project scope keys off the git root basename and sha1 prefix", () => {
@@ -514,31 +527,24 @@ test("full addresses drive outputs and patterns; legacy scope is read then dropp
 	assert.equal(/^scope:/m.test(readFileSync(legacy, "utf8")), false, "the next write removes legacy scope frontmatter");
 });
 
-test("boot explicitly skips stale TOCs in session, project, then global order", async () => {
+test("stale project and global maps are skipped independently", async () => {
 	freshRoot();
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
-	await call(captured, "notes_write", { address: "TOC.md", content: "session stale", stale: true }, ctx);
-	await call(captured, "notes_write", { address: "@global/TOC.md", content: "global fresh" }, ctx);
+	await call(captured, "notes_write", { address: "@project/MAP.md", content: "project fresh" }, ctx);
+	await call(captured, "notes_write", { address: "@global/MAP.md", content: "global stale", stale: true }, ctx);
 	runHandlers(captured, "session_start", {}, ctx);
 	let boot = String(captured.sent.at(-1)?.message.content ?? "");
-	assert.ok(boot.includes("global fresh"));
-	assert.equal(boot.includes("session stale"), false);
+	assert.ok(boot.includes("project fresh"), "a fresh project map survives a stale global map");
+	assert.equal(boot.includes("global stale"), false, "the stale global map is skipped");
 	const second = manager();
 	const secondCaptured = makeExtension(second);
 	const secondCtx = context(second);
-	await call(secondCaptured, "notes_write", { address: "TOC.md", content: "session fresh" }, secondCtx);
-	await call(secondCaptured, "notes_write", { address: "@global/TOC.md", content: "global other" }, secondCtx);
+	await call(secondCaptured, "notes_edit", { address: "@project/MAP.md", stale: true }, secondCtx);
+	await call(secondCaptured, "notes_edit", { address: "@global/MAP.md", stale: false }, secondCtx);
 	runHandlers(secondCaptured, "session_start", {}, secondCtx);
 	boot = String(secondCaptured.sent.at(-1)?.message.content ?? "");
-	const tocOnly = boot.slice(0, boot.indexOf("You find"));
-	assert.ok(tocOnly.includes("session fresh"));
-	assert.equal(tocOnly.includes("global other"), false);
-	await call(secondCaptured, "notes_edit", { address: "TOC.md", stale: true }, secondCtx);
-	await call(secondCaptured, "notes_edit", { address: "@global/TOC.md", stale: true }, secondCtx);
-	const third = manager();
-	const thirdCaptured = makeExtension(third);
-	runHandlers(thirdCaptured, "session_start", {}, context(third));
-	assert.equal(String(thirdCaptured.sent.at(-1)?.message.content ?? "").includes("session fresh"), false, "all stale TOCs inject none");
+	assert.equal(boot.includes("project fresh"), false, "the stale project map is skipped");
+	assert.ok(boot.includes("global stale"), "a fresh global map survives a stale project map");
 });
