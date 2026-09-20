@@ -29,9 +29,6 @@ export const DEFAULT_REMINDER_MARGIN_TOKENS = 24_576;
 export const WARNING_RUNWAY_TOKENS = 12_288;
 export const RESET_SUMMARY =
 	"You wake up. Your head is empty — no memories, the past a blank. But nothing is lost: the notes you wrote and the recorded history still remember for you.";
-export const NOTE_PREVIEW_HEAD_CHARS = 80;
-export const NOTE_PREVIEW_TAIL_CHARS = 240;
-export const NOTE_PREVIEW_CHARS = NOTE_PREVIEW_HEAD_CHARS + NOTE_PREVIEW_TAIL_CHARS;
 export const CONTINUATION = "Your memory was just erased. Pull only the details you need from history_* and notes_*, then get back to work.";
 
 /**

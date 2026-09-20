@@ -495,7 +495,7 @@ test("the boot notes index excludes stale notes while list, read, and search sti
 	const text = typeof boot?.message.content === "string" ? boot.message.content : "";
 	assert.ok(text.includes("fresh.md"), "the fresh note is indexed");
 	assert.equal(text.includes("old.md"), false, "the stale note leaves the boot index");
-	assert.equal(text.includes("stale content"), false, "the stale preview is not rendered");
+	assert.equal(text.includes("stale content"), false, "the stale note's body is absent from boot");
 
 	const listed = resultJson<{ files: Array<{ path: string; stale: boolean }> }>(await call(captured, "notes_list", {}, ctx));
 	assert.equal(listed.files.find((file) => file.path === "old.md")?.stale, true, "list carries the stale flag");
@@ -517,7 +517,7 @@ test("the boot notes index omits itself when every note is stale", async () => {
 	runHandlers(captured, "session_start", {}, ctx);
 	const text = typeof captured.sent[0]?.message.content === "string" ? captured.sent[0].message.content : "";
 	assert.equal(text.includes("done.md"), false, "no stale note is indexed");
-	assert.equal(text.includes("finished"), false, "no stale preview is rendered");
+	assert.equal(text.includes("finished"), false, "the stale note's body is absent from boot");
 	assert.ok(text.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG), "the rest of the boot block still renders");
 });
 
@@ -1158,11 +1158,10 @@ test("custom reset boundary removes old provider context but history remains sea
 	assert.ok(sessionManager.getEntry(compactionId));
 });
 
-test("the boot notes preview keeps short notes whole and long notes head-to-tail", async () => {
+test("the boot notes index shows one metadata line per note and never a body", async () => {
 	const sessionManager = manager();
 	const captured = makeExtension(sessionManager);
 	const ctx = context(sessionManager);
-	// Unique Unicode code points so an overlap introduced by a naive head+tail concat is detectable.
 	const longText = Array.from({ length: 400 }, (_, index) => String.fromCharCode(0x4e00 + index)).join("");
 	const shortText = "short-first\nshort-second";
 	await call(captured, "notes_write", { path: "long.md", content: longText }, ctx);
@@ -1172,20 +1171,11 @@ test("the boot notes preview keeps short notes whole and long notes head-to-tail
 	const text = typeof boot?.message.content === "string" ? boot.message.content : "";
 	assert.ok(text.includes("long.md") && text.includes("short.md"), "both notes are indexed");
 
-	// Short note: complete, with its newline preserved and each line indented 2 spaces.
-	assert.ok(text.includes("  short-first\n  short-second"), "short note text is shown whole and indented");
-
-	// Long note preview: exactly first 80 + separator + last 240 Unicode characters.
-	const chars = Array.from(longText);
-	const head = chars.slice(0, 80).join("");
-	const tail = chars.slice(chars.length - 240).join("");
-	const previewLine = text.split("\n").find((line) => line.startsWith("  ") && line.includes("…"));
-	assert.ok(previewLine, "long note carries an ellipsis preview line");
-	const preview = Array.from(previewLine.slice(2));
-	assert.ok(previewLine.includes(head), "long preview keeps the head");
-	assert.ok(previewLine.includes(tail), "long preview keeps the tail");
-	assert.equal(preview.length, 321, "head 80 + one separator + tail 240, nothing duplicated");
-	assert.equal(previewLine.includes(longText), false, "long note is truncated, not shown whole");
+	// Each note is exactly one metadata line: address, line count, byte count, timestamp.
+	assert.match(text, /^- long\.md \(1 lines, \d+ UTF-8 bytes, updated [^)]+\)$/m, "the long note is a single metadata line");
+	assert.match(text, /^- short\.md \(2 lines, \d+ UTF-8 bytes, updated [^)]+\)$/m, "the short note is a single metadata line");
+	assert.equal(text.includes(longText), false, "the long note's body never reaches boot");
+	assert.equal(text.includes(shortText), false, "the short note's body never reaches boot");
 });
 
 test("the boot block is persisted at the root and baked into every reset summary", async () => {
@@ -1879,7 +1869,8 @@ test("malformed frontmatter timestamps degrade to a finite fallback without pois
 	assert.ok(Number.isFinite(rows[0]!.meta.updated_at), "a malformed timestamp degrades to a finite fallback");
 	runHandlers(extension, "session_start", {}, ctx);
 	const rendered = JSON.stringify(extension.sent);
-	assert.ok(rendered.includes("keep me"), "the valid body still renders");
+	assert.ok(rendered.includes("good.md"), "the valid note still renders as a metadata line");
+	assert.equal(rendered.includes("keep me"), false, "note bodies stay out of the boot block");
 	assert.equal(rendered.includes("NaN"), false, "no malformed timestamp leaks into the boot block");
 });
 

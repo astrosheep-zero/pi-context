@@ -29,7 +29,7 @@ function failure(error: unknown) {
 export function registerNotesTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_write", label: "Notes write",
-		description: `Create or replace a note as a real markdown file. ${ADDRESS_DESCRIPTION} Keep notes small and split by topic — by what the note is about, never by who said it (authorship is origin's job); a rewrite replaces the body whole while preserving created_at and every other frontmatter key. stale: true marks the note closed so it leaves the boot index but stays readable and searchable.`,
+		description: `Create or replace a note as a real markdown file, and name it for what it holds: a fresh window sees only an index entry, never the note itself. ${ADDRESS_DESCRIPTION} Keep notes small and split by topic — by what the note is about, never by who said it (authorship is origin's job); a rewrite replaces the body whole while preserving created_at and every other frontmatter key. stale: true marks the note closed so it leaves the boot index but stays readable and searchable.`,
 		parameters: Type.Object({ address: Type.String(), content: Type.String(), origin: ORIGIN, stale: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), executionMode: "sequential",
 		async execute(_id, params, _signal, _update, ctx) {
 			const content = params.content;

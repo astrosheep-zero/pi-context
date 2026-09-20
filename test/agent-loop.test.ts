@@ -145,11 +145,11 @@ const settings = { compaction: { enabled: usageMode, reserveTokens: 32768, keepR
 				} else if (mode === "write-error") {
 					assert.equal(existsSync(noteFile), false, "failed write creates no checkpoint");
 					assert.ok(branch.some((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "notes_write" && entry.message.isError));
-					assert.ok(!requests.at(-1)!.includes("CHECKPOINT_SENTINEL"), "fresh context must not invent a saved note");
+					assert.ok(!requests.at(-1)!.includes("checkpoint.md"), "fresh context must not invent a saved note");
 				} else {
 					assert.ok(existsSync(noteFile), "the checkpoint is a real file on disk");
 					assert.ok(resetIndex > warningIndices[0]!, "the warning precedes the wipe");
-					assert.ok(requests.at(-1)!.includes("CHECKPOINT_SENTINEL"), "fresh boot carries the saved checkpoint");
+					assert.ok(requests.at(-1)!.includes("checkpoint.md"), "fresh boot carries the saved checkpoint as a metadata line");
 				}
 
 				assert.ok(!requests.at(-1)!.includes("Your brain is almost out of room"), "new window excludes old guidance");

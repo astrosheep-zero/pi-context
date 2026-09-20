@@ -101,12 +101,12 @@ test("overwrite preserves created_at and unknown keys, bumps updated_at, and cle
 	assert.equal(listed.meta.status, "active");
 });
 
-test("listNotes retains each parsed body for boot previews", async () => {
+test("listNotes retains each parsed body for TOC injection", async () => {
 	freshRoot();
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
-	await call(captured, "notes_write", { path: "preview.md", content: "parsed once" }, ctx);
+	await call(captured, "notes_write", { path: "retained.md", content: "parsed once" }, ctx);
 	assert.equal(listNotes(ctx, { scope: "session" })[0]?.body, "parsed once");
 });
 
@@ -343,7 +343,7 @@ test("the boot index reads the physical store across scopes and excludes stale n
 	assert.ok(text.includes("fresh.md"), "a fresh session note is indexed");
 	assert.ok(text.includes("global.md"), "a fresh global note is indexed");
 	assert.equal(text.includes("old.md"), false, "a stale note leaves the index");
-	assert.equal(text.includes("stale content"), false, "a stale preview is not rendered");
+	assert.equal(text.includes("stale content"), false, "the stale note's body is absent from boot");
 	for (const name of ["notes_write", "notes_edit", "notes_read", "notes_search", "notes_list"]) {
 		assert.ok(PROTOCOL_BLOCK.includes(name), `the protocol block names ${name}`);
 	}

@@ -2,7 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { historyFromSession } from "./history.js";
 import { localIso } from "./notes/model.js";
 import { listNotes } from "./notes/store.js";
-import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, NOTE_PREVIEW_CHARS, NOTE_PREVIEW_HEAD_CHARS, NOTE_PREVIEW_TAIL_CHARS, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "./protocol.js";
+import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "./protocol.js";
 
 /** Codex-style <context_window> identity block: agent name and first/current/previous window ids only. */
 function identityBlock(agentName: string, firstWindowId: string, currentWindowId: string, previousWindowId?: string): string {
@@ -16,12 +16,9 @@ function identityBlock(agentName: string, firstWindowId: string, currentWindowId
 }
 
 /**
- * Recent-notes index: up to three most-recent fresh (non-stale) notes. Each note shows its
- * path, line count, UTF-8 byte count and local ISO update time, followed by an indented inline
- * preview: the whole text when it fits in NOTE_PREVIEW_CHARS, otherwise its first
- * NOTE_PREVIEW_HEAD_CHARS and last NOTE_PREVIEW_TAIL_CHARS Unicode characters joined by an
- * explicit ellipsis. The two slices never overlap, so the preview never duplicates head content
- * as tail content. Stale notes are excluded entirely; empty when no fresh notes remain.
+ * Recent-notes index: up to five most-recent fresh (non-stale) notes, one metadata line each —
+ * address, line count, UTF-8 byte count, and local ISO update time. Note bodies are never
+ * rendered here. Stale notes are excluded entirely; empty when no fresh notes remain.
  */
 function notesIndex(ctx: ExtensionContext): string {
 	const sections: string[] = [];
@@ -40,17 +37,9 @@ function notesIndex(ctx: ExtensionContext): string {
 		.filter((row) => !row.meta.stale)
 		.slice(0, 5);
 	if (recentNotes.length > 0) {
-		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (up to 5, most recent first):`];
+		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (up to 5, most recent first). A note's content never appears here, so its name has to say what the note is about:`];
 		for (const row of recentNotes) {
-			const body = row.body;
-			lines.push(`- ${row.address} (${body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${localIso(row.meta.updated_at)})`);
-			const chars = Array.from(body);
-			// Short notes stay whole; long notes keep both ends. head + tail <= NOTE_PREVIEW_CHARS < chars.length,
-			// so the slices are disjoint and no character is shown twice.
-			const preview = chars.length <= NOTE_PREVIEW_CHARS
-				? body
-				: `${chars.slice(0, NOTE_PREVIEW_HEAD_CHARS).join("")}…${chars.slice(chars.length - NOTE_PREVIEW_TAIL_CHARS).join("")}`;
-			lines.push(preview.split("\n").map((line) => `  ${line}`).join("\n"));
+			lines.push(`- ${row.address} (${row.body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${localIso(row.meta.updated_at)})`);
 		}
 		sections.push(lines.join("\n"));
 	}
