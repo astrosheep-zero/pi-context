@@ -42,7 +42,7 @@ function notesIndex(ctx: ExtensionContext): string {
 		...listNotes(ctx, { scope: "global" }).filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_GLOBAL_LIMIT),
 	];
 	if (recentNotes.length > 0) {
-		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (most recent first — up to ${POCKET_SESSION_LIMIT} from this session, ${POCKET_PROJECT_LIMIT} from this project, ${POCKET_GLOBAL_LIMIT} from global). A note's content never appears here, so its name has to say what the note is about:`];
+		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (by home, most recent first within each: up to ${POCKET_SESSION_LIMIT} from this session, ${POCKET_PROJECT_LIMIT} from this project, ${POCKET_GLOBAL_LIMIT} from global). A note's content never appears here, so its name has to say what the note is about:`];
 		for (const row of recentNotes) {
 			lines.push(`- ${row.address} (${row.body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${localIso(row.meta.updated_at)})`);
 		}
@@ -66,9 +66,9 @@ export function bootBlock(ctx: ExtensionContext, currentId: string, previousId: 
 	const parts: string[] = [];
 	if (resetLine) parts.push(RESET_SUMMARY);
 	parts.push(identityBlock(ctx.sessionManager.getSessionName() ?? "root", firstId, currentId, previousId));
+	parts.push(notesHomeBlock());
 	const index = notesIndex(ctx);
 	if (index) parts.push(index);
-	parts.push(notesHomeBlock());
 	parts.push(PROTOCOL_BLOCK);
 	return parts.join("\n\n");
 }

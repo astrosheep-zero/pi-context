@@ -464,7 +464,7 @@ test("the boot pocket applies per-home quotas in session, project, global order"
 	await call(captured, "notes_write", { address: "@global/MAP.md", content: "MAP: global" }, ctx);
 	runHandlers(captured, "session_start", {}, ctx);
 	const boot = typeof captured.sent.at(-1)?.message.content === "string" ? (captured.sent.at(-1)!.message.content as string) : "";
-	assert.ok(boot.includes("You find 9 crumpled notes in your pocket (most recent first — up to 5 from this session, 2 from this project, 2 from global). A note's content never appears here, so its name has to say what the note is about:"), "the pocket line matches the dictated copy");
+	assert.ok(boot.includes("You find 9 crumpled notes in your pocket (by home, most recent first within each: up to 5 from this session, 2 from this project, 2 from global). A note's content never appears here, so its name has to say what the note is about:"), "the pocket line matches the dictated copy");
 	for (const name of ["session-5.md", "session-4.md", "session-3.md", "session-2.md", "session-1.md", "@project/project-2.md", "@project/project-1.md", "@global/global-2.md", "@global/global-1.md"]) {
 		assert.ok(boot.includes(name), `${name} stays in the pocket`);
 	}
