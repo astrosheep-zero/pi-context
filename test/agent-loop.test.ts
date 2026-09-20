@@ -25,7 +25,9 @@ for (const mode of ["golden", "write-error", "ignored-warning", "explicit", "unc
 			const model = { ...base, contextWindow: 100000, maxTokens: 4096 };
 			const usageMode = mode === "golden" || mode === "write-error" || mode === "ignored-warning";
 			const expectedResets = mode === "abort" || mode === "uncompactable" ? 0 : 1;
-			const settings = { compaction: { enabled: usageMode, reserveTokens: 32768, keepRecentTokens: mode === "uncompactable" ? 1 : 200 }, retry: { enabled: false } };
+			// 0.86 split-turn cut can still summarize a turn prefix, so keepRecentTokens: 1 no longer
+			// makes a reset uncompactable; a keep larger than the whole session keeps everything and does.
+const settings = { compaction: { enabled: usageMode, reserveTokens: 32768, keepRecentTokens: mode === "uncompactable" ? 1_000_000 : 200 }, retry: { enabled: false } };
 			writeFileSync(join(dir, "settings.json"), JSON.stringify(settings));
 			const settingsManager = SettingsManager.create(dir, dir);
 			let resets = 0;

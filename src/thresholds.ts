@@ -60,8 +60,11 @@ export function thresholdsFor(ctx: ExtensionContext): ResolvedThresholds {
 	if (cached) return cached;
 	try {
 		const settingsManager = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
+		// Pass the active model so per-model compaction.modelOverrides resolve (SDK 0.86);
+		// on older runtimes the extra argument is ignored and the ordinary setting wins.
+		const model = ctx.model;
 		const derived = deriveThresholds(
-			settingsManager.getCompactionSettings().reserveTokens,
+			settingsManager.getCompactionSettings(model ? { provider: model.provider, id: model.id } : undefined).reserveTokens,
 			mergePiContextSettings(settingsManager.getGlobalSettings(), settingsManager.getProjectSettings()),
 		);
 		for (const warning of derived.warnings) ctx.ui.notify(warning, "warning");
