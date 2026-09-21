@@ -12,7 +12,16 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: {
 	isCurrentReset: (entryId: string, ctx: ExtensionContext) => boolean;
 	onReset: (entryId: string) => void;
 }) {
-	type Attempt = { completed: boolean; sessionId: string; explicit: boolean };
+	type Attempt = {
+		completed: boolean;
+		explicit: boolean;
+		nextRequested: boolean;
+		continuationStarted: boolean;
+		sessionId: string;
+		settled: boolean;
+		wait: Promise<void>;
+		release: () => void;
+	};
 	type Request =
 		| { phase: "idle" }
 		| { phase: "requested" }
@@ -21,12 +30,71 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: {
 	let handledEntry: string | undefined;
 	let active = true;
 
+	const release = (attempt: Attempt) => {
+		if (attempt.settled) return;
+		attempt.settled = true;
+		if (state.phase === "compacting" && state.attempt === attempt) {
+			state = { phase: "idle" };
+			handledEntry = undefined;
+		}
+		attempt.release();
+	};
 	const clear = () => {
+		if (state.phase === "compacting") release(state.attempt);
 		state = { phase: "idle" };
 		handledEntry = undefined;
 	};
 	const valid = (request: Attempt, ctx: ExtensionContext) =>
 		active && options.isEnabled() && state.phase === "compacting" && state.attempt === request && ctx.sessionManager.getSessionId() === request.sessionId;
+
+	const begin = (ctx: ExtensionContext) => {
+		let releaseWait!: () => void;
+		const request: Attempt = {
+			completed: false,
+			explicit: true,
+			nextRequested: false,
+			continuationStarted: false,
+			sessionId: ctx.sessionManager.getSessionId(),
+			settled: false,
+			wait: new Promise<void>((resolve) => { releaseWait = resolve; }),
+			release: () => releaseWait(),
+		};
+		state = { phase: "compacting", attempt: request };
+		const onError = (error: Error) => {
+			if (!valid(request, ctx)) return;
+			release(request);
+			// Do not retry from settled in a tight loop. A later prompt may trigger a
+			// native reset or explicitly request one.
+			ctx.ui.notify(`pi-context: reset did not complete (${error.message}). The conversation is retained; resume with another prompt.`, "warning");
+		};
+		try {
+			ctx.compact({
+				onComplete: () => {
+					if (!valid(request, ctx)) return;
+					// session_compact only confirms the boundary. onComplete runs after
+					// Pi clears compaction state; sending inside the hook starts too early.
+					// A queued user prompt may already have started at compaction_end.
+					if (request.completed && ctx.isIdle() && !ctx.hasPendingMessages()) {
+						// The SDK detaches sendMessage, so own the next settled event before
+						// starting it. The originating agent_settled handler awaits wait.
+						if (request.continuationStarted) return;
+						request.continuationStarted = true;
+						try {
+							pi.sendMessage(options.continuation, { triggerTurn: true });
+						} catch (error) {
+							onError(error instanceof Error ? error : new Error(String(error)));
+						}
+						return;
+					}
+					release(request);
+				},
+				onError,
+			});
+		} catch (error) {
+			onError(error instanceof Error ? error : new Error(String(error)));
+		}
+		return request;
+	};
 
 	// State is intentionally not resumed from a pending request: a loaded session must
 	// not execute work from a tool that belonged to a previous runtime or tree branch.
@@ -38,42 +106,29 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: {
 		if (!active || !options.isEnabled()) return;
 		if (ctx.signal?.aborted) {
 			// Esc cancels the user's run. Do not reset or resurrect it at settled.
-			state = { phase: "idle" };
-			return;
+			clear();
 		}
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
-		if (!active || !options.isEnabled() || state.phase === "compacting" || !ctx.isIdle()) return;
+		if (!active || !options.isEnabled() || !ctx.isIdle()) return;
+		if (state.phase === "compacting" && state.attempt.continuationStarted) {
+			const preceding = state.attempt;
+			if (!preceding.nextRequested) {
+				release(preceding);
+				return;
+			}
+			// This settled event belongs to the continuation started by preceding.
+			// If it requested another reset, retain preceding until that reset's own
+			// continuation settles. Its eventual nested handler only releases its own
+			// waiter, so it never awaits itself.
+			const next = begin(ctx);
+			return next.wait.then(() => release(preceding));
+		}
 		if (state.phase !== "requested") return;
 		// One owner for requested resets. Consume the request before any external call;
 		// repeated settled events and reentrant callbacks are harmless.
-		const request: Attempt = { completed: false, sessionId: ctx.sessionManager.getSessionId(), explicit: true };
-		state = { phase: "compacting", attempt: request };
-		const onError = (error: Error) => {
-			if (!valid(request, ctx)) return;
-			state = { phase: "idle" };
-			// Do not retry from settled in a tight loop. A later prompt may trigger a
-			// native reset or explicitly request one.
-			ctx.ui.notify(`pi-context: reset did not complete (${error.message}). The conversation is retained; resume with another prompt.`, "warning");
-		};
-		try {
-			ctx.compact({
-				onComplete: () => {
-					if (!valid(request, ctx)) return;
-					state = { phase: "idle" };
-					// session_compact only confirms the boundary. onComplete runs after
-					// Pi clears compaction state; sending inside the hook starts too early.
-					// A queued user prompt may already have started at compaction_end.
-					if (request.completed && ctx.isIdle() && !ctx.hasPendingMessages()) {
-						pi.sendMessage(options.continuation, { triggerTurn: true });
-					}
-				},
-				onError,
-			});
-		} catch (error) {
-			onError(error instanceof Error ? error : new Error(String(error)));
-		}
+		return begin(ctx).wait;
 	});
 
 	pi.on("session_before_compact", (event, ctx) => {
@@ -103,9 +158,15 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: {
 
 	return {
 		request() {
-			const pending = state.phase !== "idle";
-			if (!pending) state = { phase: "requested" };
-			return pending ? "rollover_already_pending" : "rollover_requested";
+			if (state.phase === "idle") {
+				state = { phase: "requested" };
+				return "rollover_requested";
+			}
+			if (state.phase === "compacting" && state.attempt.continuationStarted && !state.attempt.nextRequested) {
+				state.attempt.nextRequested = true;
+				return "rollover_requested";
+			}
+			return "rollover_already_pending";
 		},
 		clear,
 	};

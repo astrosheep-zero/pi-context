@@ -8,7 +8,7 @@ import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager
 import piContext from "../src/index.js";
 import { WARNING_PROMPT, WARNING_TYPE, GUIDANCE_TYPE } from "../src/protocol.js";
 
-for (const mode of ["golden", "write-error", "ignored-warning", "explicit", "uncompactable", "followup", "steering", "repeat", "abort"] as const) {
+for (const mode of ["golden", "write-error", "ignored-warning", "explicit", "uncompactable", "followup", "steering", "repeat", "nested", "immediate-dispose", "abort"] as const) {
 	test(`real Pi loop: ${mode} reset preserves history and handles completion`, { timeout: 15000 }, async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-context-loop-"));
 		const previousDir = process.env.PI_CODING_AGENT_DIR;
@@ -17,6 +17,7 @@ for (const mode of ["golden", "write-error", "ignored-warning", "explicit", "unc
 		const notesRoot = mkdtempSync(join(tmpdir(), "pi-context-loop-notes-"));
 		process.env.PI_NOTES_HOME = notesRoot;
 		let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+		let disposed = false;
 		try {
 			const runtime = await ModelRuntime.create({ authPath: join(dir, "auth.json"), modelsPath: null, modelsStorePath: join(dir, "models"), refreshOnCreate: false });
 			await runtime.setRuntimeApiKey("openai", "scripted-test-key");
@@ -24,7 +25,7 @@ for (const mode of ["golden", "write-error", "ignored-warning", "explicit", "unc
 			assert.ok(base);
 			const model = { ...base, contextWindow: 100000, maxTokens: 4096 };
 			const usageMode = mode === "golden" || mode === "write-error" || mode === "ignored-warning";
-			const expectedResets = mode === "abort" || mode === "uncompactable" ? 0 : 1;
+			const expectedResets = mode === "abort" || mode === "uncompactable" ? 0 : mode === "nested" ? 2 : 1;
 			// 0.86 split-turn cut can still summarize a turn prefix, so keepRecentTokens: 1 no longer
 			// makes a reset uncompactable; a keep larger than the whole session keeps everything and does.
 const settings = { compaction: { enabled: usageMode, reserveTokens: 32768, keepRecentTokens: mode === "uncompactable" ? 1_000_000 : 200 }, retry: { enabled: false } };
@@ -37,7 +38,7 @@ const settings = { compaction: { enabled: usageMode, reserveTokens: 32768, keepR
 			let finish!: () => void;
 			let failFinish!: (error: Error) => void;
 			const finished = new Promise<void>((resolve, reject) => { finish = resolve; failFinish = reject; });
-			const finishTimeout = setTimeout(() => failFinish(new Error(`timed out waiting for ${mode} agent settlement`)), 5000);
+			const finishTimeout = setTimeout(() => failFinish(new Error(`timed out waiting for ${mode} agent settlement (resets=${resets}, settled=${settled}, requests=${requests.length})`)), 5000);
 			const loader = new DefaultResourceLoader({ cwd: dir, agentDir: dir, settingsManager,
 				noExtensions: true, noSkills: true, noThemes: true, noPromptTemplates: true,
 				systemPromptOverride: () => "Use the tools as requested.", agentsFilesOverride: () => ({ agentsFiles: [] }),
@@ -75,7 +76,8 @@ const settings = { compaction: { enabled: usageMode, reserveTokens: 32768, keepR
 				if (fresh) freshTurns++;
 				const sawWarning = request.includes("Your memory is about to be erased");
 				const sawGuidance = request.includes("Your brain is almost out of room");
-				const explicitReset = (n === 1 && !usageMode && mode !== "uncompactable") || (mode === "repeat" && (n === 1 || n === 3));
+				const explicitReset = (n === 1 && !usageMode && mode !== "uncompactable") || (mode === "repeat" && (n === 1 || n === 3)) || (mode === "nested" && n === 3);
+				const nestedCheckpoint = mode === "nested" && n === 2;
 				const checkpoint = usageMode && sawWarning && !checkpointed && mode !== "ignored-warning";
 				if (checkpoint) checkpointed = true;
 				// The warning is chosen from the previous turn's usage, so a scripted run has to
@@ -85,11 +87,11 @@ const settings = { compaction: { enabled: usageMode, reserveTokens: 32768, keepR
 					(!fresh && !sawWarning) || (mode === "ignored-warning" && sawWarning) || (fresh && freshTurns === 2 && !sawGuidance)
 				);
 				const tokens = usageMode ? (fresh ? (freshTurns === 1 ? 100 : 50000) : sawWarning ? 70000 : n === 1 ? 50000 : 60000) : 100;
-				const tool = explicitReset || (mode === "uncompactable" && n === 1);
-				const call = probe ? "get_context_remaining" : checkpoint ? "notes_write" : tool ? "new_context" : undefined;
+				const tool = explicitReset || nestedCheckpoint || (mode === "uncompactable" && n === 1);
+				const call = probe ? "get_context_remaining" : checkpoint || nestedCheckpoint ? "notes_write" : tool ? "new_context" : undefined;
 				const message: AssistantMessage = { role: "assistant", api: model.api, provider: model.provider, model: model.id,
 					content: probe ? [{ type: "toolCall", id: "probe-call", name: "get_context_remaining", arguments: {} }]
-						: checkpoint ? [{ type: "toolCall", id: "checkpoint-call", name: "notes_write", arguments: { address: mode === "write-error" ? "../invalid.md" : "checkpoint.md", content: "CHECKPOINT_SENTINEL" } }]
+						: checkpoint || nestedCheckpoint ? [{ type: "toolCall", id: "checkpoint-call", name: "notes_write", arguments: { address: mode === "write-error" ? "../invalid.md" : "checkpoint.md", content: nestedCheckpoint ? "NESTED_RESET_PADDING ".repeat(300) : "CHECKPOINT_SENTINEL" } }]
 						: tool ? [{ type: "toolCall", id: "reset-call", name: "new_context", arguments: {} }]
 						: [{ type: "text", text: fresh ? "Resumed." : "Working." }],
 					stopReason: call ? "toolUse" : "stop", timestamp: Date.now(),
@@ -109,9 +111,17 @@ const settings = { compaction: { enabled: usageMode, reserveTokens: 32768, keepR
 				}
 			});
 			await session.prompt("OLD_CONTEXT_SENTINEL: save progress and continue the task.");
+			if (mode === "immediate-dispose") {
+				// prompt() must not resolve after compaction merely because sendMessage is
+				// detached: by this point the continuation has settled and answered.
+				session.dispose();
+				disposed = true;
+				assert.ok(settled >= 2, "the continuation settles before the originating prompt resolves");
+				assert.ok(requests.length >= 2 && !requests.at(-1)!.includes("OLD_CONTEXT_SENTINEL"), "the resumed answer exists before immediate disposal");
+			}
 			await finished;
 			clearTimeout(finishTimeout);
-			await session.waitForIdle();
+			if (!disposed) await session.waitForIdle();
 			if (mode === "abort") {
 				assert.equal(resets, 0, "user cancellation clears pending rollover");
 				assert.equal(requests.length, 1, "no continuation resurrects the cancelled run");
@@ -161,6 +171,10 @@ const settings = { compaction: { enabled: usageMode, reserveTokens: 32768, keepR
 				const queuedEntries = sm.getBranch().filter((entry) => entry.type === "message" && JSON.stringify(entry.message).includes("QUEUED_INPUT_SENTINEL"));
 				assert.equal(queuedEntries.length, 1, "one durable user input");
 			}
+			if (mode === "nested") {
+				assert.equal(resets, 2, "a continuation-requested reset forms a second completed handoff");
+				assert.equal(new Set(sm.getBranch().filter((entry) => entry.type === "compaction").map((entry) => JSON.stringify(entry.details))).size, 2);
+			}
 			if (mode === "repeat") {
 				const nextFinished = new Promise<void>((resolve) => { finish = resolve; });
 				targetResets = 2;
@@ -189,7 +203,7 @@ const settings = { compaction: { enabled: usageMode, reserveTokens: 32768, keepR
 				assert.equal(warnings.length, 1, "the next window has no warning yet");
 			}
 		} finally {
-			session?.dispose();
+			if (!disposed) session?.dispose();
 			if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = previousDir;
 			if (previousNotesRoot === undefined) delete process.env.PI_NOTES_HOME;

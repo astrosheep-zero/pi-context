@@ -5,7 +5,7 @@ import { registerResetLifecycle } from "../src/reset-lifecycle.js";
 
 type CompactOptions = NonNullable<Parameters<ExtensionContext["compact"]>[0]>;
 function harness() {
-	const handlers = new Map<string, (event: any, ctx: ExtensionContext) => any>();
+	const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
 	const messages: string[] = [];
 	const notices: string[] = [];
 	const requests: CompactOptions[] = [];
@@ -24,7 +24,7 @@ function harness() {
 		ui: { notify: (message: string) => notices.push(message) },
 	} as unknown as ExtensionContext;
 	const lifecycle = registerResetLifecycle({
-		on: (name: string, fn: (event: any, ctx: ExtensionContext) => any) => handlers.set(name, fn),
+		on: (name: string, fn: (event: any, ctx: ExtensionContext) => unknown) => handlers.set(name, fn),
 		sendMessage: (message: { customType: string }) => messages.push(message.customType),
 	} as unknown as ExtensionAPI, {
 		isEnabled: () => enabled,
@@ -38,13 +38,16 @@ function harness() {
 		ctx, lifecycle, emit, messages, notices, requests,
 		setIdle: (value: boolean) => { idle = value; },
 		setPending: (value: boolean) => { pending = value; },
-		setSignal: (value: AbortSignal) => { signal = value; },
+		setSignal: (value: AbortSignal | undefined) => { signal = value; },
 		setSession: (value: string) => { sessionId = value; },
 		setThrow: () => { throwOnCompact = true; },
 		disable: () => { enabled = false; lifecycle.clear(); },
 		enable: () => { enabled = true; },
 		before: (reason = "threshold") => emit("session_before_compact", { reason, signal: new AbortController().signal }),
-		settle: () => { emit("agent_end"); idle = true; emit("agent_settled"); },
+		// Do not await this result until after the manually driven compact callbacks:
+		// real Pi awaits the originating handler while the continuation can emit its
+		// own nested agent_settled event.
+		settle: () => { emit("agent_end"); idle = true; return emit("agent_settled"); },
 		success: (id = "reset", willRetry = false) => {
 			currentReset = id;
 			emit("session_compact", { compactionEntry: { id }, willRetry });
@@ -53,148 +56,143 @@ function harness() {
 	};
 }
 
-test("reset completion, duplicate callbacks, and duplicate tools cannot launch duplicate runs", () => {
+test("the originating settled handler waits for its continuation's nested settlement", async () => {
 	const h = harness();
 	assert.equal(h.lifecycle.request(), "rollover_requested");
 	assert.equal(h.lifecycle.request(), "rollover_already_pending");
-	h.settle();
-	h.emit("agent_settled");
+	const outer = h.settle();
 	assert.equal(h.requests.length, 1);
 	h.success();
 	h.success();
-	assert.deepEqual(h.messages, [], "nothing starts inside session_compact");
 	h.complete();
 	h.complete();
-	h.emit("agent_settled");
-	assert.deepEqual(h.messages, ["continue"]);
-	assert.equal(h.requests.length, 1);
+	assert.deepEqual(h.messages, ["continue"], "one continuation starts after compaction completion");
+
+	let released = false;
+	void Promise.resolve(outer).then(() => { released = true; });
+	await Promise.resolve();
+	assert.equal(released, false, "sending the continuation does not release the original handler");
+	await h.settle();
+	await outer;
+	assert.equal(released, true, "only the continuation's settled event releases its owner");
+	assert.equal(h.requests.length, 1, "duplicate compact and settled callbacks do not restart reset work");
 });
 
-test("automatic threshold compactions reset on the spot, with no steer and no model turn", () => {
-	const h = harness();
-	assert.ok(h.before().compaction, "the native attempt becomes our reset immediately");
-	assert.deepEqual(h.messages, [], "nothing is sent to the model");
-});
-
-test("a native compaction failure is not treated as failure of an explicit reset", () => {
-	const h = harness();
-	h.emit("session_compact_failed", { reason: "threshold", aborted: true });
-	h.lifecycle.request();
-	h.settle();
-	h.success();
-	h.complete();
-	assert.deepEqual(h.messages, ["continue"]);
-});
-
-test("failed resets release the request, retain history, and do not retry", () => {
+test("a reset requested by a continuation completes before its predecessor releases", async () => {
 	const h = harness();
 	h.lifecycle.request();
-	h.settle();
-	h.emit("session_compact_failed", { reason: "manual", aborted: false });
-	h.requests[0]!.onError!(new Error("Nothing to compact"));
-	h.requests[0]!.onError!(new Error("duplicate callback"));
-	h.complete();
-	h.emit("agent_settled");
-	assert.equal(h.requests.length, 1);
-	assert.equal(h.notices.length, 1);
-	assert.deepEqual(h.messages, []);
-	h.setIdle(false);
-	assert.ok(h.before().compaction, "the next native attempt resets directly");
-	assert.equal(h.lifecycle.request(), "rollover_requested", "explicit retry is possible");
-	h.settle();
-	assert.equal(h.requests.length, 2);
-	h.success();
-	h.complete(1);
+	const first = h.settle();
+	h.success("first"); h.complete();
 	assert.deepEqual(h.messages, ["continue"]);
-});
 
-test("synchronous compact errors cannot leave a permanent in-flight request", () => {
-	const h = harness();
-	h.setThrow();
-	h.lifecycle.request();
-	h.settle();
-	h.emit("agent_settled");
-	assert.equal(h.notices.length, 1);
+	// This models new_context being called during the first continuation run.
 	assert.equal(h.lifecycle.request(), "rollover_requested");
+	const second = h.settle();
+	assert.equal(h.requests.length, 2, "the continuation's settled handler starts its requested reset");
+	h.success("second"); h.complete(1);
+	assert.deepEqual(h.messages, ["continue", "continue"]);
+
+	let firstReleased = false;
+	void Promise.resolve(first).then(() => { firstReleased = true; });
+	await Promise.resolve();
+	assert.equal(firstReleased, false, "the predecessor remains owned while the second continuation runs");
+	await h.settle();
+	await second;
+	await first;
+	assert.equal(firstReleased, true);
+	assert.equal(h.lifecycle.request(), "rollover_requested", "a later window can request another reset");
 });
 
-test("user abort ends explicit work without resurrecting the run", () => {
+test("automatic compactions reset on the spot, with no continuation", () => {
 	const h = harness();
-	h.lifecycle.request();
-	h.setSignal(AbortSignal.abort());
-	h.settle();
-	assert.equal(h.requests.length, 0);
-	assert.equal(h.messages.includes("continue"), false);
+	assert.ok((h.before() as { compaction?: unknown }).compaction, "the native attempt becomes our reset immediately");
+	assert.deepEqual(h.messages, []);
 });
 
-test("shutdown, restart, tree navigation and toggling off invalidate late callbacks", () => {
-	for (const boundary of ["session_shutdown", "session_start", "session_tree", "off"]) {
+test("failure, synchronous scheduling errors, and cancellation release their owners without retry", async () => {
+	const failed = harness();
+	failed.lifecycle.request();
+	const outer = failed.settle();
+	failed.requests[0]!.onError!(new Error("Nothing to compact"));
+	failed.requests[0]!.onError!(new Error("duplicate callback"));
+	failed.complete();
+	await outer;
+	assert.equal(failed.notices.length, 1);
+	assert.deepEqual(failed.messages, []);
+	assert.equal(failed.lifecycle.request(), "rollover_requested", "a later explicit request is possible");
+
+	const synchronous = harness();
+	synchronous.setThrow();
+	synchronous.lifecycle.request();
+	await synchronous.settle();
+	assert.equal(synchronous.notices.length, 1);
+	assert.equal(synchronous.lifecycle.request(), "rollover_requested");
+
+	const aborted = harness();
+	aborted.lifecycle.request();
+	aborted.setSignal(AbortSignal.abort());
+	await aborted.settle();
+	assert.equal(aborted.requests.length, 0);
+	assert.deepEqual(aborted.messages, []);
+});
+
+test("shutdown, tree invalidation, toggling off, and stale sessions release waiters safely", async () => {
+	for (const boundary of ["session_shutdown", "session_start", "session_tree", "off", "session-change"] as const) {
 		const h = harness();
 		h.lifecycle.request();
-		h.settle();
-		h.success();
+		const outer = h.settle();
+		h.success(); h.complete();
 		if (boundary === "off") { h.disable(); h.enable(); }
+		else if (boundary === "session-change") { h.setSession("second"); h.complete(); h.emit("session_tree"); }
 		else h.emit(boundary);
 		h.complete();
 		h.requests[0]!.onError!(new Error("late error"));
-		assert.deepEqual(h.messages, [], boundary);
+		await outer;
 		assert.deepEqual(h.notices, [], boundary);
+		assert.deepEqual(h.messages, ["continue"], boundary);
 		if (boundary === "session_shutdown") h.emit("session_start");
-		h.lifecycle.request();
-		h.settle();
-		assert.equal(h.requests.length, 2, `${boundary}: a fresh request still works`);
+		if (boundary === "session-change") h.emit("session_tree");
+		assert.equal(h.lifecycle.request(), "rollover_requested", `${boundary}: a fresh request still works`);
 	}
 });
 
-test("callback identity keeps an earlier failure from cancelling a newer request", () => {
-	const h = harness();
-	h.lifecycle.request(); h.settle();
-	h.requests[0]!.onError!(new Error("first failure"));
-	h.lifecycle.request(); h.settle();
-	h.requests[0]!.onError!(new Error("late first failure"));
-	h.success(); h.complete(1);
-	assert.deepEqual(h.messages, ["continue"]);
-	assert.equal(h.notices.length, 1);
+test("queued or competing work is not duplicated and releases an unneeded continuation owner", async () => {
+	const competing = harness();
+	competing.lifecycle.request();
+	competing.setIdle(false);
+	assert.equal(competing.emit("agent_settled"), undefined, "another run owns the first settled event");
+	competing.setIdle(true);
+	const outer = competing.settle();
+	competing.success();
+	competing.setIdle(false);
+	competing.complete();
+	await outer;
+	assert.deepEqual(competing.messages, [], "an active prompt owns continuation");
+
+	const queued = harness();
+	queued.lifecycle.request();
+	const queuedOuter = queued.settle();
+	queued.success();
+	queued.setPending(true); queued.complete();
+	await queuedOuter;
+	assert.deepEqual(queued.messages, [], "queued user work is never duplicated");
 });
 
-test("native compaction satisfies a pending request without duplicating Pi's continuation", () => {
-	for (const willRetry of [false, true]) {
-		const h = harness();
-		h.lifecycle.request();
-		h.success("native", willRetry);
-		h.settle();
-		assert.equal(h.requests.length, 0);
-		assert.deepEqual(h.messages, []);
-	}
-});
-
-test("do not interrupt another active run or duplicate a queued user prompt", () => {
+test("foreign boundaries and native compactions do not manufacture a continuation", async () => {
 	const h = harness();
 	h.lifecycle.request();
-	h.setIdle(false);
-	h.emit("agent_settled");
-	assert.equal(h.requests.length, 0, "another extension already started work");
-	h.settle();
-	h.success();
-	h.setIdle(false);
+	const outer = h.settle();
+	h.emit("session_compact", { compactionEntry: { id: "foreign" }, willRetry: false });
+	h.emit("session_compact", { compactionEntry: { id: "foreign" }, willRetry: false });
+	assert.equal(h.lifecycle.request(), "rollover_already_pending");
 	h.complete();
-	assert.deepEqual(h.messages, [], "the active prompt owns continuation");
-	const queued = harness();
-	queued.lifecycle.request(); queued.settle(); queued.success();
-	queued.setPending(true); queued.complete();
-	assert.deepEqual(queued.messages, [], "do not add a competing prompt");
-});
+	await outer;
+	assert.deepEqual(h.messages, []);
 
-test("foreign or unconfirmed reset events cannot trigger a successful continuation", () => {
-	const h = harness();
-	h.lifecycle.request(); h.settle();
-	// isCurrentReset stands in for the reset-v2/window-id check index.ts runs against the
-	// compaction entry's details. Emitting the foreign boundary twice proves it is never
-	// marked handled, and the request stays in flight rather than completing.
-	h.emit("session_compact", { compactionEntry: { id: "foreign" }, willRetry: false });
-	h.emit("session_compact", { compactionEntry: { id: "foreign" }, willRetry: false });
-	assert.equal(h.lifecycle.request(), "rollover_already_pending", "the ignored event did not complete or clear the attempt");
-	h.complete();
-	assert.deepEqual(h.messages, [], "an unconfirmed boundary never resumes the run");
-	assert.equal(h.lifecycle.request(), "rollover_requested", "the request is released after its own completion");
+	const native = harness();
+	native.lifecycle.request();
+	native.success("native", false);
+	await native.settle();
+	assert.equal(native.requests.length, 0);
+	assert.deepEqual(native.messages, []);
 });
