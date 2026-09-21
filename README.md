@@ -51,6 +51,27 @@ The reminder threshold is Pi's compaction reserve plus a margin, configured unde
 
 `reminder = reserveTokens + reminderMarginTokens`; with the defaults the early warning fires 24,576 tokens above Pi's reset line.
 
+The dreamer model is configured under the same key. `--dreamer <model pattern>` on the `dream` CLI wins; otherwise a non-empty `pi-context.dreamer` string from settings applies; otherwise the automatic model is used. An invalid value (empty or not a string) is ignored with one warning.
+
+```json
+{
+  "pi-context": { "reminderMarginTokens": 24576, "dreamer": "anthropic/claude-sonnet-4-5" }
+}
+```
+
+## The dream lock
+
+The `dream` CLI takes an exclusive `.dream.lock` in the notes home with a single O_CREAT|O_EXCL creation. The lock is Git-style existence locking: an existing lock refuses a new run regardless of its contents, PID, or age, and `--force` bypasses only the scheduling and material gates, never the lock. A lock is released only by the run that acquired it (and repeated cleanup is harmless), so a live dream is never displaced.
+
+If a dream process crashed, its lock remains and later runs refuse to start. There is no automatic recovery and no force-unlock command: after you have confirmed that no dream process is running, remove the stale lock by hand.
+
+```sh
+# only when no dream is running
+rm "${PI_NOTES_HOME:-$HOME/.agents/notes}/.dream.lock"
+```
+
+Removing a lock while a holder is running is outside the supported cooperative protocol and can let two dreams run at once.
+
 ## Documentation
 
 Implementation architecture and the reset lifecycle live in [docs/](docs/).

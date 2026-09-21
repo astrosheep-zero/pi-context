@@ -1,39 +1,82 @@
-import { existsSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 
-export type LockState = { path: string; held: boolean; reason?: string; startedAt: number; priorMtime?: number };
-const HOUR = 60 * 60 * 1000;
+export type LockState = {
+	path: string;
+	held: boolean;
+	reason?: string;
+	startedAt: number;
+	/** mtime of the last-run sidecar before this run took the lock; failLock restores it. */
+	priorStampMtime?: number;
+	/** Random identity written into the lock file; cleanup only removes the lock it wrote. */
+	token?: string;
+};
 
-function live(pid: number): boolean {
-	if (!Number.isInteger(pid) || pid <= 0) return false;
-	try { process.kill(pid, 0); return true; } catch { return false; }
+/**
+ * The scheduler's last-run timestamp lives in a sidecar beside the lock, never in the
+ * lock file itself: acquiring, releasing or cleaning up the lock touches only the PID
+ * marker, so lock lifecycle does not destroy the timestamp the time gate reads.
+ */
+export function lastRunPath(lockPath: string): string {
+	return `${lockPath}.last-run`;
 }
 
+function readText(path: string): string | undefined {
+	try { return readFileSync(path, "utf8"); } catch { return undefined; }
+}
+
+function stampMtime(stampPath: string): number | undefined {
+	try { return statSync(stampPath).mtimeMs; } catch { return undefined; }
+}
+
+/**
+ * Cleanup ownership: only the exact marker this run wrote may be removed. The token is
+ * diagnostic and guards cleanup; it never grants permission to take an existing lock.
+ */
+function ownsLock(lock: LockState): boolean {
+	if (!lock.held || !lock.token) return false;
+	return readText(lock.path)?.trim() === `${process.pid} ${lock.token}`;
+}
+
+/**
+ * Acquire the dream lock with Git-style exclusive existence locking: one O_CREAT|O_EXCL
+ * creation. An existing path refuses acquisition regardless of its contents, PID, or age,
+ * and is never read for permission, replaced, or removed. There is no automatic stale
+ * recovery; a crash-left lock is human cleanup after confirming no dream is running.
+ */
 export function acquireLock(path: string): LockState {
 	const now = Date.now();
-	let priorMtime: number | undefined;
-	if (existsSync(path)) {
-		const stat = statSync(path);
-		priorMtime = stat.mtimeMs;
-		let pid = 0;
-		try { pid = Number.parseInt(readFileSync(path, "utf8").trim(), 10); } catch { /* reclaim */ }
-		if (now - stat.mtimeMs <= HOUR && live(pid)) return { path, held: false, reason: "lock gate: live process holds the lock", startedAt: now };
-		try { unlinkSync(path); } catch { return { path, held: false, reason: "lock gate: lock could not be reclaimed", startedAt: now }; }
+	const priorStampMtime = stampMtime(lastRunPath(path));
+	const token = randomUUID();
+	try {
+		writeFileSync(path, `${process.pid} ${token}`, { flag: "wx" });
+	} catch {
+		return { path, held: false, reason: "lock gate: lock already exists", startedAt: now };
 	}
-	writeFileSync(path, String(process.pid), { flag: "wx" });
-	return { path, held: true, startedAt: now, priorMtime };
+	// Only a held lock advances the scheduler timestamp.
+	try { writeFileSync(lastRunPath(path), new Date(now).toISOString()); } catch { /* advisory */ }
+	return { path, held: true, startedAt: now, priorStampMtime, token };
 }
 
+/** Release only the lock this run acquired. Idempotent: repeated cleanup does nothing. */
 export function releaseLock(lock: LockState): void {
-	// The lock is also the durable last-dream timestamp. Leave the PID marker in place;
-	// the next acquisition reclaims it once the PID is dead or it is older than an hour.
+	if (!lock.held) return;
+	if (ownsLock(lock)) { try { unlinkSync(lock.path); } catch { /* best effort */ } }
+	lock.held = false;
 }
 
-export function restoreMtime(path: string, mtimeMs: number): void {
-	try { utimesSync(path, new Date(), new Date(mtimeMs)); } catch { /* advisory */ }
-}
-
+/**
+ * A failed run must not advance the scheduler: restore the previous timestamp, or remove
+ * the one this run wrote when there was none. Only this run's own marker is removed, and
+ * the state is marked released so a later cleanup attempt is harmless.
+ */
 export function failLock(lock: LockState): void {
 	if (!lock.held) return;
-	if (lock.priorMtime === undefined) { try { unlinkSync(lock.path); } catch { /* best effort */ } }
-	else restoreMtime(lock.path, lock.priorMtime);
+	if (ownsLock(lock)) {
+		const stampPath = lastRunPath(lock.path);
+		if (lock.priorStampMtime === undefined) { try { unlinkSync(stampPath); } catch { /* best effort */ } }
+		else { try { utimesSync(stampPath, new Date(), new Date(lock.priorStampMtime)); } catch { /* best effort */ } }
+		try { unlinkSync(lock.path); } catch { /* best effort */ }
+	}
+	lock.held = false;
 }

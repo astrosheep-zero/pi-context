@@ -6,7 +6,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { contentText } from "../history.js";
 
 export type DreamWrite = { tool: "write" | "edit"; path: string };
-export type DreamResult = { report: string; writes: DreamWrite[] };
+export type DreamResult = { report: string; writes: DreamWrite[]; error?: string };
 export type DreamerSession = Pick<AgentSession, "prompt" | "subscribe" | "dispose">;
 export type DreamerSessionFactory = (options: { cwd: string; modelPattern?: string; tools: string[] }) => Promise<DreamerSession>;
 export const DREAMER_TOOLS = ["read", "grep", "find", "ls", "write", "edit"];
@@ -85,6 +85,11 @@ export const defaultDreamerSessionFactory: DreamerSessionFactory = async ({ cwd,
 	return session;
 };
 
+/**
+ * Run one dream turn. A dreamer failure is returned as `error` together with the partial
+ * writes observed so far, so the caller can record partial state instead of losing it;
+ * only a failure to even start the session throws.
+ */
 export async function runDreamer(playbook: string, cwd: string, options: { modelPattern?: string; sessionFactory?: DreamerSessionFactory } = {}): Promise<DreamResult> {
 	const session = await (options.sessionFactory ?? defaultDreamerSessionFactory)({ cwd, modelPattern: options.modelPattern, tools: DREAMER_TOOLS });
 	let answer = "";
@@ -99,8 +104,12 @@ export async function runDreamer(playbook: string, cwd: string, options: { model
 		answer = contentText(event.message.content);
 	});
 	try {
-		await session.prompt(playbook);
-		if (providerError) throw new Error(`dreamer failed: ${providerError}`);
+		try {
+			await session.prompt(playbook);
+		} catch (error) {
+			return { report: answer, writes, error: error instanceof Error ? error.message : String(error) };
+		}
+		if (providerError) return { report: answer, writes, error: `dreamer failed: ${providerError}` };
 		return { report: answer, writes };
 	} finally {
 		unsubscribe?.();

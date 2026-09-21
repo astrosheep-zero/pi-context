@@ -482,6 +482,18 @@ test("stale lifecycle: writes and metadata-only edits close and revive a note", 
 	assert.equal(missing.error, "note not found");
 });
 
+test("notes tools stay usable while a dream holds the lock", async () => {
+	// A live dream lock is not a general lock: the awake notes tools never consult it.
+	writeFileSync(join(process.env.PI_NOTES_HOME!, ".dream.lock"), String(process.pid));
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const ctx = context(sm);
+	const written = resultJson<{ address?: string }>(await call(captured, "notes_write", { path: "during-dream.md", content: "awake" }, ctx));
+	assert.equal(written.address, "during-dream.md");
+	const edited = resultJson<{ applied?: number }>(await call(captured, "notes_edit", { path: "during-dream.md", edits: [{ oldText: "awake", newText: "still awake" }] }, ctx));
+	assert.equal(edited.applied, 1, "notes_edit still applies while a dream lock is held");
+});
+
 test("the boot notes index excludes stale notes while list, read, and search still see them", async () => {
 	const sm = manager();
 	const captured = makeExtension(sm);

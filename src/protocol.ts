@@ -21,6 +21,8 @@ export const CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG = "</context_window_protocol>";
 export const GUIDANCE_OPEN_TAG = "<context_window_guidance>";
 export const GUIDANCE_CLOSE_TAG = "</context_window_guidance>";
 export const PI_CONTEXT_SETTINGS_KEY = "pi-context";
+/** Nested under "pi-context": the default dreamer model pattern, overridden by CLI --dreamer. */
+export const PI_CONTEXT_DREAMER_KEY = "dreamer";
 export const DEFAULT_RESERVE_TOKENS = 16_384;
 export const DEFAULT_REMINDER_MARGIN_TOKENS = 24_576;
 /**
