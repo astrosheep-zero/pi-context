@@ -16,10 +16,10 @@ function identityBlock(agentName: string, firstWindowId: string, currentWindowId
 
 function relativeTime(timestamp: number, now: number): string {
 	const seconds = Math.trunc((timestamp - now) / 1000);
-	const [unit, size] = ([["day", 86400], ["hour", 3600], ["minute", 60], ["second", 1]] as const)
-		.find(([unit, size]) => Math.abs(seconds) >= size || unit === "second")!;
-	return new Intl.RelativeTimeFormat("en", { numeric: "always" })
-		.format(Math.trunc(seconds / size) || -0, unit);
+	const [unit, size] = ([["d", 86400], ["h", 3600], ["m", 60], ["s", 1]] as const)
+		.find(([unit, size]) => Math.abs(seconds) >= size || unit === "s")!;
+	const amount = `${Math.abs(Math.trunc(seconds / size))}${unit}`;
+	return seconds > 0 ? `in ${amount}` : `${amount} ago`;
 }
 
 /**

@@ -1227,7 +1227,7 @@ test("the boot block is persisted at the root and baked into every reset summary
 	assert.ok(rootText.includes("decisions.md"));
 	const decisionsMeta = listNotes(ctx, { scope: "session" }).find((row) => row.path === "decisions.md")?.meta;
 	assert.ok(decisionsMeta);
-	assert.match(rootText, /updated \d+ seconds? ago\)/, "boot note metadata carries a relative update time");
+	assert.match(rootText, /updated \d+s ago\)/, "boot note metadata carries a relative update time");
 	assert.ok(rootText.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG));
 
 	// Reset: the boot block IS the compaction summary; no separate boot/hint is persisted.
@@ -1242,7 +1242,7 @@ test("the boot block is persisted at the root and baked into every reset summary
 	assert.equal(before.compaction.summary.startsWith(internal.CONTEXT_WINDOW_OPEN_TAG), false, "a reset line precedes the identity block");
 	assert.match(before.compaction.summary, new RegExp(`Current context window id: ${details.windowId}`));
 	assert.ok(before.compaction.summary.includes("decisions.md"));
-	assert.match(before.compaction.summary, /updated \d+ seconds? ago\)/, "reset summary carries a relative update time");
+	assert.match(before.compaction.summary, /updated \d+s ago\)/, "reset summary carries a relative update time");
 	assert.equal(listNotes(ctx, { scope: "session" }).find((row) => row.path === "decisions.md")?.meta.updated_at, decisionsMeta.updated_at, "rendering relative time preserves the stored timestamp");
 	assert.ok(before.compaction.summary.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG));
 	const windows = historyFromSession(ctx);
