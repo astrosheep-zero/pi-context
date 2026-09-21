@@ -116,8 +116,7 @@ export function readCharacterWindow<T>(text: string, offsetChars: number | undef
 
 /**
  * One-line bracketed header preceding a raw character-window payload: the identity, the
- * delivered char range, and either the resume cursor or `end`. `tail` appends extra
- * metadata (notes add their timestamps) inside the same brackets.
+ * delivered char range, and either the resume cursor or `end`.
  */
 export function characterWindowHeader(identity: string, window: CharacterWindow, tail = ""): string {
 	// The range end is offset + delivered count, never `total_chars`: a read resolved past the
@@ -125,6 +124,13 @@ export function characterWindowHeader(identity: string, window: CharacterWindow,
 	const end = window.offset_chars + Array.from(window.content).length;
 	const resume = window.next_offset_chars === null ? "end" : `continue at offset_chars=${window.next_offset_chars}`;
 	return `[${identity} · chars ${window.offset_chars}-${end} of ${window.total_chars} · ${resume}${tail}]`;
+}
+
+/** Fixed metadata block preceding a raw notes_read character window. */
+export function noteReadWindowBlock(address: string, window: CharacterWindow): string {
+	const end = window.offset_chars + Array.from(window.content).length;
+	const next = window.next_offset_chars === null ? "null" : String(window.next_offset_chars);
+	return `--- READ WINDOW ---\naddress: ${address}\nchars: [${window.offset_chars},${end}) of ${window.total_chars}\nnext_offset_chars: ${next}\n`;
 }
 
 /**
@@ -183,9 +189,8 @@ export function output(value: unknown, details?: unknown, terminate = false) {
 }
 
 /**
- * Encode a prose payload as raw text: a one-line bracketed metadata header, then the payload
- * verbatim. The model reads the note or history item itself instead of a JSON envelope;
- * `details` carries the slim metadata object and never duplicates the payload.
+ * Encode a prose payload as raw text: metadata prefix, a blank line, then the payload
+ * verbatim. `details` carries the slim metadata object and never duplicates the payload.
  */
 export function outputRaw(header: string, content: string, details: unknown, terminate = false) {
 	return { content: [{ type: "text" as const, text: `${header}\n${content}` }], details, terminate };

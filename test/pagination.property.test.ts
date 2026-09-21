@@ -357,20 +357,20 @@ function assertTruncatedIdentity(expectedPath: string, actual: string, label: st
 }
 
 /**
- * Map a notes page entry's path back to the expected store path. A non-truncated path must
- * equal it; a flagged path must be a visible middle-truncation of a legacy path that the
- * write cap could never have produced. The expected path is returned either way so the
+ * Map a notes page entry's address back to the expected address. A non-truncated address must
+ * equal it; a flagged address must be a visible middle-truncation of a legacy address that the
+ * write cap could never have produced. The expected address is returned either way so the
  * pagination invariants compare like with like.
  */
 function notePathIdentity(expectedPaths: readonly string[], cursor: number, label: string, page: PageJson, key: "files"): string[] {
-	return (page[key] as Array<{ path: string; path_truncated?: boolean }>).map((file, index) => {
+	return (page[key] as Array<{ address: string; address_truncated?: boolean }>).map((file, index) => {
 		const expectedPath = expectedPaths[cursor + index];
 		assert.ok(expectedPath !== undefined, `${label} cursor=${cursor}: page returned more entries than the store holds`);
-		if (file.path_truncated) {
-			assert.ok(Buffer.byteLength(expectedPath, "utf8") > MAX_NOTE_PATH_BYTES, `${label} cursor=${cursor}: only a legacy path beyond the write cap may be truncated, got ${file.path}`);
-			assertTruncatedIdentity(expectedPath, file.path, `${label} cursor=${cursor}`);
+		if (file.address_truncated) {
+			assert.ok(Buffer.byteLength(expectedPath, "utf8") > MAX_NOTE_PATH_BYTES, `${label} cursor=${cursor}: only a legacy address beyond the write cap may be truncated, got ${file.address}`);
+			assertTruncatedIdentity(expectedPath, file.address, `${label} cursor=${cursor}`);
 		} else {
-			assert.equal(file.path, expectedPath, `${label} cursor=${cursor}: path is returned intact when its entry fits`);
+			assert.equal(file.address, expectedPath, `${label} cursor=${cursor}: address is returned intact when its entry fits`);
 		}
 		return expectedPath;
 	});
@@ -467,10 +467,10 @@ test("notes_list enumerates every note file across seeded mixes", async () => {
 		const captured = makeExtension(session);
 		const ctx = context(session);
 		await materializeNotes(plan, captured, ctx);
-		const all = new Map(listNotes(ctx, {}).map((row) => [row.path, row]));
+		const all = new Map(listNotes(ctx, {}).map((row) => [row.address, row]));
 		for (const variant of plan.list) {
 			const params = { pattern: variant.pattern, max_results: variant.maxResults };
-			const expected = expectedListRows(ctx, variant).map((row) => row.path);
+			const expected = expectedListRows(ctx, variant).map((row) => row.address);
 			const label = `notes_list seed=${seed} ${variant.label} pattern=${JSON.stringify(variant.pattern)} max_results=${variant.maxResults}`;
 			const pages = await walkPages({
 				captured, ctx, tool: "notes_list", params,
@@ -481,14 +481,13 @@ test("notes_list enumerates every note file across seeded mixes", async () => {
 			// Each listed file must describe the store's file exactly, not a stale or invented one.
 			let flat = 0;
 			for (const page of pages) {
-				for (const file of page.files as Array<{ path: string; path_truncated?: boolean; size_bytes: number; stale: boolean; created_at: string; updated_at: string }>) {
-					const storePath = expected[flat++]!;
-					const row = all.get(storePath);
-					assert.ok(row, `${label}: listed ${storePath} is not in the note store`);
-					assert.equal(file.size_bytes, row.sizeBytes, `${label}: size_bytes for ${storePath}`);
-					assert.equal(file.stale, row.meta.stale, `${label}: stale for ${storePath}`);
-					assert.equal(Date.parse(file.created_at), row.meta.created_at, `${label}: created_at for ${storePath}`);
-					assert.equal(Date.parse(file.updated_at), row.meta.updated_at, `${label}: updated_at for ${storePath}`);
+				for (const file of page.files as Array<{ address: string; address_truncated?: boolean; stale: boolean; updated_at: string }>) {
+					const address = expected[flat++]!;
+					const row = all.get(address);
+					assert.ok(row, `${label}: listed ${address} is not in the note store`);
+					assert.deepEqual(Object.keys(file).sort(), file.address_truncated ? ["address", "address_truncated", "stale", "updated_at"] : ["address", "stale", "updated_at"]);
+					assert.equal(file.stale, row.meta.stale, `${label}: stale for ${address}`);
+					assert.equal(Date.parse(file.updated_at), row.meta.updated_at, `${label}: updated_at for ${address}`);
 				}
 			}
 		}
@@ -505,7 +504,9 @@ test("notes_search enumerates every matching file across seeded mixes", async ()
 		const bodies = new Map(plan.writes.map((write) => [write.path, write.body]));
 		for (const variant of plan.search) {
 			const params = { query: variant.query, pattern: variant.pattern, max_files: variant.maxFiles, max_matches_per_file: variant.maxMatchesPerFile };
-			const expected = expectedSearchRows(ctx, variant).map((row) => row.path);
+			const expectedRows = expectedSearchRows(ctx, variant);
+			const expected = expectedRows.map((row) => row.address);
+			const expectedByAddress = new Map(expectedRows.map((row) => [row.address, row]));
 			const label = `notes_search seed=${seed} ${variant.label} query=${JSON.stringify(variant.query)} pattern=${JSON.stringify(variant.pattern)} max_files=${variant.maxFiles} max_matches_per_file=${variant.maxMatchesPerFile}`;
 			const pages = await walkPages({
 				captured, ctx, tool: "notes_search", params,
@@ -516,8 +517,9 @@ test("notes_search enumerates every matching file across seeded mixes", async ()
 			// Matches are a prefix of the file's real matching lines (never invented, never reordered).
 			let flat = 0;
 			for (const page of pages) {
-				for (const file of page.files as Array<{ path: string; path_truncated?: boolean; matches: Array<{ line: number; text: string; offset_chars: number }> }>) {
-					const storePath = expected[flat++]!;
+				for (const file of page.files as Array<{ address: string; address_truncated?: boolean; matches: Array<{ line: number; text: string; offset_chars: number }> }>) {
+					const address = expected[flat++]!;
+					const storePath = address;
 					const body = bodies.get(storePath);
 					assert.ok(body !== undefined, `${label}: reported ${storePath} was never written`);
 					const lines = body.split("\n");
@@ -525,19 +527,12 @@ test("notes_search enumerates every matching file across seeded mixes", async ()
 					assert.ok(file.matches.length >= 1, `${label}: ${storePath} reports no matches but appears in the result`);
 					assert.ok(file.matches.length <= Math.min(matchingLines.length, variant.maxMatchesPerFile), `${label}: ${storePath} reports ${file.matches.length} matches beyond its cap`);
 					assert.deepEqual(file.matches.map((match) => match.line), matchingLines.slice(0, file.matches.length), `${label}: ${storePath} match lines are not the first matching lines`);
-					const lineBase: number[] = [];
-					let lineOffset = 0;
-					for (const text of lines) {
-						lineBase.push(lineOffset);
-						lineOffset += Array.from(text).length + 1;
-					}
-					for (const match of file.matches) {
+					const expectedMatches = expectedByAddress.get(address)?.matches;
+					assert.ok(expectedMatches, `${label}: ${address} is absent from the store search`);
+					for (const [index, match] of file.matches.entries()) {
 						const line = lines[match.line - 1]!;
 						assert.ok(line.includes(variant.query), `${label}: ${storePath}:${match.line} does not contain the query`);
-						// The documented address: body-absolute code points up to the line, plus the query's
-						// earliest occurrence inside it.
-						const earliest = line.indexOf(variant.query);
-						assert.equal(match.offset_chars, (lineBase[match.line - 1] as number) + Array.from(line.slice(0, earliest)).length, `${label}: ${storePath}:${match.line} offset_chars does not address the query`);
+						assert.equal(match.offset_chars, expectedMatches[index]?.offsetChars, `${label}: ${storePath}:${match.line} offset_chars does not address the serialized read stream`);
 					}
 				}
 			}

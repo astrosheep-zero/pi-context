@@ -34,7 +34,7 @@ pi -e npm:@astrosheep/pi-context
 | `notes.list` | `notes_list` |
 | `notes.search` | `notes_search` |
 
-The tool descriptions the model sees are the behavioral documentation: note results use `address` as the sole home identity; search is case-sensitive literal substring; reads are character windows whose cursors reconstruct the original exactly; anything a response does not deliver is named by an explicit field.
+The tool descriptions the model sees are the behavioral documentation: note results use `address` as the sole home identity; search is case-sensitive literal substring; notes reads are character windows prefixed with a `READ WINDOW` block whose cursors reconstruct the serialized file exactly; anything a response does not deliver is named by an explicit field.
 
 - **Runtime toggle** — `/pi-context off` restores Pi's default compaction (including `keepRecentTokens`); `/pi-context on` re-enables; bare `/pi-context` reports the current state.
 

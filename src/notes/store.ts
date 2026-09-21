@@ -220,19 +220,25 @@ export function editNote(ctx: ExtensionContext, vpath: string, scope: Scope, edi
 	return { meta, applied: operations.length, resolved_scope: scope, diff };
 }
 
+/** Normalize a parsed note exactly as a read does, including its access metadata mutation. */
+function accessedMeta(meta: NoteMeta, scope: Scope, now: number): NoteMeta {
+	const next = { ...meta, scope };
+	next.last_accessed = now;
+	next.access_count = (typeof next.access_count === "number" ? next.access_count : 0) + 1;
+	return next;
+}
+
 /** Read a note and, as a side effect, bump last_accessed/access_count in the file. */
-export function readNote(ctx: ExtensionContext, vpath: string, scope: Scope): { meta: NoteMeta; body: string; resolvedScope: Scope } | undefined {
+export function readNote(ctx: ExtensionContext, vpath: string, scope: Scope): { meta: NoteMeta; body: string; text: string; resolvedScope: Scope } | undefined {
 	assertVirtualPath(vpath);
 	const path = physicalPath(scope, vpath, ctx);
 	if (!existsSync(path)) return undefined;
 	const now = Date.now();
-	const { meta, body } = parseNote(readFileSync(path, "utf8"), now);
-	meta.scope = scope;
-	// Only the two access keys move; updated_at and every other key keep their bytes.
-	meta.last_accessed = now;
-	meta.access_count = (typeof meta.access_count === "number" ? meta.access_count : 0) + 1;
-	atomicWrite(path, serializeNote(meta, body));
-	return { meta, body, resolvedScope: scope };
+	const parsed = parseNote(readFileSync(path, "utf8"), now);
+	const meta = accessedMeta(parsed.meta, scope, now);
+	const text = serializeNote(meta, parsed.body);
+	atomicWrite(path, text);
+	return { meta, body: parsed.body, text, resolvedScope: scope };
 }
 
 /** Merged rows across homes, most recently updated first (address breaks ties). */
@@ -264,11 +270,12 @@ export function searchNotes(ctx: ExtensionContext, queries: string[], opts: { sc
 			if (matcher && !matcher.test(address)) continue;
 			const { meta, body } = parseNote(readFileSync(`${root}/${path}`, "utf8"));
 			meta.scope = scope;
+			const serializedBodyOffset = Array.from(serializeNote(accessedMeta(meta, scope, Date.now()), "")).length;
 			let baseChars = 0;
 			const matches: NoteMatch[] = [];
 			for (const [index, line] of body.split("\n").entries()) {
 				if (queries.some((query) => line.includes(query))) {
-					matches.push({ line: index + 1, text: line, offsetChars: baseChars + earliestMatchOffsetChars(line, queries) });
+					matches.push({ line: index + 1, text: line, offsetChars: serializedBodyOffset + baseChars + earliestMatchOffsetChars(line, queries) });
 				}
 				baseChars += Array.from(line).length + 1;
 			}

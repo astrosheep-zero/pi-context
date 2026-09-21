@@ -1,21 +1,16 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { localIso } from "./model.js";
-import { characterWindowHeader, DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS, middleTruncate, output, outputRaw, page, prefixFit, readCharacterWindow, withinTextBudget } from "../tool-output.js";
+import { DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS, middleTruncate, noteReadWindowBlock, output, outputRaw, page, prefixFit, readCharacterWindow, withinTextBudget } from "../tool-output.js";
 import { cursor, nullableString, positiveInteger, searchQueries, searchQuery } from "../tool-schema.js";
 import { assertAddress } from "./address.js";
-import { serializeNote, stripLeadingFrontmatter, type NoteMeta, type Origin } from "./frontmatter.js";
+import { type Origin } from "./frontmatter.js";
 import { NoteError, editNote, listNotes, readNote, searchNotes, writeNote } from "./store.js";
 
 const ORIGIN = Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("self"), Type.Literal("external")], {
 	description: "Where the note's content came from. user: written or dictated by the human. self: written by you, the agent (default). external: anything else — third-party text, tool output, fetched material.",
 }));
 const ADDRESS_DESCRIPTION = "Address forms are bare `<vpath>` for this session, `@project/<vpath>` for this project's home, and `@personal/<vpath>` for the human's cross-project home. `@` means leaving home. Any other `@` prefix, or `@` inside a vpath, is a hard error: legal prefixes are `@project/` and `@personal/`; bare names are the session home. There is no cross-home fallback. Paths reject `..`, absolute paths, and backslashes.";
-
-function wireMeta(meta: NoteMeta): Record<string, unknown> {
-	const { scope: _scope, ...withoutScope } = meta;
-	return { ...withoutScope, created_at: localIso(meta.created_at), updated_at: localIso(meta.updated_at), last_accessed: localIso(meta.last_accessed) };
-}
 
 function failure(error: unknown) {
 	if (error instanceof NoteError) {
@@ -36,8 +31,8 @@ export function registerNotesTools(pi: ExtensionAPI) {
 			const content = params.content;
 			try {
 				const destination = assertAddress(params.address);
-				const { meta } = writeNote(ctx, destination.path, content, { scope: destination.scope, origin: (params.origin ?? "self") as Origin, stale: params.stale });
-				return output({ address: params.address, size_bytes: Buffer.byteLength(stripLeadingFrontmatter(content), "utf8"), meta: wireMeta(meta) });
+				writeNote(ctx, destination.path, content, { scope: destination.scope, origin: (params.origin ?? "self") as Origin, stale: params.stale });
+				return output({ address: params.address, written: true });
 			} catch (error) { return failure(error); }
 		},
 	}));
@@ -49,15 +44,15 @@ export function registerNotesTools(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _update, ctx) {
 			try {
 				const destination = assertAddress(params.address);
-				const { meta, applied, diff } = editNote(ctx, destination.path, destination.scope, params.edits, { origin: params.origin as Origin | undefined, stale: params.stale, replaceAll: params.replace_all });
-				return output({ address: params.address, applied, diff, meta: wireMeta(meta) });
+				const { applied, diff } = editNote(ctx, destination.path, destination.scope, params.edits, { origin: params.origin as Origin | undefined, stale: params.stale, replaceAll: params.replace_all });
+				return output({ address: params.address, applied, diff });
 			} catch (error) { return failure(error); }
 		},
 	}));
 
 	pi.registerTool(defineTool({
 		name: "notes_read", label: "Notes read",
-		description: `Read a character window of a note file, frontmatter included. ${ADDRESS_DESCRIPTION} offset_chars is the code-point offset to start from (default 0) — a negative value counts back from the end — and limit_chars caps the window (default ${DEFAULT_READ_WINDOW_CHARS}, max ${MAX_READ_WINDOW_CHARS}). Each response delivers the longest fitting prefix of that window: concatenate pages in order to reconstruct the note. The response is the raw frontmatter + body behind a one-line [bracketed] header naming the address, the resolved offset, the delivered char range, and the resume cursor.`,
+		description: `Read a character window of a note file, frontmatter included. ${ADDRESS_DESCRIPTION} offset_chars is the code-point offset to start from (default 0) — a negative value counts back from the end — and limit_chars caps the window (default ${DEFAULT_READ_WINDOW_CHARS}, max ${MAX_READ_WINDOW_CHARS}). Each response delivers the longest fitting prefix of that window: concatenate only the content after its READ WINDOW block to reconstruct the note.`,
 		parameters: Type.Object({ address: Type.String(), offset_chars: Type.Optional(Type.Integer({ description: "Code-point offset to start from (default 0). A negative value counts back from the end; the response echoes the resolved absolute offset. Pass the previous next_offset_chars back unchanged to continue." })), limit_chars: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_READ_WINDOW_CHARS, description: `Largest requested window in code points (default ${DEFAULT_READ_WINDOW_CHARS}). A window too large for the wire budget is cut short; next_offset_chars names where the next read resumes.` })) }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			let note: ReturnType<typeof readNote>;
@@ -66,27 +61,24 @@ export function registerNotesTools(pi: ExtensionAPI) {
 				note = readNote(ctx, destination.path, destination.scope);
 			} catch (error) { return failure(error); }
 			if (!note) return output({ error: "note not found", address: params.address });
-			const text = serializeNote(note.meta, note.body);
+			const text = note.text;
 			const totalChars = Array.from(text).length;
 			if (typeof params.offset_chars === "number" && params.offset_chars > totalChars) return output({ error: `offset_chars ${params.offset_chars} is past the end: the note has ${totalChars} chars; the largest legal offset is ${totalChars} (an empty end-read)`, address: params.address, offset_chars: params.offset_chars, total_chars: totalChars });
-			const created_at = localIso(note.meta.created_at);
-			const updated_at = localIso(note.meta.updated_at);
-			const limit_chars = Math.min(params.limit_chars ?? DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS);
 			return readCharacterWindow(text, params.offset_chars, params.limit_chars, (window) => {
 				const { content, ...rest } = window;
-				return outputRaw(characterWindowHeader(params.address, window, ` · created ${created_at} · updated ${updated_at}`), content, { address: params.address, ...rest, limit_chars, created_at, updated_at });
+				return outputRaw(noteReadWindowBlock(params.address, window), content, { address: params.address, ...rest });
 			}, (result) => withinTextBudget(result.content[0].text));
 		},
 	}));
 
 	pi.registerTool(defineTool({
 		name: "notes_list", label: "Notes list",
-		description: `List note files as rows carrying address, origin, status, stale, size_bytes, created_at, and updated_at, most recently updated first. ${ADDRESS_DESCRIPTION} All three homes are merged. A glob pattern (* within a path segment, ** across segments) filters full address strings: *.md is session-only, @project/** is project-only, and ** covers every home.`,
+		description: `List note files as rows carrying address, updated_at, and stale, most recently updated first. ${ADDRESS_DESCRIPTION} All three homes are merged. A glob pattern (* within a path segment, ** across segments) filters full address strings: *.md is session-only, @project/** is project-only, and ** covers every home.`,
 		parameters: Type.Object({ pattern: nullableString(), cursor: cursor(), max_results: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			let rows: ReturnType<typeof listNotes>;
 			try { rows = listNotes(ctx, { pattern: params.pattern ?? undefined }); } catch (error) { return failure(error); }
-			const files: Array<{ address: string; origin: Origin; status: string; stale: boolean; size_bytes: number; created_at: string; updated_at: string; address_truncated?: boolean }> = rows.map((row) => ({ address: row.address, origin: row.meta.origin, status: row.meta.status, stale: row.meta.stale, size_bytes: row.sizeBytes, created_at: localIso(row.meta.created_at), updated_at: localIso(row.meta.updated_at) }));
+			const files: Array<{ address: string; stale: boolean; updated_at: string; address_truncated?: boolean }> = rows.map((row) => ({ address: row.address, stale: row.meta.stale, updated_at: localIso(row.meta.updated_at) }));
 			return output(page(files, params.cursor ?? 0, "files", params.max_results, (file, fits) => {
 				if (fits(file)) return file;
 				const address = middleTruncate(file.address, (candidate) => fits({ ...file, address: candidate, address_truncated: true }));
@@ -97,16 +89,16 @@ export function registerNotesTools(pi: ExtensionAPI) {
 
 	pi.registerTool(defineTool({
 		name: "notes_search", label: "Notes search",
-		description: `Case-sensitive literal substring search over note bodies; query is one string or several (OR), each matched line appears once. ${ADDRESS_DESCRIPTION} All three homes are merged and every entry carries its full address. Patterns glob over full address strings. Each file entry carries matches_total, its full match count before capping. Each match carries line, text, offset_chars (the body-absolute code-point offset of the earliest match).`,
+		description: `Case-sensitive literal substring search over note bodies; query is one string or several (OR), each matched line appears once. ${ADDRESS_DESCRIPTION} All three homes are merged and every entry carries its full address. Patterns glob over full address strings. Each file entry carries matches_total, its full match count before capping. Each match carries line, text, offset_chars (a code-point offset into the serialized note returned by notes_read, at the earliest query match), and truncated.`,
 		parameters: Type.Object({ query: searchQuery(), pattern: nullableString(), cursor: cursor(), max_matches_per_file: positiveInteger(), max_files: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const queries = searchQueries(params.query);
 			let rows: ReturnType<typeof searchNotes>;
 			try { rows = searchNotes(ctx, queries, { pattern: params.pattern ?? undefined }); } catch (error) { return failure(error); }
 			const maxPerFile = params.max_matches_per_file ?? Number.POSITIVE_INFINITY;
-			const result: Array<{ address: string; created_at: string; updated_at: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number; offset_chars: number }>; address_truncated?: boolean }> = rows.map((row) => {
-				const matches = row.matches.map((match) => ({ line: match.line, text: match.text, truncated: false, total_chars: Array.from(match.text).length, offset_chars: match.offsetChars }));
-				return { address: row.address, created_at: localIso(row.meta.created_at), updated_at: localIso(row.meta.updated_at), matches_total: matches.length, matches: matches.slice(0, maxPerFile) };
+			const result: Array<{ address: string; updated_at: string; stale: boolean; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }>; address_truncated?: boolean }> = rows.map((row) => {
+				const matches = row.matches.map((match) => ({ line: match.line, text: match.text, truncated: false, offset_chars: match.offsetChars }));
+				return { address: row.address, updated_at: localIso(row.meta.updated_at), stale: row.meta.stale, matches_total: matches.length, matches: matches.slice(0, maxPerFile) };
 			});
 			const fitFile = (file: (typeof result)[number], fits: (candidate: (typeof result)[number]) => boolean) => {
 				if (fits(file)) return file;

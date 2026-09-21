@@ -84,21 +84,27 @@ function appendText(sessionManager: SessionManager, text: string): string {
 
 type ReadResult = { header: string; content: string; offset_chars: number; total_chars: number; next_offset_chars: number | null };
 type SearchHit = { item_id: string; truncated: boolean; total_chars: number; truncated_content: string; match_offset_chars: number };
-type Match = { line: number; text: string; truncated: boolean; total_chars: number; offset_chars: number };
+type Match = { line: number; text: string; truncated: boolean; offset_chars: number };
 
-/**
- * Decode a raw read (notes_read / history_read): a one-line bracketed header, then
- * the payload verbatim (which may itself contain newlines), so split on the first newline only.
- */
+/** Decode a raw notes or history read without including its metadata in the payload. */
 function resultRead(result: AgentToolResult<unknown>): ReadResult {
 	const text = result.content[0];
 	assert.ok(text && text.type === "text", "read result carries text");
+	const note = /^(--- READ WINDOW ---\naddress: [^\n]*\nchars: \[(\d+),(\d+)\) of (\d+)\nnext_offset_chars: (null|\d+)\n)\n/.exec(text.text);
+	if (note) {
+		const header = note[1]!;
+		const content = text.text.slice(note[0].length);
+		const offset_chars = Number(note[2]);
+		const end = Number(note[3]);
+		const total_chars = Number(note[4]);
+		const next_offset_chars = note[5] === "null" ? null : Number(note[5]);
+		assert.equal([...content].length, end - offset_chars, "READ WINDOW range matches the delivered payload");
+		return { header, content, offset_chars, total_chars, next_offset_chars };
+	}
 	const newline = text.text.indexOf("\n");
 	assert.ok(newline !== -1, "raw read carries a header line and a payload");
 	const header = text.text.slice(0, newline);
 	const content = text.text.slice(newline + 1);
-	assert.match(header, /^\[/, "the header is bracketed");
-	assert.match(header, /\]$/, "the header closes its bracket");
 	const match = header.match(/ · chars (\d+)-(\d+) of (\d+) · (end|continue at offset_chars=(\d+))/);
 	assert.ok(match, `read header names the char range and resume cursor: ${header}`);
 	const offset_chars = Number(match[1]);
@@ -229,13 +235,13 @@ test("coherence: following the returned cursors reconstructs the original text e
 	);
 	const matchedFile = searched.files[0];
 	const matched = matchedFile?.matches[0];
-	report.push(`notes_search: matches_total=${String(matchedFile?.matches_total)} returned=${String(matchedFile?.matches.length)} first match delivered ${codePoints(matched?.text ?? "")} of ${String(matched?.total_chars)} chars, truncated=${String(matched?.truncated)}`);
+	report.push(`notes_search: matches_total=${String(matchedFile?.matches_total)} returned=${String(matchedFile?.matches.length)} first match delivered ${codePoints(matched?.text ?? "")} chars, truncated=${String(matched?.truncated)}`);
 	if (!matched) failures.push("notes_search dropped the over-budget matched line entirely");
 	else {
 		if (matched.truncated !== true) failures.push("notes_search does not flag the over-budget matched line as truncated");
-		if (matched.total_chars !== codePoints(hugeCjkLine)) failures.push(`notes_search match total_chars=${matched.total_chars}, expected ${codePoints(hugeCjkLine)}`);
 		if (!hugeCjkLine.startsWith(matched.text)) failures.push("notes_search delivered a non-prefix of the matched line");
-		if (codePoints(matched.text) >= matched.total_chars) failures.push("notes_search claims the over-budget line fits in one response");
+		const atMatch = resultRead(await call(captured, "notes_read", { path: "huge-cjk.md", offset_chars: matched.offset_chars }, ctx));
+		if (!atMatch.content.startsWith("历")) failures.push("notes_search offset does not start notes_read at the matched substring");
 		const walked = stripLeadingFrontmatter(await walkNote(captured, ctx, "huge-cjk.md"));
 		if (walked !== `${hugeCjkLine}\ntail line`) failures.push(`notes_search match line is not reconstructible from the note read: missing ${codePoints(`${hugeCjkLine}\ntail line`) - codePoints(walked)} chars`);
 	}
@@ -313,28 +319,30 @@ test("coherence: following the returned cursors reconstructs the original text e
 		if (hugeEntry.matches[0]?.truncated !== true) failures.push("huge-many: the kept match is not flagged as a prefix");
 	}
 
-	// --- notes_search addresses: a match's offset_chars is the body-absolute code-point
-	// position of the earliest query occurrence in its line, so search → read composes exactly like
-	// history's match_offset_chars two-stage.
+	// --- notes_search addresses: each match offset directly starts notes_read at the earliest
+	// query occurrence in its line, including multi-query OR.
 	const addressLine1 = "pad ".repeat(50);
 	const addressLine3 = `${"历".repeat(20)}needle-address here`;
 	const addressLine4 = "zeta 历 needle-address";
 	await call(captured, "notes_write", { path: "address.md", content: `${addressLine1}\nsecond\n${addressLine3}\n${addressLine4}` }, ctx);
-	const expectedAddress = codePoints(addressLine1) + 1 + codePoints("second") + 1 + 20;
 	const addressHit = resultJson<{ files: Array<{ path: string; matches: Match[] }> }>(
 		await call(captured, "notes_search", { query: "needle-address", pattern: "address.md" }, ctx),
 	).files[0]?.matches.find((match) => match.line === 3);
-	report.push(`notes_search address: line=${String(addressHit?.line)} offset_chars=${String(addressHit?.offset_chars)} expected=${expectedAddress}`);
-	const addressOffset = addressHit?.offset_chars;
-	if (typeof addressOffset !== "number") failures.push("notes_search carries no offset_chars");
-	else if (addressOffset !== expectedAddress) failures.push(`notes_search offset_chars=${addressOffset}, expected ${expectedAddress} (body-absolute, at the query)`);
-	// Multi-query OR: a line's address is the earliest occurrence of any query inside that line.
-	const line4Base = expectedAddress - 20 + codePoints(addressLine3) + 1;
+	report.push(`notes_search address: line=${String(addressHit?.line)} offset_chars=${String(addressHit?.offset_chars)}`);
+	if (addressHit === undefined) failures.push("notes_search carries no line-three match");
+	else {
+		const atMatch = resultRead(await call(captured, "notes_read", { path: "address.md", offset_chars: addressHit.offset_chars }, ctx));
+		if (!atMatch.content.startsWith("needle-address")) failures.push(`notes_search offset_chars=${addressHit.offset_chars} does not start at the line-three query`);
+	}
 	const orLine4 = resultJson<{ files: Array<{ matches: Match[] }> }>(
 		await call(captured, "notes_search", { query: ["needle-address", "zeta"], pattern: "address.md" }, ctx),
 	).files[0]?.matches.find((match) => match.line === 4);
-	report.push(`notes_search OR address: offset_chars=${String(orLine4?.offset_chars)} expected=${line4Base}`);
-	if (orLine4?.offset_chars !== line4Base) failures.push(`notes_search OR offset_chars=${String(orLine4?.offset_chars)}, expected ${line4Base} (earliest of any query)`);
+	report.push(`notes_search OR address: offset_chars=${String(orLine4?.offset_chars)}`);
+	if (orLine4 === undefined) failures.push("notes_search carries no line-four OR match");
+	else {
+		const atMatch = resultRead(await call(captured, "notes_read", { path: "address.md", offset_chars: orLine4.offset_chars }, ctx));
+		if (!atMatch.content.startsWith("zeta")) failures.push(`notes_search OR offset_chars=${orLine4.offset_chars} does not start at the earliest line-four query`);
+	}
 
 	// --- Negative offsets on both stores: a tail read reaches the end in one call, the response
 	// echoes the resolved absolute offset, N >= total_chars reads from the start, and the cursor

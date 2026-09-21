@@ -31,8 +31,8 @@ function setUpdatedAt(scope: Scope, path: string, ctx: ReturnType<typeof context
 }
 
 type Meta = Record<string, unknown>;
-type Listed = { files: Array<{ path: string; address: string; origin: string; status: string; stale: boolean; size_bytes: number; created_at: string; updated_at: string }> };
-type Searched = { files: Array<{ path: string; address: string; created_at: string; updated_at: string; matches_total: number; matches: Array<{ line: number; text: string; offset_chars: number; truncated: boolean; total_chars: number }> }> };
+type Listed = { files: Array<{ address: string; stale: boolean; updated_at: string }> };
+type Searched = { files: Array<{ address: string; stale: boolean; updated_at: string; matches_total: number; matches: Array<{ line: number; text: string; offset_chars: number; truncated: boolean }> }> };
 
 function assertNoPublicScope(value: unknown, label: string): void {
 	if (Array.isArray(value)) {
@@ -71,12 +71,10 @@ test("write lands a real markdown file with harness frontmatter and a pure body"
 	const ctx = context(session);
 	const sessionId = session.getSessionId();
 
-	const result = resultJson<{ address: string; size_bytes: number; meta: Meta }>(
+	const result = resultJson<{ address: string; written: true }>(
 		await call(captured, "notes_write", { path: "a/b.md", content: "hello" }, ctx),
 	);
-	assert.equal(result.address, "a/b.md");
-	assert.equal(result.size_bytes, 5);
-	assertNoPublicScope(result, "notes_write");
+	assert.deepEqual(Object.keys(result).sort(), ["address", "written"]);
 	const file = physicalPath("session", "a/b.md", ctx);
 	assert.equal(file, join(root, "pi", "session", sessionId, "a", "b.md"));
 	assert.ok(existsSync(file), "the note is a real file under the session scope dir");
@@ -90,7 +88,8 @@ test("write lands a real markdown file with harness frontmatter and a pure body"
 	for (const key of ["created_at", "updated_at", "last_accessed"]) {
 		assert.match(raw, new RegExp(`^${key}: \\d{4}-\\d{2}-\\d{2}T`, "m"), `frontmatter renders ${key} via localIso`);
 	}
-	assert.equal(typeof result.meta.created_at, "string", "wire meta renders timestamps as ISO strings");
+	assert.equal(result.address, "a/b.md");
+	assert.equal(result.written, true);
 
 	// A leading YAML block in user content is stripped from the body.
 	await call(captured, "notes_write", { path: "stripped.md", content: "---\nscope: personal\nnonsense: true\n---\nreal body" }, ctx);
@@ -112,12 +111,12 @@ test("overwrite preserves created_at and unknown keys, bumps updated_at, and cle
 	const raw = readFileSync(file, "utf8");
 	writeFileSync(file, raw.replace(/\n---\n\n/, "\nsleep_shift_key: \"keep-me\"\nrecurrence_count: 4\n---\n\n"));
 
-	const rewrite = resultJson<{ meta: Meta }>(await call(captured, "notes_write", { path: "keep.md", content: "second" }, ctx));
+	const rewrite = resultJson<{ address: string; written: true }>(await call(captured, "notes_write", { path: "keep.md", content: "second" }, ctx));
 	const after = readFileSync(file, "utf8");
 	assert.equal(after.includes("sleep_shift_key: keep-me"), true, "an unknown key survives a rewrite");
 	assert.equal(after.includes("recurrence_count: 4"), true, "a known sleep-shift key survives a rewrite");
 	assert.match(after, /\n---\n\nsecond$/, "the body is replaced");
-	assert.equal((rewrite.meta.origin as string), "self");
+	assert.deepEqual(Object.keys(rewrite).sort(), ["address", "written"]);
 	const listed = listNotes(ctx, { scope: "session" })[0]!;
 	assert.equal(listed.meta.created_at, created, "created_at is preserved across an overwrite");
 	assert.ok(listed.meta.updated_at >= created, "updated_at is bumped");
@@ -203,15 +202,16 @@ test("metadata-only edit updates setters without touching the body", async () =>
 	const ctx = context(session);
 	await call(captured, "notes_write", { path: "journal.md", content: "log line" }, ctx);
 
-	const bare = resultJson<{ address: string; applied: number; meta: Meta }>(await call(captured, "notes_edit", { path: "journal.md", stale: true }, ctx));
+	const bare = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { path: "journal.md", stale: true }, ctx));
 	assert.equal(bare.applied, 0, "a metadata-only update applies no edits");
 	assert.equal(bare.address, "journal.md");
-	assertNoPublicScope(bare, "notes_edit metadata-only");
-	assert.equal(bare.meta.stale, true, "stale is set without a body edit");
+	assert.deepEqual(Object.keys(bare).sort(), ["address", "applied", "diff"]);
+	assert.equal(listNotes(ctx, { scope: "session" })[0]!.meta.stale, true, "stale is set without a body edit");
 	assert.equal(resultRead(await call(captured, "notes_read", { path: "journal.md" }, ctx)).content.endsWith("log line"), true, "the body is untouched");
 
-	const revived = resultJson<{ meta: Meta }>(await call(captured, "notes_edit", { path: "journal.md", stale: false }, ctx));
-	assert.equal(revived.meta.stale, false, "a later metadata-only update revives the note");
+	const revived = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { path: "journal.md", stale: false }, ctx));
+	assert.deepEqual(Object.keys(revived).sort(), ["address", "applied", "diff"]);
+	assert.equal(listNotes(ctx, { scope: "session" })[0]!.meta.stale, false, "a later metadata-only update revives the note");
 });
 
 test("notes_edit returns a pi-edit-style diff of what changed", async () => {
@@ -337,6 +337,7 @@ test("all notes tool results use address as the only home identity", async () =>
 		const rawRead = await call(captured, "notes_read", { address: note.address }, ctx);
 		const read = resultRead(rawRead);
 		assert.equal(read.details.address, note.address, `notes_read details returns ${note.address}`);
+		assert.equal(read.header.startsWith("--- READ WINDOW ---\naddress: "), true, `notes_read starts a READ WINDOW block for ${note.address}`);
 		assert.equal(read.header.includes("scope"), false, `notes_read header omits scope for ${note.address}`);
 		assert.equal(read.header.includes("resolved_scope"), false, `notes_read header omits resolved_scope for ${note.address}`);
 		assertNoPublicScope(read.details, `notes_read ${note.address}`);
@@ -364,13 +365,11 @@ test("list and search merge scopes and carry addresses; the path jail rejects es
 	const listed = resultJson<Listed>(await call(captured, "notes_list", {}, ctx));
 	assert.deepEqual([...listed.files].map((file) => file.address).sort(), ["@personal/three.md", "@project/two.md", "one.md"], "every merged row carries its full address");
 	for (const row of listed.files) {
-		assert.equal(typeof row.size_bytes, "number");
-		assert.equal(row.origin, "self");
-		assert.equal(row.status, "active");
+		assert.deepEqual(Object.keys(row).sort(), ["address", "stale", "updated_at"]);
 		assert.equal(row.stale, false);
 	}
 	const scoped = resultJson<Listed>(await call(captured, "notes_list", { scope: "personal" }, ctx));
-	assert.deepEqual(scoped.files.map((file) => file.path), ["three.md"], "an address-pattern filter narrows the set");
+	assert.deepEqual(scoped.files.map((file) => file.address), ["@personal/three.md"], "an address-pattern filter narrows the set");
 
 	const searched = resultJson<Searched>(await call(captured, "notes_search", { query: "needle" }, ctx));
 	assert.equal(searched.files.length, 3, "literal search finds matches in every scope");
@@ -379,9 +378,9 @@ test("list and search merge scopes and carry addresses; the path jail rejects es
 	assert.equal(searched.files.every((file) => file.matches_total === 1), true);
 	const hit = searched.files[0]!.matches[0]!;
 	assert.equal(hit.line, 1);
-	assert.equal(hit.offset_chars, 0);
+	assert.ok(hit.offset_chars > 0, "the offset includes serialized frontmatter");
 	assert.equal(hit.truncated, false);
-	assert.equal(hit.total_chars, searched.files[0]!.path === "three.md" ? "needle three".length : hit.text.length, "total_chars names the real line length");
+	assert.deepEqual(Object.keys(hit).sort(), ["line", "offset_chars", "text", "truncated"]);
 
 	const escaped = ["../evil", "/abs", "a\\b"];
 	for (const tool of ["notes_write", "notes_edit", "notes_read"] as const) {
@@ -416,6 +415,38 @@ test("the boot index reads the physical store across scopes and excludes stale n
 	}
 });
 
+test("search offsets start reads at Unicode matches across homes without mutating search results", async () => {
+	freshRoot();
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const notes = [
+		{ address: "session.md", scope: "session" as const, body: "first line\n前置 🐉 needle-session\nend", needle: "needle-session" },
+		{ address: "@project/crossing.md", scope: "project" as const, body: "prefix\nneedle-project 😀", needle: "needle-project" },
+		{ address: "@personal/legacy.md", scope: "personal" as const, body: "legacy 😺 needle-personal", needle: "needle-personal" },
+	];
+	for (const note of notes) await call(captured, "notes_write", { address: note.address, content: note.body }, ctx);
+	const crossing = physicalPath("project", "crossing.md", ctx);
+	writeFileSync(crossing, readFileSync(crossing, "utf8").replace(/^access_count: 0$/m, "access_count: 9"));
+	const legacy = physicalPath("personal", "legacy.md", ctx);
+	writeFileSync(legacy, notes[2]!.body);
+	const before = new Map(notes.map((note) => [note.address, readFileSync(physicalPath(note.scope, note.address.replace(/^@(?:project|personal)\//, ""), ctx), "utf8")]));
+	const searched = resultJson<Searched>(await call(captured, "notes_search", { query: notes.map((note) => note.needle), pattern: "**" }, ctx));
+	for (const note of notes) {
+		assert.equal(readFileSync(physicalPath(note.scope, note.address.replace(/^@(?:project|personal)\//, ""), ctx), "utf8"), before.get(note.address), `search leaves ${note.address} byte-identical`);
+		const file = searched.files.find((candidate) => candidate.address === note.address);
+		assert.ok(file, `search returns ${note.address}`);
+		assert.deepEqual(Object.keys(file).sort(), ["address", "matches", "matches_total", "stale", "updated_at"]);
+		const hit = file.matches[0]!;
+		assert.deepEqual(Object.keys(hit).sort(), ["line", "offset_chars", "text", "truncated"]);
+		const read = resultRead(await call(captured, "notes_read", { address: note.address, offset_chars: hit.offset_chars }, ctx));
+		assert.ok(read.content.startsWith(note.needle), `search offset starts notes_read at ${note.needle}`);
+		assert.deepEqual(Object.keys(read.details).sort(), ["address", "next_offset_chars", "offset_chars", "total_chars"]);
+	}
+	assert.match(readFileSync(crossing, "utf8"), /^access_count: 10$/m, "the predicted read crosses access_count from 9 to 10");
+	assert.match(resultRead(await call(captured, "notes_read", { address: "@personal/legacy.md" }, ctx)).content, /^---\n/, "a missing-frontmatter note is normalized only by read");
+});
+
 test("notes_read surfaces frontmatter and search reports body lines", async () => {
 	freshRoot();
 	const session = manager();
@@ -428,7 +459,7 @@ test("notes_read surfaces frontmatter and search reports body lines", async () =
 	const searched = resultJson<Searched>(await call(captured, "notes_search", { query: "needle" }, ctx));
 	const match = searched.files[0]!.matches[0]!;
 	assert.equal(match.line, 2, "search reports the body line number");
-	assert.equal(match.offset_chars, Array.from("line one\n").length, "offset_chars addresses the query within the body");
+	assert.equal(match.offset_chars, read.content.indexOf("needle"), "offset_chars addresses the query in the serialized read stream");
 });
 
 test("mutations are atomic, leave no temp files, and a read bumps only the access keys", async () => {
@@ -576,7 +607,7 @@ test("full addresses drive outputs and patterns; on-disk scope is read then drop
 	assert.deepEqual(resultJson<{ files: Array<{ address: string }> }>(await call(captured, "notes_list", { pattern: "*.md" }, ctx)).files.map((file) => file.address), ["root.md"]);
 	assert.deepEqual(resultJson<{ files: Array<{ address: string }> }>(await call(captured, "notes_search", { query: "needle", pattern: "@project/**" }, ctx)).files.map((file) => file.address), ["@project/project.md"]);
 	const read = resultRead(await call(captured, "notes_read", { address: "@personal/personal.md" }, ctx));
-	assert.match(read.header, /^\[@personal\/personal\.md /, "the raw read header echoes the full address");
+	assert.equal(read.header, "--- READ WINDOW ---\naddress: @personal/personal.md\nchars: [0," + read.total_chars + ") of " + read.total_chars + "\nnext_offset_chars: null\n", "the raw READ WINDOW block echoes the full address");
 	const legacy = physicalPath("project", "legacy.md", ctx);
 	writeFileSync(legacy, "---\nscope: personal\norigin: self\nstatus: active\nstale: false\ncreated_at: 2026-01-01T00:00:00.000+00:00\nupdated_at: 2026-01-01T00:00:00.000+00:00\nlast_accessed: 2026-01-01T00:00:00.000+00:00\naccess_count: 0\n---\n\nlegacy");
 	const legacyRead = resultRead(await call(captured, "notes_read", { address: "@project/legacy.md" }, ctx));

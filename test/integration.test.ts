@@ -215,7 +215,7 @@ export function assertWithinBudget(result: AgentToolResult<unknown>, message: st
 	assert.ok(bytes <= TOOL_OUTPUT_MAX_BYTES, `${message}: ${bytes} bytes over the ${TOOL_OUTPUT_MAX_BYTES}-byte budget`);
 }
 
-/** Decoded raw read response: the bracketed metadata header plus the verbatim payload. */
+/** Decoded raw read response: either a notes READ WINDOW block or history's bracketed header. */
 export type ReadWindow = {
 	header: string;
 	content: string;
@@ -225,19 +225,25 @@ export type ReadWindow = {
 	details: Record<string, unknown>;
 };
 
-/**
- * Decode a raw read (notes_read / history_read): a one-line bracketed header, then
- * the payload verbatim (which may itself contain newlines), so split on the first newline only.
- */
+/** Decode a raw notes or history read without including its metadata in the payload. */
 export function resultRead(result: AgentToolResult<unknown>): ReadWindow {
 	const text = result.content[0];
 	assert.ok(text && text.type === "text", "read result carries text");
+	const note = /^(--- READ WINDOW ---\naddress: [^\n]*\nchars: \[(\d+),(\d+)\) of (\d+)\nnext_offset_chars: (null|\d+)\n)\n/.exec(text.text);
+	if (note) {
+		const header = note[1]!;
+		const content = text.text.slice(note[0].length);
+		const offset_chars = Number(note[2]);
+		const end = Number(note[3]);
+		const total_chars = Number(note[4]);
+		const next_offset_chars = note[5] === "null" ? null : Number(note[5]);
+		assert.equal(Array.from(content).length, end - offset_chars, "READ WINDOW range matches the delivered payload");
+		return { header, content, offset_chars, total_chars, next_offset_chars, details: (result.details ?? {}) as Record<string, unknown> };
+	}
 	const newline = text.text.indexOf("\n");
 	assert.ok(newline !== -1, "raw read carries a header line and a payload");
 	const header = text.text.slice(0, newline);
 	const content = text.text.slice(newline + 1);
-	assert.match(header, /^\[/, "the header is bracketed");
-	assert.match(header, /\]$/, "the header closes its bracket");
 	const match = header.match(/ · chars (\d+)-(\d+) of (\d+) · (end|continue at offset_chars=(\d+))/);
 	assert.ok(match, `read header names the char range and resume cursor: ${header}`);
 	const offset_chars = Number(match[1]);
@@ -461,14 +467,14 @@ test("stale lifecycle: writes and metadata-only edits close and revive a note", 
 	await call(captured, "notes_write", { path: "journal.md", content: "log line" }, ctx);
 
 	// metadata-only: content unchanged, flag set, applied 0
-	const markOnly = resultJson<{ applied: number; meta: { stale: boolean } }>(await call(captured, "notes_edit", { path: "journal.md", stale: true }, ctx));
+	const markOnly = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { path: "journal.md", stale: true }, ctx));
 	assert.equal(markOnly.applied, 0);
-	assert.equal(markOnly.meta.stale, true);
+	assert.equal(listNotes(ctx, { scope: "session" })[0]?.meta.stale, true);
 	assert.equal(resultRead(await call(captured, "notes_read", { path: "journal.md" }, ctx)).content.endsWith("log line"), true, "mark-only leaves content unchanged");
 
 	// explicit revive
-	const revived = resultJson<{ meta: { stale: boolean } }>(await call(captured, "notes_edit", { path: "journal.md", stale: false }, ctx));
-	assert.equal(revived.meta.stale, false, "stale:false revives");
+	const revived = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { path: "journal.md", stale: false }, ctx));
+	assert.equal(listNotes(ctx, { scope: "session" })[0]?.meta.stale, false, "stale:false revives");
 
 	// write+stale closure then plain write revival
 	await call(captured, "notes_write", { path: "journal.md", content: "final", stale: true }, ctx);
@@ -817,8 +823,8 @@ test("an over-budget note is delivered as a prefix and resumed by next_offset_ch
 	assert.ok(first.content.length > 0, "the page is not empty");
 	assert.equal(first.content.includes("…"), false, "the payload is a plain prefix with no marker");
 	assert.ok(first.content.startsWith("---\n"), "the frontmatter is delivered first");
-	assert.equal(first.header, `[huge.md · chars 0-${first.next_offset_chars} of ${first.total_chars} · continue at offset_chars=${first.next_offset_chars} · created ${String(first.details.created_at)} · updated ${String(first.details.updated_at)}]`, "the raw header names the address, delivered range, resume cursor, and timestamps");
-	assert.deepEqual(Object.keys(first.details).sort(), ["address", "created_at", "limit_chars", "next_offset_chars", "offset_chars", "total_chars", "updated_at"], "notes_read details carries exactly the slim window metadata plus address");
+	assert.equal(first.header, `--- READ WINDOW ---\naddress: huge.md\nchars: [0,${first.next_offset_chars}) of ${first.total_chars}\nnext_offset_chars: ${first.next_offset_chars}\n`, "the raw block names the address, half-open range, and resume cursor");
+	assert.deepEqual(Object.keys(first.details).sort(), ["address", "next_offset_chars", "offset_chars", "total_chars"], "notes_read details carries exactly the raw window address and cursor metadata");
 	assert.equal("content" in first.details, false, "details never duplicates the payload");
 	assert.equal(first.offset_chars, 0, "the default window starts at the resolved offset 0");
 	// Following the cursor reconstructs frontmatter + body by plain concatenation.
@@ -850,11 +856,11 @@ test("an over-budget note search match is a named prefix with an honest line add
 	const hugeLine = `${'p'.repeat(500)}needle ${"y".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}`;
 	await call(captured, "notes_write", { path: "a.md", content: "needle small" }, ctx);
 	await call(captured, "notes_write", { path: "search.md", content: hugeLine }, ctx);
-	const pages: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number; offset_chars: number }> }> = [];
+	const pages: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }> }> = [];
 	let cursor = 0;
 	let next: number | null = 0;
 	while (next !== null) {
-		const found = resultJson<{ files: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number; offset_chars: number }> }>; next_cursor: number | null }>(
+		const found = resultJson<{ files: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }> }>; next_cursor: number | null }>(
 			await call(captured, "notes_search", { query: "needle", cursor }, ctx),
 		);
 		assert.ok(Buffer.byteLength(JSON.stringify(found), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "match result stays within budget");
@@ -868,11 +874,11 @@ test("an over-budget note search match is a named prefix with an honest line add
 	assert.equal(oversized.matches.length, 1);
 	const match = oversized.matches[0]!;
 	assert.equal(match.truncated, true, "the oversized match line is flagged as truncated");
-	assert.equal(match.total_chars, Array.from(hugeLine).length, "total_chars names the full line length");
 	assert.ok(hugeLine.startsWith(match.text), "the match text is a plain prefix of the line");
 	assert.equal(match.text.includes("…"), false, "no marker is appended to the match text");
-	assert.equal(match.offset_chars, 500, "the match carries the body-absolute offset of the query");
 	assert.equal(match.line, 1, "the informational line number survives");
+	const atMatch = resultRead(await call(captured, "notes_read", { path: "search.md", offset_chars: match.offset_chars }, ctx));
+	assert.ok(atMatch.content.startsWith("needle"), "the search offset starts a read at the matched substring");
 	// The body is reconstructible by following notes_read's cursor from the start of the file.
 	const parts: string[] = [];
 	let offset: number | null = 0;
@@ -933,6 +939,7 @@ test("an empty body is a frontmatter-only file that terminates cleanly", async (
 	assert.ok(empty.content.endsWith("---\n\n"), "an empty body leaves frontmatter and the blank separator only");
 	assert.ok(empty.total_chars > 0, "the file is not zero-length once the harness frontmatter is written");
 	assert.equal(empty.next_offset_chars, null, "a note that fits terminates instead of self-feeding");
+	assert.equal(empty.header, `--- READ WINDOW ---\naddress: empty.md\nchars: [0,${empty.total_chars}) of ${empty.total_chars}\nnext_offset_chars: null\n`, "an exhausted window writes literal null");
 	// An offset beyond the file is an addressing error that names the real length,
 	// not a silent empty page.
 	const beyond = resultJson<{ error?: string; offset_chars?: number; total_chars?: number }>(
@@ -1988,6 +1995,7 @@ test("argument footguns die loudly and tool-run metadata surfaces (A1/A2/A3/B4/B
 	const noteEnd = resultRead(await call(captured, "notes_read", { path: "a.md", offset_chars: noteTotal }, ctx));
 	assert.equal(noteEnd.content, "", "notes: offset == total is the legal empty end-read");
 	assert.equal(noteEnd.next_offset_chars, null, "notes: the end-read terminates");
+	assert.equal(noteEnd.header, `--- READ WINDOW ---\naddress: a.md\nchars: [${noteTotal},${noteTotal}) of ${noteTotal}\nnext_offset_chars: null\n`, "notes: empty end-read retains the exact READ WINDOW block");
 	const itemPastEnd = resultJson<{ error?: string; offset_chars?: number; total_chars?: number; window_id?: string; item_id?: string }>(
 		await call(captured, "history_read", { window_id: windowId, item_id: target.item_id, offset_chars: 12 }, ctx),
 	);
