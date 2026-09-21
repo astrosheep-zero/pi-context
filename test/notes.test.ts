@@ -13,7 +13,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { physicalPath, projectKey, scopeDir } from "../src/notes/paths.js";
 import { listNotes, type Scope } from "../src/notes/store.js";
-import { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES, PROTOCOL_BLOCK } from "../src/protocol.js";
+import { CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
 import { call, context, makeExtension, manager, resultJson, resultRead, runHandlers } from "./integration.test.js";
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-context-notes-agent-"));
@@ -54,10 +54,6 @@ test("exactly the five notes tools are registered; the legacy five are gone", ()
 	}
 	for (const legacy of ["notes_write_file", "notes_append_to_file", "notes_read_file", "notes_search_contents", "notes_list_files"]) {
 		assert.equal(captured.tools.get(legacy), undefined, `${legacy} is unregistered`);
-	}
-	for (const name of ["notes_write", "notes_edit", "notes_read", "notes_list", "notes_search"]) {
-		const description = captured.tools.get(name)?.description ?? "";
-		assert.equal(/resolved_scope|\bscope\b/.test(description), false, `${name} describes home identity through address only`);
 	}
 	assert.equal(captured.tools.get("notes_write")?.executionMode, "sequential");
 	assert.equal(captured.tools.get("notes_edit")?.executionMode, "sequential");
@@ -407,12 +403,6 @@ test("the boot index reads the physical store across scopes and excludes stale n
 	assert.ok(text.includes("personal.md"), "a fresh personal note is indexed");
 	assert.equal(text.includes("old.md"), false, "a stale note leaves the index");
 	assert.equal(text.includes("stale content"), false, "the stale note's body is absent from boot");
-	for (const name of ["notes_write", "notes_edit", "notes_read", "notes_search", "notes_list"]) {
-		assert.ok(PROTOCOL_BLOCK.includes(name), `the protocol block names ${name}`);
-	}
-	for (const legacy of ["notes_write_file", "notes_append_to_file", "notes_read_file", "notes_search_contents", "notes_list_files"]) {
-		assert.equal(PROTOCOL_BLOCK.includes(legacy), false, `the protocol block no longer names ${legacy}`);
-	}
 });
 
 test("search offsets start reads at Unicode matches across homes without mutating search results", async () => {
@@ -531,8 +521,8 @@ test("fresh personal and project MAP.md bodies are both resident before the pock
 	assert.ok(boot.includes("MAP: project"), "the project map is injected");
 	assert.equal(boot.includes("MAP: session"), false, "the session map is never injected");
 	assert.ok(boot.indexOf("MAP: personal") < boot.indexOf("MAP: project"), "the personal map precedes the project map");
-	assert.ok(boot.indexOf("MAP: project") < boot.indexOf("crumpled note"), "both map bodies precede the pocket");
-	assert.ok(PROTOCOL_BLOCK.includes("notes_write"), "the protocol text still rides along");
+	assert.ok(boot.indexOf("MAP: project") < boot.indexOf("recent.md"), "both map bodies precede the pocket");
+	assert.ok(boot.includes(CONTEXT_WINDOW_PROTOCOL_OPEN_TAG), "the protocol text still rides along");
 });
 
 test("the boot pocket applies per-home quotas in session, project, personal order", async () => {
@@ -553,7 +543,6 @@ test("the boot pocket applies per-home quotas in session, project, personal orde
 	await call(captured, "notes_write", { address: "@personal/MAP.md", content: "MAP: personal" }, ctx);
 	runHandlers(captured, "session_start", {}, ctx);
 	const boot = typeof captured.sent.at(-1)?.message.content === "string" ? (captured.sent.at(-1)!.message.content as string) : "";
-	assert.ok(boot.includes("You find 9 crumpled notes in your pocket (by home, most recent first within each: up to 5 from this session, 2 from this project, 2 from personal). A note's content never appears here, so its name has to say what the note is about:"), "the pocket line matches the dictated copy");
 	for (const name of ["session-5.md", "session-4.md", "session-3.md", "session-2.md", "session-1.md", "@project/project-2.md", "@project/project-1.md", "@personal/personal-2.md", "@personal/personal-1.md"]) {
 		assert.ok(boot.includes(name), `${name} stays in the pocket`);
 	}

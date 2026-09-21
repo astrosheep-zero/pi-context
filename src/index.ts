@@ -50,9 +50,9 @@ export default function piContext(pi: ExtensionAPI) {
 	registerNotesTools(pi);
 
 	pi.registerTool(defineTool({
-		name: "new_context",
-		label: "New context",
-		description: "Clear your mind and start a new context window. Your session, notes, and history survive.",
+		name: "wipe_memory",
+		label: "Wipe memory",
+		description: "Wipe your in-context memory and start a fresh context window. Your session, notes, and history survive.",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute() {
 			if (!enabled) return output({ error: "pi-context is off (/pi-context on to enable)" });

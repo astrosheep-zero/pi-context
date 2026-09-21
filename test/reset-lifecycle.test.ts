@@ -85,7 +85,7 @@ test("a reset requested by a continuation completes before its predecessor relea
 	h.success("first"); h.complete();
 	assert.deepEqual(h.messages, ["continue"]);
 
-	// This models new_context being called during the first continuation run.
+	// This models wipe_memory being called during the first continuation run.
 	assert.equal(h.lifecycle.request(), "rollover_requested");
 	const second = h.settle();
 	assert.equal(h.requests.length, 2, "the continuation's settled handler starts its requested reset");

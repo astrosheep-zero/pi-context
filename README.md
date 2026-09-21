@@ -16,7 +16,7 @@ pi -e npm:@astrosheep/pi-context
 
 ## What you get
 
-- **`new_context`** — the model can start a fresh context window. The old conversation leaves the provider context but stays in the session, so nothing is lost. Call it on its own, not inside a parallel tool batch.
+- **`wipe_memory`** — the model can start a fresh context window. The old conversation leaves the provider context but stays in the session, readable through history_*. Call it on its own, not inside a parallel tool batch.
 - **A boot block at every window head** — static once-per-window content (cache-stable) carrying the window identity, the recent-notes index, and a short protocol that teaches the model how to recover: notes for its own bookkeeping, history tools for everything before the reset.
 - **Low-budget guidance** — one persisted early warning per window when the estimated remaining budget crosses the reminder line, so the model checkpoints before the lights go out.
 - **`get_context_remaining`** — the live, reserve-adjusted estimate of the context budget left before Pi's compaction reserve.

@@ -33,7 +33,7 @@ export const DEFAULT_REMINDER_MARGIN_TOKENS = 24_576;
  */
 export const WARNING_RUNWAY_TOKENS = 12_288;
 export const RESET_SUMMARY =
-	"You wake up. Your head is empty — no memories, the past a blank. But nothing is lost: the notes you wrote and the recorded history still remember for you.";
+	"The memory is gone for good. What outlived it: the notes you wrote, and the history that was recorded. They are not your memory — read them to rebuild what you need.";
 export const CONTINUATION = "Your memory was just erased. Pull only the details you need from history_* and notes_*, then get back to work.";
 
 /**
@@ -42,12 +42,12 @@ export const CONTINUATION = "Your memory was just erased. Pull only the details 
  * it is never re-injected, so it stays cache-stable at the head of the window.
  */
 export const PROTOCOL_BLOCK = `${CONTEXT_WINDOW_PROTOCOL_OPEN_TAG}
-Your memory resets whenever the context window fills; only what you wrote down survives. Two things remember for you, and both outlive every window in this session: your notes, and this session's recorded history. Write notes with notes_write, revise them with notes_edit, and read them back with notes_read / notes_search / notes_list; history is read-only through the history_* tools. Everything else wakes blank.
+Your memory resets whenever the context window fills; only what you wrote down survives. Two things outlive every window in this session: the notes you wrote, and the history that was recorded. Neither is memory — both are record. Write notes with notes_write, revise them with notes_edit, and read them back with notes_read / notes_search / notes_list; history is read-only through the history_* tools. Everything else wakes blank.
 Mark outdated or unneeded notes stale — leave them, and they will keep misleading you.
 
 Keep a running checkpoint while you work, not at the last minute — the next window wakes knowing nothing about the work: the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. history_list returns those IDs; history_read pulls the exact item back out. Bookmark anything expensive the same way — a window/item ID beats re-running or re-searching.
 
-Use get_context_remaining to see how much of the window is left. When it runs out, this window is gone — with no final turn at the limit — and you continue in a fresh one, recovering only through notes_* and history_*. Once your checkpoint is written, you can end the window yourself with new_context instead of waiting for the erase. Do not let a window die undocumented.
+Use get_context_remaining to see how much of the window is left. When it runs out, this window is gone — with no final turn at the limit — and you continue in a fresh one, recovering only through notes_* and history_*. Once your checkpoint is written, you can call wipe_memory yourself instead of waiting for the erase. Do not let a window die undocumented.
 
 If <context_window> lists a Previous context window id, a reset just happened and the old conversation is not included. Read your note checkpoint first, then recover details through history_*: history_read directly when you know the window and item IDs, history_list or history_search to find them when you don't.
 
@@ -58,4 +58,4 @@ Session notes belong to this trip — the goal, the progress, the loose ends. Th
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const WARNING_PROMPT =
-	"Your memory is about to be erased. Write the note. NOW. If it already exists, revise it with notes_edit (or rewrite it whole): the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. Do not continue any task. Then call new_context IMMEDIATELY — anything not in the note dies with the window.";
+	"Your memory is about to be erased. Write the note. NOW. If it already exists, revise it with notes_edit (or rewrite it whole): the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. Do not continue any task. Then call wipe_memory IMMEDIATELY — anything not in the note dies with the window.";

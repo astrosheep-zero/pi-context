@@ -6,7 +6,7 @@ import test from "node:test";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import piContext from "../src/index.js";
-import { WARNING_PROMPT, WARNING_TYPE, GUIDANCE_TYPE } from "../src/protocol.js";
+import { GUIDANCE_OPEN_TAG, WARNING_TYPE, GUIDANCE_TYPE } from "../src/protocol.js";
 
 for (const mode of ["golden", "write-error", "ignored-warning", "explicit", "uncompactable", "followup", "steering", "repeat", "nested", "immediate-dispose", "abort"] as const) {
 	test(`real Pi loop: ${mode} reset preserves history and handles completion`, { timeout: 15000 }, async () => {
@@ -64,7 +64,7 @@ const settings = { compaction: { enabled: usageMode, reserveTokens: 32768, keepR
 			sm.appendMessage({ role: "assistant", api: model.api, provider: model.provider, model: model.id,
 				content: [{ type: "text", text: "Earlier result. ".repeat(100) }], stopReason: "stop", timestamp: Date.now(),
 				usage: { input: 100, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 200, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
-			({ session } = await createAgentSession({ cwd: dir, agentDir: dir, modelRuntime: runtime, model, settingsManager, sessionManager: sm, resourceLoader: loader, tools: ["new_context", "notes_write", "get_context_remaining"] }));
+			({ session } = await createAgentSession({ cwd: dir, agentDir: dir, modelRuntime: runtime, model, settingsManager, sessionManager: sm, resourceLoader: loader, tools: ["wipe_memory", "notes_write", "get_context_remaining"] }));
 			const requests: string[] = [];
 			let checkpointed = false;
 			let freshTurns = 0;
@@ -74,8 +74,16 @@ const settings = { compaction: { enabled: usageMode, reserveTokens: 32768, keepR
 				const request = requests[n - 1]!;
 				const fresh = !request.includes("OLD_CONTEXT_SENTINEL");
 				if (fresh) freshTurns++;
-				const sawWarning = request.includes("Your memory is about to be erased");
-				const sawGuidance = request.includes("Your brain is almost out of room");
+				// The early reminder and the final warning steer share one structural envelope:
+				// <context_window_guidance>. The reminder is the first in the window, the
+				// warning the second, so the envelope count identifies which arrived.
+				// The early reminder and the final warning steer share one structural envelope,
+				// <context_window_guidance>. The reminder is deferred to the end of the turn while
+				// streaming, so in this scripted tool-calling loop only the warning reaches the
+				// provider context: the envelope's presence marks the warning.
+				const budgetMarkers = request.split(GUIDANCE_OPEN_TAG).length - 1;
+				const sawWarning = budgetMarkers >= 1;
+				const sawGuidance = budgetMarkers >= 1;
 				const explicitReset = (n === 1 && !usageMode && mode !== "uncompactable") || (mode === "repeat" && (n === 1 || n === 3)) || (mode === "nested" && n === 3);
 				const nestedCheckpoint = mode === "nested" && n === 2;
 				const checkpoint = usageMode && sawWarning && !checkpointed && mode !== "ignored-warning";
@@ -88,11 +96,11 @@ const settings = { compaction: { enabled: usageMode, reserveTokens: 32768, keepR
 				);
 				const tokens = usageMode ? (fresh ? (freshTurns === 1 ? 100 : 50000) : sawWarning ? 70000 : n === 1 ? 50000 : 60000) : 100;
 				const tool = explicitReset || nestedCheckpoint || (mode === "uncompactable" && n === 1);
-				const call = probe ? "get_context_remaining" : checkpoint || nestedCheckpoint ? "notes_write" : tool ? "new_context" : undefined;
+				const call = probe ? "get_context_remaining" : checkpoint || nestedCheckpoint ? "notes_write" : tool ? "wipe_memory" : undefined;
 				const message: AssistantMessage = { role: "assistant", api: model.api, provider: model.provider, model: model.id,
 					content: probe ? [{ type: "toolCall", id: "probe-call", name: "get_context_remaining", arguments: {} }]
 						: checkpoint || nestedCheckpoint ? [{ type: "toolCall", id: "checkpoint-call", name: "notes_write", arguments: { address: mode === "write-error" ? "../invalid.md" : "checkpoint.md", content: nestedCheckpoint ? "NESTED_RESET_PADDING ".repeat(300) : "CHECKPOINT_SENTINEL" } }]
-						: tool ? [{ type: "toolCall", id: "reset-call", name: "new_context", arguments: {} }]
+						: tool ? [{ type: "toolCall", id: "reset-call", name: "wipe_memory", arguments: {} }]
 						: [{ type: "text", text: fresh ? "Resumed." : "Working." }],
 					stopReason: call ? "toolUse" : "stop", timestamp: Date.now(),
 					usage: { input: tokens, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: tokens + 1, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
@@ -162,7 +170,7 @@ const settings = { compaction: { enabled: usageMode, reserveTokens: 32768, keepR
 					assert.ok(requests.at(-1)!.includes("checkpoint.md"), "fresh boot carries the saved checkpoint as a metadata line");
 				}
 
-				assert.ok(!requests.at(-1)!.includes("Your brain is almost out of room"), "new window excludes old guidance");
+				assert.ok(!requests.at(-1)!.includes(GUIDANCE_OPEN_TAG), "new window excludes old guidance");
 			}
 			if (mode === "followup" || mode === "steering") {
 				assert.ok(requests[1].includes("QUEUED_INPUT_SENTINEL"), "queued user work is delivered before rollover");

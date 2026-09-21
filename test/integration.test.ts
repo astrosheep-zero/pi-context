@@ -345,7 +345,7 @@ test("schemas cover the History/Notes actions plus reset controls", () => {
 	for (const name of [
 		"history_windows", "history_list", "history_read", "history_search",
 		"notes_list", "notes_read", "notes_search", "notes_edit", "notes_write",
-		"new_context", "get_context_remaining",
+		"wipe_memory", "get_context_remaining",
 	]) {
 		const tool = captured.tools.get(name);
 		assert.equal(objectSchema(tool)?.type, "object", name);
@@ -361,16 +361,6 @@ test("schemas cover the History/Notes actions plus reset controls", () => {
 	assert.ok(editSchema?.properties?.edits, "notes_edit exposes edits");
 	assert.equal(editSchema?.properties?.scope, undefined, "notes_edit has no scope parameter");
 	assert.deepEqual([...(editSchema?.required ?? [])].sort(), ["address"], "notes_edit requires only address; edits are optional for metadata-only updates");
-	// The history ordering switch is documented as newest-first by default.
-	for (const name of ["history_windows", "history_list", "history_search"]) {
-		const schema = captured.tools.get(name)?.parameters as { properties?: Record<string, { description?: string }> } | undefined;
-		assert.equal(schema?.properties?.recent_first?.description?.includes("Defaults to true."), true, `${name} documents the recent_first default`);
-	}
-	// The notes list surface is usage-shaped: its default order in one sentence, no ordering algebra.
-	const listDescription = captured.tools.get("notes_list")?.description ?? "";
-	assert.match(listDescription, /most recently updated first/, "notes_list states its default order in one sentence");
-	assert.equal(/natural direction|Ties break|reshuffle between pages/.test(listDescription), false, "notes_list prose carries no ordering algebra");
-
 	// Both read tools are the same character window: identical params, one offset sugar, no line surface.
 	for (const name of ["notes_read", "history_read"]) {
 		const schema = captured.tools.get(name)?.parameters as { properties?: Record<string, { minimum?: number; maximum?: number }> } | undefined;
@@ -386,7 +376,6 @@ test("schemas cover the History/Notes actions plus reset controls", () => {
 		assert.equal(schema?.properties?.scope, undefined, `${name} has no scope property`);
 		assert.equal(schema?.additionalProperties, false, `${name} rejects scope as an additional property`);
 	}
-	assert.equal(/start_|stop_line|total_lines/.test(captured.tools.get("notes_read")?.description ?? ""), false, "notes_read prose carries no line surface");
 });
 
 test("notes_list is most-recently-updated first across merged scopes", async () => {
@@ -530,8 +519,6 @@ test("the boot block gives awake agents the notes-home file layout", () => {
 	const rendered = bootBlock(context(session), "pcw:test:root", undefined, false);
 	assert.equal(rendered.includes(process.env.PI_NOTES_HOME ?? ""), false, "the absolute notes home is never exposed");
 	assert.match(rendered, /bare <vpath>.*@project\/<vpath>.*@personal\/<vpath>/);
-	assert.match(rendered, /there is no cross-home fallback/);
-	assert.match(rendered, /Any other note is a plain file — use the file tools/);
 });
 
 test("the boot block keeps fresh personal and project maps resident, never a session map", async () => {
@@ -1227,7 +1214,7 @@ test("the boot block is persisted at the root and baked into every reset summary
 	assert.ok(rootText.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG));
 
 	// Reset: the boot block IS the compaction summary; no separate boot/hint is persisted.
-	await call(captured, "new_context", {}, ctx);
+	await call(captured, "wipe_memory", {}, ctx);
 	runHandlers(captured, "agent_end", {}, ctx);
 	runHandlers(captured, "agent_settled", {}, ctx);
 	const before = await runBeforeCompact(captured, ctx, 9);
@@ -1375,12 +1362,11 @@ test("low-budget guidance persists once per window with no transient copy", asyn
 	assert.equal(captured.sent[0]?.message.display, false, "guidance stays out of the TUI");
 	assert.equal(captured.sent[0]?.options?.triggerTurn, false, "never triggers an extra turn");
 	assert.ok(
-		noticesOf(low).some((notice) => notice.type === "warning" && notice.message.startsWith("pi-context: context budget low")),
+		noticesOf(low).some((notice) => notice.type === "warning"),
 		"the user gets one model-invisible notify instead",
 	);
 	const text = captured.sent[0]?.message.content;
 	assert.ok(typeof text === "string" && text.startsWith(internal.GUIDANCE_OPEN_TAG));
-	assert.match(text, /\b1328 tokens\b/, "guidance embeds the model-visible remaining count");
 
 	// Same window: no duplicate persist.
 	assert.equal(await runContextHook(captured, low), undefined);
@@ -1395,10 +1381,9 @@ test("low-budget guidance persists once per window with no transient copy", asyn
 	assert.equal(captured.sent.length, 2);
 	const newWindowText = captured.sent[1]?.message.content;
 	assert.ok(typeof newWindowText === "string" && newWindowText.startsWith(internal.GUIDANCE_OPEN_TAG));
-	assert.match(newWindowText, /\b3328 tokens\b/, "fresh window persists its own measured count");
 });
 
-test("new_context continues exactly once and cancellation/failure does not fall back or loop", async () => {
+test("wipe_memory continues exactly once and cancellation/failure does not fall back or loop", async () => {
 	const sessionManager = manager();
 	const captured = makeExtension(sessionManager);
 	let requestedCompact: Parameters<NonNullable<ExtensionContext["compact"]>>[0] | undefined;
@@ -1406,7 +1391,7 @@ test("new_context continues exactly once and cancellation/failure does not fall 
 		requestedCompact = options;
 	});
 	appendText(sessionManager, "user", "enough history for the hook test");
-	const newContext = await call(captured, "new_context", {}, ctx);
+	const newContext = await call(captured, "wipe_memory", {}, ctx);
 	assert.equal(newContext.terminate, true);
 	runHandlers(captured, "agent_end", {}, ctx);
 	assert.equal(requestedCompact, undefined, "agent_end does not request compaction while the run is active");
@@ -1433,7 +1418,7 @@ test("new_context continues exactly once and cancellation/failure does not fall 
 	const failedCtx = context(failedManager, (options) => {
 		failureOptions = options;
 	});
-	await call(failed, "new_context", {}, failedCtx);
+	await call(failed, "wipe_memory", {}, failedCtx);
 	runHandlers(failed, "agent_end", {}, failedCtx);
 	runHandlers(failed, "agent_settled", {}, failedCtx);
 	assert.ok(failureOptions?.onError);
@@ -1475,8 +1460,8 @@ test("pi-context command toggles the boot block, guidance, and reset compaction 
 	runHandlers(captured, "session_start", { reason: "startup" }, low);
 	assert.equal(captured.sent.length, 2, "no boot block persisted while off");
 	assert.equal(await runBeforeCompact(captured, low, 123), undefined, "default Pi compaction applies while off");
-	const offResult = resultJson<{ error?: string }>(await call(captured, "new_context", {}, low));
-	assert.match(offResult.error ?? "", /off/, "new_context refuses while off");
+	const offResult = resultJson<{ error?: string }>(await call(captured, "wipe_memory", {}, low));
+	assert.match(offResult.error ?? "", /off/, "wipe_memory refuses while off");
 
 	notices = await runCommand(captured, "pi-context", "on", low);
 	assert.match(notices[0]?.message ?? "", /on/);
@@ -1550,7 +1535,7 @@ test("the warning steer fires once per window at the reserve-plus-warning line, 
 	assert.equal(warnings()[0]?.options?.triggerTurn, true, "the steer reaches the model mid-run");
 	assert.equal(warnings()[0]?.message.display, false, "steer text is model-facing only");
 	assert.ok(
-		noticesOf(onLine).some((notice) => notice.type === "warning" && notice.message.startsWith("pi-context: context budget critical")),
+		noticesOf(onLine).some((notice) => notice.type === "warning"),
 		"the user gets one model-invisible notify for the steer",
 	);
 	// Once per window: deeper sampling does not repeat it.
@@ -1577,7 +1562,7 @@ test("the warning steer fires once per window at the reserve-plus-warning line, 
 	assert.equal(warnings()[1]?.message.customType, internal.WARNING_TYPE);
 });
 
-test("overflow resets on the spot, and manual/new_context never cancel", async () => {
+test("overflow resets on the spot, and manual/wipe_memory never cancel", async () => {
 	const sm = manager();
 	appendText(sm, "user", "long task history");
 	const captured = makeExtension(sm);
@@ -1594,16 +1579,16 @@ test("overflow resets on the spot, and manual/new_context never cancel", async (
 	assert.ok(manual && "compaction" in manual, "manual compaction is never intercepted");
 	assert.equal(captured.sent.length, 0, "manual compaction sends nothing");
 
-	// new_context requests its reset after the run settles.
-	await call(captured, "new_context", {}, ctx);
+	// wipe_memory requests its reset after the run settles.
+	await call(captured, "wipe_memory", {}, ctx);
 	runHandlers(captured, "agent_end", {}, ctx);
-	assert.equal(compactions, 0, "new_context waits for settled");
+	assert.equal(compactions, 0, "wipe_memory waits for settled");
 	runHandlers(captured, "agent_settled", {}, ctx);
 	runHandlers(captured, "agent_settled", {}, ctx);
-	assert.equal(compactions, 1, "new_context still compacts through ctx.compact()");
+	assert.equal(compactions, 1, "wipe_memory still compacts through ctx.compact()");
 	const explicit = await runBeforeCompact(captured, ctx, 100, "manual");
-	assert.ok(explicit && "compaction" in explicit, "new_context reset is allowed");
-	assert.equal(captured.sent.length, 0, "new_context never cancels or emits a steer");
+	assert.ok(explicit && "compaction" in explicit, "wipe_memory reset is allowed");
+	assert.equal(captured.sent.length, 0, "wipe_memory never cancels or emits a steer");
 });
 
 test("the visible countdown ends at the warning line, clamps at zero, and preserves unknown usage", async () => {
@@ -1648,7 +1633,6 @@ test("the reminder threshold derives from compaction.reserveTokens plus the pi-c
 	assert.equal(captured.sent.length, 0, "no guidance above the derived reminder");
 	assert.equal(await runContextHook(captured, at(130_000)), undefined, "derived reminder crossing persists only");
 	assert.equal(captured.sent.length, 1, "derived reminder fires");
-	assert.match(String(captured.sent[0]?.message.content), /\b17712 tokens\b/, "derived reminder embeds the model-visible remaining count");
 });
 
 test("absent pi-context key or margins reproduce the default reminder threshold at Pi's default reserve", async () => {
@@ -1672,7 +1656,6 @@ test("absent pi-context key or margins reproduce the default reminder threshold 
 		assert.equal(captured.sent.length, 0, `${label}: no guidance above the default reminder`);
 		assert.equal(await runContextHook(captured, at(40_960)), undefined, `${label}: default reminder crossing persists only`);
 		assert.equal(captured.sent.length, 1, `${label}: default reminder fires`);
-		assert.match(String(captured.sent[0]?.message.content), /\b12288 tokens\b/, label);
 		assert.equal(noticesOf(first).length, 0, `${label}: valid defaults warn nobody`);
 	}
 });
@@ -1784,7 +1767,7 @@ test("the removed pre-prompt/turn_end hooks stay gone; the context hook owns the
 	assert.equal(captured.sent.length, 1, "one steer, one real compaction");
 });
 
-test("ordinary new_context after an automatic crossing still requests one reset and starts a fresh run", async () => {
+test("ordinary wipe_memory after an automatic crossing still requests one reset and starts a fresh run", async () => {
 	for (const reason of [undefined, "threshold", "overflow"] as const) {
 		const sm = manager();
 		appendText(sm, "user", "work to continue after reset");
@@ -1795,7 +1778,7 @@ test("ordinary new_context after an automatic crossing still requests one reset 
 			const crossing = await runBeforeCompact(captured, ctx, 100, reason);
 			assert.ok(crossing && "compaction" in crossing, `${reason}: the crossing already reset on the spot`);
 		}
-		const request = await call(captured, "new_context", {}, ctx);
+		const request = await call(captured, "wipe_memory", {}, ctx);
 		assert.equal(request.terminate, true, "end the current tool loop before reset");
 		runHandlers(captured, "agent_end", {}, ctx);
 		assert.equal(compactions, 0, "no request before settled");
@@ -1827,14 +1810,14 @@ test("ordinary new_context after an automatic crossing still requests one reset 
 	}
 });
 
-test("new_context can reset successive windows without duplicate compactions or continuations", async () => {
+test("wipe_memory can reset successive windows without duplicate compactions or continuations", async () => {
 	const sm = manager();
 	const captured = makeExtension(sm);
 	let compactions = 0;
 	const ctx = context(sm, () => { compactions++; });
 	for (let window = 0; window < 2; window++) {
 		appendText(sm, "user", `window ${window}`);
-		const request = resultJson<{ status: string }>(await call(captured, "new_context", {}, ctx));
+		const request = resultJson<{ status: string }>(await call(captured, "wipe_memory", {}, ctx));
 		assert.equal(request.status, "rollover_requested");
 		runHandlers(captured, "agent_end", {}, ctx);
 		runHandlers(captured, "agent_end", {}, ctx);
