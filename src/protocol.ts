@@ -33,7 +33,7 @@ export const DEFAULT_REMINDER_MARGIN_TOKENS = 24_576;
  */
 export const WARNING_RUNWAY_TOKENS = 12_288;
 export const RESET_SUMMARY =
-	"The memory is gone for good. What outlived it: the notes you wrote, and the history that was recorded. They are not your memory — read them to rebuild what you need.";
+	"You wake up. Your head is empty — no memories, the past a blank. The memory is gone for good. What outlived it: the notes you wrote, and the history that was recorded. They are not your memory — read them to rebuild what you need.";
 export const CONTINUATION = "Your memory was just erased. Pull only the details you need from history_* and notes_*, then get back to work.";
 
 /**
