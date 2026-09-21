@@ -1,6 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { historyFromSession } from "./history.js";
-import { localIso } from "./notes/model.js";
 import { listNotes } from "./notes/store.js";
 import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, POCKET_GLOBAL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "./protocol.js";
 
@@ -15,13 +14,21 @@ function identityBlock(agentName: string, firstWindowId: string, currentWindowId
 	return `${CONTEXT_WINDOW_OPEN_TAG}\n${lines.join("\n")}\n${CONTEXT_WINDOW_CLOSE_TAG}`;
 }
 
+function relativeTime(timestamp: number, now: number): string {
+	const seconds = Math.trunc((timestamp - now) / 1000);
+	const [unit, size] = ([["day", 86400], ["hour", 3600], ["minute", 60], ["second", 1]] as const)
+		.find(([unit, size]) => Math.abs(seconds) >= size || unit === "second")!;
+	return new Intl.RelativeTimeFormat("en", { numeric: "always" })
+		.format(Math.trunc(seconds / size) || -0, unit);
+}
+
 /**
  * Boot notes index. Map residency ("地图在场"): fresh MAP.md bodies from the global and
  * project homes are both injected, broadest first; stale maps are skipped per home, and the
  * session home is never peeked — a session MAP.md is an ordinary note. The pocket then lists
  * recent fresh notes under per-home quotas (POCKET_SESSION_LIMIT / POCKET_PROJECT_LIMIT /
  * POCKET_GLOBAL_LIMIT), most-recently-updated first within each home, one metadata line
- * each: address, line count, UTF-8 byte count, local ISO update time. Bodies never render
+ * each: address, line count, UTF-8 byte count, relative update time at window open. Bodies never render
  * in the pocket; stale notes are excluded; MAP.md itself never takes a pocket seat.
  */
 function notesIndex(ctx: ExtensionContext): string {
@@ -43,8 +50,9 @@ function notesIndex(ctx: ExtensionContext): string {
 	];
 	if (recentNotes.length > 0) {
 		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (by home, most recent first within each: up to ${POCKET_SESSION_LIMIT} from this session, ${POCKET_PROJECT_LIMIT} from this project, ${POCKET_GLOBAL_LIMIT} from global). A note's content never appears here, so its name has to say what the note is about:`];
+		const now = Date.now();
 		for (const row of recentNotes) {
-			lines.push(`- ${row.address} (${row.body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${localIso(row.meta.updated_at)})`);
+			lines.push(`- ${row.address} (${row.body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${relativeTime(row.meta.updated_at, now)})`);
 		}
 		sections.push(lines.join("\n"));
 	}
