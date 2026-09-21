@@ -12,7 +12,7 @@ import { notesRoot } from "../notes/paths.js";
 
 function args(argv: string[]) { const out: Record<string, string | boolean> = {}; for (let i=0;i<argv.length;i++) { const a=argv[i]!; if (a === "--force" || a === "--help") out[a.slice(2)] = true; else if (a.startsWith("--")) out[a.slice(2)] = argv[++i] ?? ""; } return out; }
 function packageRoot(): string {
-	let dir = dirname(new URL(import.meta.url).pathname);
+	let dir = dirname(fileURLToPath(import.meta.url));
 	while (true) { if (existsSync(join(dir, "package.json"))) return dir; const parent = dirname(dir); if (parent === dir) throw new Error("could not locate installed package root"); dir = parent; }
 }
 

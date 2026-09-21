@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
-import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { cpSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -241,12 +241,32 @@ test("dreamer session has exactly the jailed file-tool allowlist", async () => {
 	}
 });
 
-test("playbook describes plain files and the retained frontmatter", () => {
+test("playbook describes plain files, retained frontmatter, and the read-only session WAL", () => {
 	const playbook = readFileSync(join(process.cwd(), "playbook.md"), "utf8");
 	assert.equal(playbook.includes("notes_"), false);
 	for (const field of ["origin", "status", "stale", "created_at", "updated_at", "last_accessed", "access_count"]) assert.match(playbook, new RegExp(`^${field}:`, "m"));
 	assert.equal(/^scope:/m.test(playbook), false, "scope is derived from the address rather than persisted");
+	assert.match(playbook, /`pi\/session\/\*\*` is a live agent's write-ahead log/);
+	assert.match(playbook, /never write or edit anything there/);
+	assert.match(playbook, /Session notes remain untouched even when promoted/);
 	assert.match(playbook, /Nothing is physically deleted/);
+});
+
+test("CLI finds its package root when the installed file URL contains spaces", () => {
+	const install = mkdtempSync(join(tmpdir(), "dream install "));
+	const home = fixture();
+	try {
+		cpSync(join(process.cwd(), "dist/src"), join(install, "dist/src"), { recursive: true });
+		symlinkSync(join(process.cwd(), "node_modules"), join(install, "node_modules"), process.platform === "win32" ? "junction" : "dir");
+		cpSync(join(process.cwd(), "playbook.md"), join(install, "playbook.md"));
+		writeFileSync(join(install, "package.json"), JSON.stringify({ type: "module" }));
+		const result = spawnSync(process.execPath, [join(install, "dist/src/dream/cli.js"), "--notes-home", home, "--force", "--dreamer", "definitely-not-a-real-model"], { encoding: "utf8" });
+		assert.equal(result.status, 1, result.stderr);
+		assert.doesNotMatch(result.stderr, /could not locate installed package root/);
+		assert.match(result.stderr, /definitely-not-a-real-model/);
+	} finally {
+		rmSync(install, { recursive: true, force: true });
+	}
 });
 
 test("provider errors are reported with partial writes instead of parsing a response", async () => {
