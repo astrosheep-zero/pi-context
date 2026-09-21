@@ -1,12 +1,13 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { historyFromSession } from "./history.js";
 import { listNotes } from "./notes/store.js";
-import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, POCKET_PERSONAL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "./protocol.js";
+import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, POCKET_AGENT_LIMIT, POCKET_HUMAN_LIMIT, POCKET_MODEL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "./protocol.js";
+import { agentSlug, modelSlug } from "./notes/paths.js";
 
-/** Codex-style <context_window> identity block: agent name and first/current/previous window ids only. */
-function identityBlock(agentName: string, firstWindowId: string, currentWindowId: string, previousWindowId?: string): string {
+/** Codex-style <context_window> identity block: the resolved agent and model names plus first/current/previous window ids. */
+function identityBlock(ctx: ExtensionContext, firstWindowId: string, currentWindowId: string, previousWindowId?: string): string {
 	const lines = [
-		`Agent name: ${agentName}`,
+		`Agent name: ${agentSlug(ctx)} (brain: ${modelSlug(ctx)})`,
 		`First context window id: ${firstWindowId}`,
 		`Current context window id: ${currentWindowId}`,
 	];
@@ -23,33 +24,36 @@ function relativeTime(timestamp: number, now: number): string {
 }
 
 /**
- * Boot notes index. Map residency ("地图在场"): fresh MAP.md bodies from the personal and
- * project homes are both injected, broadest first; stale maps are skipped per home, and the
- * session home is never peeked — a session MAP.md is an ordinary note. The pocket then lists
- * recent fresh notes under per-home quotas (POCKET_SESSION_LIMIT / POCKET_PROJECT_LIMIT /
- * POCKET_PERSONAL_LIMIT), most-recently-updated first within each home, one metadata line
- * each: address, line count, UTF-8 byte count, relative update time at window open. Bodies never render
+ * Boot notes index. Map residency ("地图在场"): fresh MAP.md bodies from the human, project,
+ * own-agent, and current-model homes are all injected, broadest first; stale maps are skipped
+ * per home, and the session home is never peeked — a session MAP.md is an ordinary note. The
+ * pocket then lists recent fresh notes under per-home quotas (POCKET_SESSION_LIMIT /
+ * POCKET_PROJECT_LIMIT / POCKET_HUMAN_LIMIT / POCKET_AGENT_LIMIT / POCKET_MODEL_LIMIT),
+ * most-recently-updated first within each home, one metadata line each: address, line count,
+ * UTF-8 byte count, relative update time at window open. Bodies never render
  * in the pocket; stale notes are excluded; MAP.md itself never takes a pocket seat.
  */
 function notesIndex(ctx: ExtensionContext): string {
 	const sections: string[] = [];
-	// Map residency ("地图在场"): scope-native maps, both fresh ones injected broadest-first.
+	// Map residency ("地图在场"): scope-native maps, fresh ones injected broadest-first.
 	// A session MAP.md is an ordinary note, never resident; stale maps skip independently.
-	for (const scope of ["personal", "project"] as const) {
+	for (const scope of ["human", "project", "agent", "model"] as const) {
 		const toc = listNotes(ctx, { scope }).find((row) => row.path === "MAP.md");
 		if (toc && !toc.meta.stale) {
 			if (toc.body.length > 0) sections.push(toc.body);
 		}
 	}
 	// listNotes is most-recently-updated first within each home. Per-home quotas keep session
-	// churn from evicting project or personal notes; maps never take pocket seats.
+	// churn from evicting the durable homes; maps never take pocket seats.
 	const recentNotes = [
 		...listNotes(ctx, { scope: "session" }).filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_SESSION_LIMIT),
 		...listNotes(ctx, { scope: "project" }).filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_PROJECT_LIMIT),
-		...listNotes(ctx, { scope: "personal" }).filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_PERSONAL_LIMIT),
+		...listNotes(ctx, { scope: "human" }).filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_HUMAN_LIMIT),
+		...listNotes(ctx, { scope: "agent" }).filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_AGENT_LIMIT),
+		...listNotes(ctx, { scope: "model" }).filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_MODEL_LIMIT),
 	];
 	if (recentNotes.length > 0) {
-		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (by home, most recent first within each: up to ${POCKET_SESSION_LIMIT} from this session, ${POCKET_PROJECT_LIMIT} from this project, ${POCKET_PERSONAL_LIMIT} from personal). A note's content never appears here, so its name has to say what the note is about:`];
+		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (by home, most recent first within each: up to ${POCKET_SESSION_LIMIT} from this session, ${POCKET_PROJECT_LIMIT} from this project, ${POCKET_HUMAN_LIMIT} from @human, ${POCKET_AGENT_LIMIT} from your @self home, ${POCKET_MODEL_LIMIT} from the current @model home). A note's content never appears here, so its name has to say what the note is about:`];
 		const now = Date.now();
 		for (const row of recentNotes) {
 			lines.push(`- ${row.address} (${row.body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${relativeTime(row.meta.updated_at, now)})`);
@@ -60,7 +64,7 @@ function notesIndex(ctx: ExtensionContext): string {
 }
 
 function notesHomeBlock(): string {
-	return "Notes_* addresses have three homes: bare <vpath> is this session, @project/<vpath> is this project, and @personal/<vpath> is the human's cross-project home. @ means leaving home; there is no cross-home fallback. Any other note is a plain file — use the file tools.";
+	return "Notes_* addresses have five homes: bare <vpath> is this session, @project/<vpath> is this project, @human/<vpath> is the human's cross-project home, @self/<vpath> and @agents/<name>/<vpath> are agent homes (current vs named), and @model/<vpath> and @models/<name>/<vpath> are model homes. @self and @model resolve to who is running now; listings always show resolved names. @ means leaving home; there is no cross-home fallback. Anything else after @ — or @ inside a vpath — is a hard error. Any other note is a plain file — use the file tools.";
 }
 
 /**
@@ -73,7 +77,7 @@ export function bootBlock(ctx: ExtensionContext, currentId: string, previousId: 
 	const firstId = historyFromSession(ctx)[0]?.windowId ?? currentId;
 	const parts: string[] = [];
 	if (resetLine) parts.push(RESET_SUMMARY);
-	parts.push(identityBlock(ctx.sessionManager.getSessionName() ?? "root", firstId, currentId, previousId));
+	parts.push(identityBlock(ctx, firstId, currentId, previousId));
 	parts.push(notesHomeBlock());
 	const index = notesIndex(ctx);
 	if (index) parts.push(index);

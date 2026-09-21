@@ -7,7 +7,7 @@
  * HERMETIC: every test points PI_NOTES_HOME at its own temp root; no real ~/.agents is touched.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -88,7 +88,7 @@ test("write lands a real markdown file with harness frontmatter and a pure body"
 	assert.equal(result.written, true);
 
 	// A leading YAML block in user content is stripped from the body.
-	await call(captured, "notes_write", { path: "stripped.md", content: "---\nscope: personal\nnonsense: true\n---\nreal body" }, ctx);
+	await call(captured, "notes_write", { path: "stripped.md", content: "---\nscope: human\nnonsense: true\n---\nreal body" }, ctx);
 	const stripped = readFileSync(physicalPath("session", "stripped.md", ctx), "utf8");
 	assert.match(stripped, /\n---\n\nreal body$/, "the injected block is not part of the body");
 	assert.equal(stripped.includes("nonsense"), false, "the injected block never reaches the file");
@@ -282,19 +282,19 @@ test.skip("scope resolution and movement are superseded by explicit address test
 	const captured = makeExtension(session);
 	const ctx = context(session);
 
-	await call(captured, "notes_write", { path: "shared.md", content: "personal body", scope: "personal" }, ctx);
+	await call(captured, "notes_write", { path: "shared.md", content: "human body", scope: "human" }, ctx);
 	await call(captured, "notes_write", { path: "shared.md", content: "session body", scope: "session" }, ctx);
 
 	const first = resultRead(await call(captured, "notes_read", { path: "shared.md" }, ctx));
-	assert.equal(first.details.scope, "session", "session wins the precedence over personal");
+	assert.equal(first.details.scope, "session", "session wins the precedence over human");
 	const readAgain = resultRead(await call(captured, "notes_read", { path: "shared.md", scope: "session" }, ctx));
 	assert.ok(readAgain.content.includes("session body"));
 	const sessionMeta = listNotes(ctx, { scope: "session" })[0]!.meta;
 	assert.equal(sessionMeta.access_count, 2, "each read bumps access_count");
-	const personalMeta = listNotes(ctx, { scope: "personal" })[0]!.meta;
-	assert.equal(personalMeta.access_count, 0, "the personal copy is untouched");
+	const humanMeta = listNotes(ctx, { scope: "human" })[0]!.meta;
+	assert.equal(humanMeta.access_count, 0, "the human copy is untouched");
 
-	// Move the session copy to project; the personal copy is untouched.
+	// Move the session copy to project; the human copy is untouched.
 	const moved = resultJson<{ meta: Meta; resolved_scope: string }>(await call(captured, "notes_edit", { path: "shared.md", edits: [{ oldText: "session", newText: "moved" }], scope: "project" }, ctx));
 	assert.equal(moved.meta.scope, "project");
 	assert.equal(moved.resolved_scope, "session", "resolved_scope names the layer the file moved from");
@@ -303,11 +303,11 @@ test.skip("scope resolution and movement are superseded by explicit address test
 
 	// A move onto an existing target is refused and both files survive unchanged.
 	await call(captured, "notes_write", { path: "clash.md", content: "session stay", scope: "session" }, ctx);
-	await call(captured, "notes_write", { path: "clash.md", content: "personal stay", scope: "personal" }, ctx);
-	const beforePersonal = readFileSync(physicalPath("personal", "clash.md", ctx), "utf8");
-	const refusal = resultJson<{ error: string }>(await call(captured, "notes_edit", { path: "clash.md", edits: [{ oldText: "stay", newText: "moved" }], scope: "personal" }, ctx));
+	await call(captured, "notes_write", { path: "clash.md", content: "human stay", scope: "human" }, ctx);
+	const beforeHuman = readFileSync(physicalPath("human", "clash.md", ctx), "utf8");
+	const refusal = resultJson<{ error: string }>(await call(captured, "notes_edit", { path: "clash.md", edits: [{ oldText: "stay", newText: "moved" }], scope: "human" }, ctx));
 	assert.match(refusal.error, /already exists/);
-	assert.equal(readFileSync(physicalPath("personal", "clash.md", ctx), "utf8"), beforePersonal, "the target survives a refused move");
+	assert.equal(readFileSync(physicalPath("human", "clash.md", ctx), "utf8"), beforeHuman, "the target survives a refused move");
 });
 
 test("all notes tool results use address as the only home identity", async () => {
@@ -318,7 +318,7 @@ test("all notes tool results use address as the only home identity", async () =>
 	const notes = [
 		{ address: "session.md", body: "session needle" },
 		{ address: "@project/project.md", body: "project needle" },
-		{ address: "@personal/personal.md", body: "personal needle" },
+		{ address: "@human/human.md", body: "human needle" },
 	] as const;
 
 	for (const note of notes) {
@@ -356,20 +356,20 @@ test("list and search merge scopes and carry addresses; the path jail rejects es
 
 	await call(captured, "notes_write", { path: "one.md", content: "needle one", scope: "session" }, ctx);
 	await call(captured, "notes_write", { path: "two.md", content: "needle two", scope: "project" }, ctx);
-	await call(captured, "notes_write", { path: "three.md", content: "needle three", scope: "personal" }, ctx);
+	await call(captured, "notes_write", { path: "three.md", content: "needle three", scope: "human" }, ctx);
 
 	const listed = resultJson<Listed>(await call(captured, "notes_list", {}, ctx));
-	assert.deepEqual([...listed.files].map((file) => file.address).sort(), ["@personal/three.md", "@project/two.md", "one.md"], "every merged row carries its full address");
+	assert.deepEqual([...listed.files].map((file) => file.address).sort(), ["@human/three.md", "@project/two.md", "one.md"], "every merged row carries its full address");
 	for (const row of listed.files) {
 		assert.deepEqual(Object.keys(row).sort(), ["address", "stale", "updated_at"]);
 		assert.equal(row.stale, false);
 	}
-	const scoped = resultJson<Listed>(await call(captured, "notes_list", { scope: "personal" }, ctx));
-	assert.deepEqual(scoped.files.map((file) => file.address), ["@personal/three.md"], "an address-pattern filter narrows the set");
+	const scoped = resultJson<Listed>(await call(captured, "notes_list", { scope: "human" }, ctx));
+	assert.deepEqual(scoped.files.map((file) => file.address), ["@human/three.md"], "an address-pattern filter narrows the set");
 
 	const searched = resultJson<Searched>(await call(captured, "notes_search", { query: "needle" }, ctx));
 	assert.equal(searched.files.length, 3, "literal search finds matches in every scope");
-	assert.deepEqual([...searched.files].map((file) => file.address).sort(), ["@personal/three.md", "@project/two.md", "one.md"]);
+	assert.deepEqual([...searched.files].map((file) => file.address).sort(), ["@human/three.md", "@project/two.md", "one.md"]);
 	for (const row of [...listed.files, ...searched.files]) assertNoPublicScope(row, "notes_list/search");
 	assert.equal(searched.files.every((file) => file.matches_total === 1), true);
 	const hit = searched.files[0]!.matches[0]!;
@@ -395,12 +395,12 @@ test("the boot index reads the physical store across scopes and excludes stale n
 	const ctx = context(session);
 
 	await call(captured, "notes_write", { path: "fresh.md", content: "fresh content" }, ctx);
-	await call(captured, "notes_write", { path: "personal.md", content: "personal content", scope: "personal" }, ctx);
+	await call(captured, "notes_write", { path: "human.md", content: "human content", scope: "human" }, ctx);
 	await call(captured, "notes_write", { path: "old.md", content: "stale content", stale: true }, ctx);
 	runHandlers(captured, "session_start", {}, ctx);
 	const text = typeof captured.sent[0]?.message.content === "string" ? captured.sent[0].message.content : "";
 	assert.ok(text.includes("fresh.md"), "a fresh session note is indexed");
-	assert.ok(text.includes("personal.md"), "a fresh personal note is indexed");
+	assert.ok(text.includes("human.md"), "a fresh human note is indexed");
 	assert.equal(text.includes("old.md"), false, "a stale note leaves the index");
 	assert.equal(text.includes("stale content"), false, "the stale note's body is absent from boot");
 });
@@ -413,17 +413,17 @@ test("search offsets start reads at Unicode matches across homes without mutatin
 	const notes = [
 		{ address: "session.md", scope: "session" as const, body: "first line\n前置 🐉 needle-session\nend", needle: "needle-session" },
 		{ address: "@project/crossing.md", scope: "project" as const, body: "prefix\nneedle-project 😀", needle: "needle-project" },
-		{ address: "@personal/legacy.md", scope: "personal" as const, body: "legacy 😺 needle-personal", needle: "needle-personal" },
+		{ address: "@human/legacy.md", scope: "human" as const, body: "legacy 😺 needle-human", needle: "needle-human" },
 	];
 	for (const note of notes) await call(captured, "notes_write", { address: note.address, content: note.body }, ctx);
 	const crossing = physicalPath("project", "crossing.md", ctx);
 	writeFileSync(crossing, readFileSync(crossing, "utf8").replace(/^access_count: 0$/m, "access_count: 9"));
-	const legacy = physicalPath("personal", "legacy.md", ctx);
+	const legacy = physicalPath("human", "legacy.md", ctx);
 	writeFileSync(legacy, notes[2]!.body);
-	const before = new Map(notes.map((note) => [note.address, readFileSync(physicalPath(note.scope, note.address.replace(/^@(?:project|personal)\//, ""), ctx), "utf8")]));
+	const before = new Map(notes.map((note) => [note.address, readFileSync(physicalPath(note.scope, note.address.replace(/^@(?:project|human)\//, ""), ctx), "utf8")]));
 	const searched = resultJson<Searched>(await call(captured, "notes_search", { query: notes.map((note) => note.needle), pattern: "**" }, ctx));
 	for (const note of notes) {
-		assert.equal(readFileSync(physicalPath(note.scope, note.address.replace(/^@(?:project|personal)\//, ""), ctx), "utf8"), before.get(note.address), `search leaves ${note.address} byte-identical`);
+		assert.equal(readFileSync(physicalPath(note.scope, note.address.replace(/^@(?:project|human)\//, ""), ctx), "utf8"), before.get(note.address), `search leaves ${note.address} byte-identical`);
 		const file = searched.files.find((candidate) => candidate.address === note.address);
 		assert.ok(file, `search returns ${note.address}`);
 		assert.deepEqual(Object.keys(file).sort(), ["address", "matches", "matches_total", "stale", "updated_at"]);
@@ -434,7 +434,7 @@ test("search offsets start reads at Unicode matches across homes without mutatin
 		assert.deepEqual(Object.keys(read.details).sort(), ["address", "next_offset_chars", "offset_chars", "total_chars"]);
 	}
 	assert.match(readFileSync(crossing, "utf8"), /^access_count: 10$/m, "the predicted read crosses access_count from 9 to 10");
-	assert.match(resultRead(await call(captured, "notes_read", { address: "@personal/legacy.md" }, ctx)).content, /^---\n/, "a missing-frontmatter note is normalized only by read");
+	assert.match(resultRead(await call(captured, "notes_read", { address: "@human/legacy.md" }, ctx)).content, /^---\n/, "a missing-frontmatter note is normalized only by read");
 });
 
 test("notes_read surfaces frontmatter and search reports body lines", async () => {
@@ -506,21 +506,21 @@ test("write-time caps refuse an oversized vpath or serialized file, and edit ref
 	assert.match(refusedEdit.error, new RegExp(String(MAX_NOTE_BYTES)), "an edit that would exceed the cap is refused");
 });
 
-test("fresh personal and project MAP.md bodies are both resident before the pocket", async () => {
+test("fresh human and project MAP.md bodies are both resident before the pocket", async () => {
 	freshRoot();
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	await call(captured, "notes_write", { address: "MAP.md", content: "MAP: session" }, ctx);
 	await call(captured, "notes_write", { address: "@project/MAP.md", content: "MAP: project" }, ctx);
-	await call(captured, "notes_write", { address: "@personal/MAP.md", content: "MAP: personal\nMAP: second" }, ctx);
+	await call(captured, "notes_write", { address: "@human/MAP.md", content: "MAP: human\nMAP: second" }, ctx);
 	await call(captured, "notes_write", { path: "recent.md", content: "recent body" }, ctx);
 	runHandlers(captured, "session_start", {}, ctx);
 	const boot = typeof captured.sent.at(-1)?.message.content === "string" ? (captured.sent.at(-1)!.message.content as string) : "";
-	assert.ok(boot.includes("MAP: personal"), "the personal map is injected");
+	assert.ok(boot.includes("MAP: human"), "the human map is injected");
 	assert.ok(boot.includes("MAP: project"), "the project map is injected");
 	assert.equal(boot.includes("MAP: session"), false, "the session map is never injected");
-	assert.ok(boot.indexOf("MAP: personal") < boot.indexOf("MAP: project"), "the personal map precedes the project map");
+	assert.ok(boot.indexOf("MAP: human") < boot.indexOf("MAP: project"), "the personal map precedes the project map");
 	assert.ok(boot.indexOf("MAP: project") < boot.indexOf("recent.md"), "both map bodies precede the pocket");
 	assert.ok(boot.includes(CONTEXT_WINDOW_PROTOCOL_OPEN_TAG), "the protocol text still rides along");
 });
@@ -531,7 +531,7 @@ test("the boot pocket applies per-home quotas in session, project, personal orde
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	const base = Date.parse("2026-01-01T00:00:00.000Z");
-	for (const [scope, count] of [["session", 6], ["project", 3], ["personal", 3]] as const) {
+	for (const [scope, count] of [["session", 6], ["project", 3], ["human", 3]] as const) {
 		for (let index = 0; index < count; index++) {
 			const path = `${scope}-${index}.md`;
 			await call(captured, "notes_write", { path, content: `${scope} body`, scope }, ctx);
@@ -540,20 +540,20 @@ test("the boot pocket applies per-home quotas in session, project, personal orde
 	}
 	await call(captured, "notes_write", { address: "MAP.md", content: "MAP: session" }, ctx);
 	await call(captured, "notes_write", { address: "@project/MAP.md", content: "MAP: project" }, ctx);
-	await call(captured, "notes_write", { address: "@personal/MAP.md", content: "MAP: personal" }, ctx);
+	await call(captured, "notes_write", { address: "@human/MAP.md", content: "MAP: human" }, ctx);
 	runHandlers(captured, "session_start", {}, ctx);
 	const boot = typeof captured.sent.at(-1)?.message.content === "string" ? (captured.sent.at(-1)!.message.content as string) : "";
-	for (const name of ["session-5.md", "session-4.md", "session-3.md", "session-2.md", "session-1.md", "@project/project-2.md", "@project/project-1.md", "@personal/personal-2.md", "@personal/personal-1.md"]) {
+	for (const name of ["session-5.md", "session-4.md", "session-3.md", "session-2.md", "session-1.md", "@project/project-2.md", "@project/project-1.md", "@human/human-2.md", "@human/human-1.md"]) {
 		assert.ok(boot.includes(name), `${name} stays in the pocket`);
 	}
-	for (const name of ["session-0.md", "@project/project-0.md", "@personal/personal-0.md", "MAP.md", "MAP: session"]) {
+	for (const name of ["session-0.md", "@project/project-0.md", "@human/human-0.md", "MAP.md", "MAP: session"]) {
 		assert.equal(boot.includes(name), false, `${name} is not a pocket entry`);
 	}
 	assert.ok(boot.indexOf("session-5.md") < boot.indexOf("session-4.md"), "session notes are most-recent-first");
 	assert.ok(boot.indexOf("@project/project-2.md") < boot.indexOf("@project/project-1.md"), "project notes are most-recent-first");
-	assert.ok(boot.indexOf("@personal/personal-2.md") < boot.indexOf("@personal/personal-1.md"), "personal notes are most-recent-first");
+	assert.ok(boot.indexOf("@human/human-2.md") < boot.indexOf("@human/human-1.md"), "personal notes are most-recent-first");
 	assert.ok(boot.indexOf("session-1.md") < boot.indexOf("@project/project-2.md"), "session notes precede project notes");
-	assert.ok(boot.indexOf("@project/project-1.md") < boot.indexOf("@personal/personal-2.md"), "project notes precede personal notes");
+	assert.ok(boot.indexOf("@project/project-1.md") < boot.indexOf("@human/human-2.md"), "project notes precede personal notes");
 });
 
 test("project scope keys off the git root basename and sha1 prefix", () => {
@@ -573,14 +573,14 @@ test("@ addresses select one home, reject illegal sigils, and never fall back", 
 	const ctx = context(session);
 	await call(captured, "notes_write", { address: "same.md", content: "session" }, ctx);
 	await call(captured, "notes_write", { address: "@project/same.md", content: "project" }, ctx);
-	await call(captured, "notes_write", { address: "@personal/same.md", content: "personal" }, ctx);
+	await call(captured, "notes_write", { address: "@human/same.md", content: "human" }, ctx);
 	assert.ok(existsSync(physicalPath("project", "same.md", ctx)), "@project writes to the current project home");
-	assert.ok(existsSync(physicalPath("personal", "same.md", ctx)), "@personal writes to the personal home");
+	assert.ok(existsSync(physicalPath("human", "same.md", ctx)), "@human writes to the human home");
 	assert.match(resultRead(await call(captured, "notes_read", { address: "same.md" }, ctx)).content, /session$/);
 	assert.equal(resultJson<{ error?: string }>(await call(captured, "notes_read", { address: "@project/missing.md" }, ctx)).error, "note not found");
-	await assert.rejects(() => call(captured, "notes_read", { address: "@glboal/same.md" }, ctx), /@project\/.*@personal\/.*bare names are the session home/);
-	await assert.rejects(() => call(captured, "notes_write", { address: "bad@name.md", content: "no" }, ctx), /@project\/.*@personal\/.*bare names are the session home/);
-	assert.equal(existsSync(join(root, "personal", "bad@name.md")), false, "a bad sigil creates nothing anywhere");
+	await assert.rejects(() => call(captured, "notes_read", { address: "@glboal/same.md" }, ctx), /@project\/.*@human\/.*bare names are the session home/);
+	await assert.rejects(() => call(captured, "notes_write", { address: "bad@name.md", content: "no" }, ctx), /@project\/.*@human\/.*bare names are the session home/);
+	assert.equal(existsSync(join(root, "human", "bad@name.md")), false, "a bad sigil creates nothing anywhere");
 });
 
 test("full addresses drive outputs and patterns; on-disk scope is read then dropped", async () => {
@@ -590,13 +590,13 @@ test("full addresses drive outputs and patterns; on-disk scope is read then drop
 	const ctx = context(session);
 	await call(captured, "notes_write", { address: "root.md", content: "needle" }, ctx);
 	await call(captured, "notes_write", { address: "@project/project.md", content: "needle" }, ctx);
-	await call(captured, "notes_write", { address: "@personal/personal.md", content: "needle" }, ctx);
+	await call(captured, "notes_write", { address: "@human/human.md", content: "needle" }, ctx);
 	const list = resultJson<{ files: Array<{ address: string }> }>(await call(captured, "notes_list", { pattern: "**" }, ctx));
-	assert.deepEqual(list.files.map((file) => file.address).sort(), ["@personal/personal.md", "@project/project.md", "root.md"]);
+	assert.deepEqual(list.files.map((file) => file.address).sort(), ["@human/human.md", "@project/project.md", "root.md"]);
 	assert.deepEqual(resultJson<{ files: Array<{ address: string }> }>(await call(captured, "notes_list", { pattern: "*.md" }, ctx)).files.map((file) => file.address), ["root.md"]);
 	assert.deepEqual(resultJson<{ files: Array<{ address: string }> }>(await call(captured, "notes_search", { query: "needle", pattern: "@project/**" }, ctx)).files.map((file) => file.address), ["@project/project.md"]);
-	const read = resultRead(await call(captured, "notes_read", { address: "@personal/personal.md" }, ctx));
-	assert.equal(read.header, "--- READ WINDOW ---\naddress: @personal/personal.md\nchars: [0," + read.total_chars + ") of " + read.total_chars + "\nnext_offset_chars: null\n", "the raw READ WINDOW block echoes the full address");
+	const read = resultRead(await call(captured, "notes_read", { address: "@human/human.md" }, ctx));
+	assert.equal(read.header, "--- READ WINDOW ---\naddress: @human/human.md\nchars: [0," + read.total_chars + ") of " + read.total_chars + "\nnext_offset_chars: null\n", "the raw READ WINDOW block echoes the full address");
 	const legacy = physicalPath("project", "legacy.md", ctx);
 	writeFileSync(legacy, "---\nscope: personal\norigin: self\nstatus: active\nstale: false\ncreated_at: 2026-01-01T00:00:00.000+00:00\nupdated_at: 2026-01-01T00:00:00.000+00:00\nlast_accessed: 2026-01-01T00:00:00.000+00:00\naccess_count: 0\n---\n\nlegacy");
 	const legacyRead = resultRead(await call(captured, "notes_read", { address: "@project/legacy.md" }, ctx));
@@ -612,7 +612,7 @@ test("stale project and personal maps are skipped independently", async () => {
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	await call(captured, "notes_write", { address: "@project/MAP.md", content: "project fresh" }, ctx);
-	await call(captured, "notes_write", { address: "@personal/MAP.md", content: "personal stale", stale: true }, ctx);
+	await call(captured, "notes_write", { address: "@human/MAP.md", content: "personal stale", stale: true }, ctx);
 	runHandlers(captured, "session_start", {}, ctx);
 	let boot = String(captured.sent.at(-1)?.message.content ?? "");
 	assert.ok(boot.includes("project fresh"), "a fresh project map survives a stale personal map");
@@ -621,9 +621,184 @@ test("stale project and personal maps are skipped independently", async () => {
 	const secondCaptured = makeExtension(second);
 	const secondCtx = context(second);
 	await call(secondCaptured, "notes_edit", { address: "@project/MAP.md", stale: true }, secondCtx);
-	await call(secondCaptured, "notes_edit", { address: "@personal/MAP.md", stale: false }, secondCtx);
+	await call(secondCaptured, "notes_edit", { address: "@human/MAP.md", stale: false }, secondCtx);
 	runHandlers(secondCaptured, "session_start", {}, secondCtx);
 	boot = String(secondCaptured.sent.at(-1)?.message.content ?? "");
 	assert.equal(boot.includes("project fresh"), false, "the stale project map is skipped");
-	assert.ok(boot.includes("personal stale"), "a fresh personal map survives a stale project map");
+	assert.ok(boot.includes("personal stale"), "a fresh human map survives a stale project map");
+});
+
+const FRONTMATTER = (body: string) =>
+	`---\norigin: self\nstatus: active\nstale: false\ncreated_at: 2026-01-01T00:00:00.000+00:00\nupdated_at: 2026-01-01T00:00:00.000+00:00\nlast_accessed: 2026-01-01T00:00:00.000+00:00\naccess_count: 0\n---\n\n${body}`;
+
+async function withAgent(name: string | undefined, run: () => Promise<void>): Promise<void> {
+	const previous = process.env.PI_NOTES_AGENT;
+	if (name === undefined) delete process.env.PI_NOTES_AGENT;
+	else process.env.PI_NOTES_AGENT = name;
+	try {
+		// A plain `return run()` would run the finally block the moment the promise pends,
+		// restoring the env while the callback still has awaits ahead of it.
+		await run();
+	} finally {
+		if (previous === undefined) delete process.env.PI_NOTES_AGENT;
+		else process.env.PI_NOTES_AGENT = previous;
+	}
+}
+
+test("@self resolves to the declared agent; other agents are read-only, reachable by glob", async () => {
+	const root = freshRoot();
+	await withAgent("WaShi!", async () => {
+		const session = manager();
+		const captured = makeExtension(session);
+		const ctx = context(session);
+
+		const self = resultJson<{ address: string }>(await call(captured, "notes_write", { address: "@self/journal.md", content: "washi body" }, ctx));
+		assert.equal(self.address, "@self/journal.md");
+		assert.ok(existsSync(join(root, "agents", "washi", "journal.md")), "@self writes under the slugified PI_NOTES_AGENT home");
+
+		// The absolute form naming the current agent is equally writable.
+		const absolute = resultJson<{ address: string }>(await call(captured, "notes_write", { address: "@agents/washi/plan.md", content: "plan" }, ctx));
+		assert.equal(absolute.address, "@agents/washi/plan.md");
+
+		// Seed another agent's home on disk; writes and edits there are refused, reads are not.
+		mkdirSync(join(root, "agents", "faye"), { recursive: true });
+		writeFileSync(join(root, "agents", "faye", "secret.md"), FRONTMATTER("faye secret"));
+		const refusedWrite = resultJson<{ error: string }>(await call(captured, "notes_write", { address: "@agents/faye/secret.md", content: "hacked" }, ctx));
+		assert.match(refusedWrite.error, /@agents\/faye\/ is not your home/);
+		const refusedEdit = resultJson<{ error: string }>(await call(captured, "notes_edit", { address: "@agents/faye/secret.md", edits: [{ oldText: "secret", newText: "x" }] }, ctx));
+		assert.match(refusedEdit.error, /not your home/);
+		assert.ok(readFileSync(join(root, "agents", "faye", "secret.md"), "utf8").endsWith("faye secret"), "a refused write leaves the file alone");
+		const read = resultRead(await call(captured, "notes_read", { address: "@agents/faye/secret.md" }, ctx));
+		assert.ok(read.content.endsWith("faye secret"), "another agent's home is readable by explicit address");
+		assert.equal(read.details.address, "@agents/faye/secret.md");
+
+		// The merged default view resolves @self but never leaks other agents.
+		const listed = resultJson<{ files: Array<{ address: string }> }>(await call(captured, "notes_list", {}, ctx));
+		const addresses = listed.files.map((file) => file.address);
+		assert.deepEqual(addresses.filter((address) => address.startsWith("@agents/")).sort(), ["@agents/washi/journal.md", "@agents/washi/plan.md"], "the merged view carries the resolved own-agent rows only");
+
+		// Explicit patterns reach one named home or scan the whole namespace.
+		const one = resultJson<{ files: Array<{ address: string }> }>(await call(captured, "notes_list", { pattern: "@agents/washi/**" }, ctx));
+		assert.deepEqual(one.files.map((file) => file.address).sort(), ["@agents/washi/journal.md", "@agents/washi/plan.md"]);
+		const every = resultJson<{ files: Array<{ address: string }> }>(await call(captured, "notes_list", { pattern: "@agents/*/**" }, ctx));
+		assert.deepEqual(every.files.map((file) => file.address).sort(), ["@agents/faye/secret.md", "@agents/washi/journal.md", "@agents/washi/plan.md"], "a glob in the name segment scans the namespace");
+		const searched = resultJson<Searched>(await call(captured, "notes_search", { query: "secret", pattern: "@agents/faye/**" }, ctx));
+		assert.deepEqual(searched.files.map((file) => file.address), ["@agents/faye/secret.md"], "search narrows to one agent home by pattern");
+	});
+});
+
+test("@model resolves live from ctx.model; other models are read-only, reachable by glob", async () => {
+	const root = freshRoot();
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session, undefined, undefined, true, undefined, undefined, "openai/gpt-5-codex");
+
+	const live = resultJson<{ address: string }>(await call(captured, "notes_write", { address: "@model/quirks.md", content: "gpt quirks" }, ctx));
+	assert.equal(live.address, "@model/quirks.md");
+	assert.ok(existsSync(join(root, "models", "gpt-5-codex", "quirks.md")), "@model writes under the provider-stripped model slug");
+
+	// The same note reads back under its absolute address.
+	const absolute = resultRead(await call(captured, "notes_read", { address: "@models/gpt-5-codex/quirks.md" }, ctx));
+	assert.ok(absolute.content.endsWith("gpt quirks"), "the absolute model address names the same home");
+
+	// Another model's home: refused writes, allowed reads.
+	mkdirSync(join(root, "models", "claude-sonnet-4-5"), { recursive: true });
+	writeFileSync(join(root, "models", "claude-sonnet-4-5", "habits.md"), FRONTMATTER("claude habits"));
+	const refused = resultJson<{ error: string }>(await call(captured, "notes_write", { address: "@models/claude-sonnet-4-5/habits.md", content: "hacked" }, ctx));
+	assert.match(refused.error, /@models\/claude-sonnet-4-5\/ is not your home/);
+	const read = resultRead(await call(captured, "notes_read", { address: "@models/claude-sonnet-4-5/habits.md" }, ctx));
+	assert.ok(read.content.endsWith("claude habits"), "another model's home is readable by explicit address");
+
+	const every = resultJson<{ files: Array<{ address: string }> }>(await call(captured, "notes_list", { pattern: "@models/*/**" }, ctx));
+	assert.deepEqual(every.files.map((file) => file.address).sort(), ["@models/claude-sonnet-4-5/habits.md", "@models/gpt-5-codex/quirks.md"], "a glob scans the model namespace");
+
+	// A model-less session resolves @model to the fallback home.
+	const noModel = context(manager());
+	assert.equal(scopeDir("model", noModel), join(root, "models", "default"), "without ctx.model the model home is 'default'");
+});
+
+test("extension activation migrates the legacy personal/ home to human/ exactly once", () => {
+	const root = freshRoot();
+	mkdirSync(join(root, "personal"));
+	writeFileSync(join(root, "personal", "laws.md"), FRONTMATTER("legacy body"));
+	makeExtension(manager());
+	assert.ok(existsSync(join(root, "human", "laws.md")), "personal/ is renamed to human/ at activation");
+	assert.equal(existsSync(join(root, "personal")), false, "the legacy directory is gone");
+	// A second activation with no legacy dir is a no-op, not an error.
+	makeExtension(manager());
+	assert.ok(existsSync(join(root, "human", "laws.md")));
+});
+
+test("a personal/+human/ conflict warns at activation and never merges", () => {
+	const root = freshRoot();
+	mkdirSync(join(root, "personal"));
+	mkdirSync(join(root, "human"));
+	writeFileSync(join(root, "personal", "a.md"), FRONTMATTER("a"));
+	writeFileSync(join(root, "human", "b.md"), FRONTMATTER("b"));
+	const warnings: string[] = [];
+	const original = console.warn;
+	console.warn = (line: unknown) => warnings.push(String(line));
+	try {
+		makeExtension(manager());
+	} finally {
+		console.warn = original;
+	}
+	assert.ok(warnings.some((line) => line.includes("personal/") && line.includes("human/")), "the conflict is a warning, never a merge");
+	assert.ok(existsSync(join(root, "personal", "a.md")), "the legacy home survives the conflict");
+	assert.ok(existsSync(join(root, "human", "b.md")), "the modern home survives the conflict");
+});
+
+test("the boot identity names the declared agent and the live model", async () => {
+	freshRoot();
+	await withAgent("WaShi!", async () => {
+		const session = manager();
+		const captured = makeExtension(session);
+		const ctx = context(session, undefined, undefined, true, undefined, undefined, "anthropic/claude-sonnet-4-5");
+		runHandlers(captured, "session_start", {}, ctx);
+		const boot = String(captured.sent.at(-1)?.message.content ?? "");
+		assert.ok(boot.includes("Agent name: washi (brain: claude-sonnet-4-5)"), "the identity block resolves both the agent env and the live model");
+	});
+});
+
+test("the boot pocket keeps per-home quotas across all five homes in order", async () => {
+	freshRoot();
+	await withAgent("washi", async () => {
+		const session = manager();
+		const captured = makeExtension(session);
+		const ctx = context(session, undefined, undefined, true, undefined, undefined, "openai/gpt-5-codex");
+		const base = Date.parse("2026-01-01T00:00:00.000Z");
+		const legacy: Array<["session" | "project" | "human", number]> = [["session", 6], ["project", 3], ["human", 3]];
+		for (const [scope, count] of legacy) {
+			for (let index = 0; index < count; index++) {
+				const path = `${scope}-${index}.md`;
+				await call(captured, "notes_write", { path, content: `${scope} body`, scope }, ctx);
+				setUpdatedAt(scope, path, ctx, base + index * 1_000);
+			}
+		}
+		// Agent and model homes have no legacy scope form; their relative addresses land there directly.
+		await call(captured, "notes_write", { address: "@self/agent-0.md", content: "agent body" }, ctx);
+		setUpdatedAt("agent", "agent-0.md", ctx, base);
+		await call(captured, "notes_write", { address: "@self/agent-1.md", content: "agent body" }, ctx);
+		setUpdatedAt("agent", "agent-1.md", ctx, base + 1_000);
+		await call(captured, "notes_write", { address: "@model/model-0.md", content: "model body" }, ctx);
+		setUpdatedAt("model", "model-0.md", ctx, base);
+		await call(captured, "notes_write", { address: "@model/model-1.md", content: "model body" }, ctx);
+		setUpdatedAt("model", "model-1.md", ctx, base + 1_000);
+		runHandlers(captured, "session_start", {}, ctx);
+		const boot = String(captured.sent.at(-1)?.message.content ?? "");
+		for (const name of [
+			"session-5.md", "session-4.md", "session-3.md", "session-2.md", "session-1.md",
+			"@project/project-2.md", "@project/project-1.md",
+			"@human/human-2.md", "@human/human-1.md",
+			"@agents/washi/agent-1.md",
+			"@models/gpt-5-codex/model-1.md",
+		]) assert.ok(boot.includes(name), `${name} stays in the pocket`);
+		for (const name of ["session-0.md", "@project/project-0.md", "@human/human-0.md", "@agents/washi/agent-0.md", "@models/gpt-5-codex/model-0.md"]) {
+			assert.equal(boot.includes(name), false, `${name} is evicted by its home quota`);
+		}
+		assert.ok(boot.indexOf("session-5.md") < boot.indexOf("@project/project-2.md"), "session precedes project");
+		assert.ok(boot.indexOf("@project/project-1.md") < boot.indexOf("@human/human-2.md"), "project precedes human");
+		assert.ok(boot.indexOf("@human/human-1.md") < boot.indexOf("@agents/washi/agent-1.md"), "human precedes agent");
+		assert.ok(boot.indexOf("@agents/washi/agent-1.md") < boot.indexOf("@models/gpt-5-codex/model-1.md"), "agent precedes model");
+	});
 });

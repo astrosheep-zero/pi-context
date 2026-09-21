@@ -7,7 +7,7 @@ import { assertGlobPattern, assertVirtualPath, globToRegExp } from "./model.js";
 import { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "../protocol.js";
 import { isOrigin, isScope, parseNote, serializeNote, stripLeadingFrontmatter, type NoteMeta, type Origin } from "./frontmatter.js";
 import { addressFor } from "./address.js";
-import { physicalPath, scopeDir, type Scope } from "./paths.js";
+import { agentSlug, modelSlug, namespaceSlugs, physicalPath, scopeDir, type Scope } from "./paths.js";
 import { earliestMatchOffsetChars } from "../tool-output.js";
 
 export type { NoteMeta, Origin, Scope };
@@ -32,10 +32,10 @@ export type NoteRow = { address: string; scope: Scope; path: string; meta: NoteM
 export type NoteMatch = { line: number; text: string; offsetChars: number };
 export type NoteSearchRow = { address: string; scope: Scope; path: string; meta: NoteMeta; matches: NoteMatch[] };
 
-const SCOPE_ORDER: readonly Scope[] = ["session", "project", "personal"];
+const SCOPE_ORDER: readonly Scope[] = ["session", "project", "human", "agent", "model"];
 
 function assertScope(value: unknown): Scope {
-	if (!isScope(value)) throw new NoteError("invalid_scope", `scope must be one of session, project, personal (got ${JSON.stringify(value)})`);
+	if (!isScope(value)) throw new NoteError("invalid_scope", `scope must be one of session, project, human, agent, model (got ${JSON.stringify(value)})`);
 	return value;
 }
 
@@ -99,6 +99,52 @@ function frontmatterOf(meta: NoteMeta): string {
 	return serializeNote(meta, "").slice(0, -2);
 }
 
+/** Named agent/model homes are read-only to whoever is not running there. */
+function assertWritableHome(scope: Scope, who: string | undefined, ctx: ExtensionContext): void {
+	if (who === undefined) return;
+	const current = scope === "agent" ? agentSlug(ctx) : modelSlug(ctx);
+	if (who === current) return;
+	const home = scope === "agent" ? `@agents/${who}/` : `@models/${who}/`;
+	throw new NoteError("invalid_scope", `${home} is not your home: writable homes are this session, @project/, @human/, @self/, and the current @model/ home`);
+}
+
+/**
+ * Which homes one call iterates. A pattern whose head is a reserved home narrows the set
+ * before any file is read; `@agents/<name>/` and `@models/<name>/` address one home, a glob
+ * in the name segment scans the whole namespace, and an unknown `@` head matches nothing.
+ * Undefined means the default merged view: session, project, human, your own agent home,
+ * and the current model home.
+ */
+type HomeRef = { scope: Scope; who?: string };
+
+function homesForPattern(pattern: string | undefined): HomeRef[] | undefined {
+	if (!pattern || !pattern.startsWith("@")) return undefined;
+	const head = /^@([^/]+)\//.exec(pattern)?.[1];
+	if (head === "project") return [{ scope: "project" }];
+	if (head === "human") return [{ scope: "human" }];
+	if (head === "self") return [{ scope: "agent" }];
+	if (head === "model") return [{ scope: "model" }];
+	if (head === "agents" || head === "models") {
+		const scope: Scope = head === "agents" ? "agent" : "model";
+		const name = pattern.slice(head.length + 2).split("/")[0] ?? "";
+		if (name.length > 0 && !/[*?]/.test(name)) return [{ scope, who: name }];
+		return namespaceSlugs(head).map((who) => ({ scope, who }));
+	}
+	return [];
+}
+
+/** Relative pattern heads resolve to canonical names, so they match rendered addresses. */
+function normalizePattern(pattern: string | undefined, ctx: ExtensionContext): string | undefined {
+	if (!pattern) return pattern;
+	if (pattern.startsWith("@self/")) return `@agents/${agentSlug(ctx)}/${pattern.slice("@self/".length)}`;
+	if (pattern.startsWith("@model/")) return `@models/${modelSlug(ctx)}/${pattern.slice("@model/".length)}`;
+	return pattern;
+}
+
+function homesFor(ctx: ExtensionContext, opts: { scope?: Scope; who?: string; pattern?: string }): HomeRef[] {
+	if (opts.scope !== undefined) return [{ scope: opts.scope, who: opts.who }];
+	return homesForPattern(opts.pattern) ?? SCOPE_ORDER.map((scope) => ({ scope }));
+}
 /** Line numbers (1-based) of every occurrence of `needle` in `body`. */
 function matchLineNumbers(body: string, needle: string): number[] {
 	const lines: number[] = [];
@@ -112,15 +158,16 @@ function matchLineNumbers(body: string, needle: string): number[] {
 	return lines;
 }
 
-export type WriteOptions = { scope: Scope; origin: Origin; stale?: boolean };
+export type WriteOptions = { scope: Scope; who?: string; origin: Origin; stale?: boolean };
 
 /** Create or overwrite a note; overwrite keeps created_at and every unknown key. */
 export function writeNote(ctx: ExtensionContext, vpath: string, body: string, opts: WriteOptions): { meta: NoteMeta } {
 	assertVirtualPath(vpath);
 	assertWritablePath(vpath);
 	const scope = assertScope(opts.scope);
+	assertWritableHome(scope, opts.who, ctx);
 	const origin = assertOrigin(opts.origin);
-	const path = physicalPath(scope, vpath, ctx);
+	const path = physicalPath(scope, vpath, ctx, opts.who);
 	const now = Date.now();
 	const cleanBody = stripLeadingFrontmatter(body);
 	const existing = existsSync(path) ? parseNote(readFileSync(path, "utf8"), now).meta : undefined;
@@ -149,9 +196,9 @@ export type EditOperation = { oldText: string; newText: string };
 export type EditOptions = { origin?: Origin; stale?: boolean; replaceAll?: boolean };
 
 /** Dream harness mutation: metadata changes still use the store's atomic writer. */
-export function updateNoteMeta(ctx: ExtensionContext, vpath: string, scope: Scope, mutate: (meta: NoteMeta) => void): { meta: NoteMeta; body: string } {
+export function updateNoteMeta(ctx: ExtensionContext, vpath: string, scope: Scope, mutate: (meta: NoteMeta) => void, who?: string): { meta: NoteMeta; body: string } {
 	assertVirtualPath(vpath);
-	const path = physicalPath(scope, vpath, ctx);
+	const path = physicalPath(scope, vpath, ctx, who);
 	if (!existsSync(path)) throw new NoteError("not_found", `note not found: ${vpath}`);
 	const parsed = parseNote(readFileSync(path, "utf8"));
 	const meta = { ...parsed.meta, scope };
@@ -164,14 +211,15 @@ export function updateNoteMeta(ctx: ExtensionContext, vpath: string, scope: Scop
 }
 
 /** Apply body-only edits against one explicit home; origin and stale are its metadata setters. */
-export function editNote(ctx: ExtensionContext, vpath: string, scope: Scope, edits: EditOperation[] | undefined, opts: EditOptions = {}): { meta: NoteMeta; applied: number; resolved_scope: Scope; diff: string } {
+export function editNote(ctx: ExtensionContext, vpath: string, scope: Scope, edits: EditOperation[] | undefined, opts: EditOptions = {}, who?: string): { meta: NoteMeta; applied: number; resolved_scope: Scope; diff: string } {
 	assertVirtualPath(vpath);
 	assertWritablePath(vpath);
+	assertWritableHome(scope, who, ctx);
 	const operations = edits ?? [];
 	if (operations.length === 0 && opts.origin === undefined && opts.stale === undefined) {
 		throw new NoteError("nothing_to_do", "nothing to do: provide edits or at least one of origin, stale");
 	}
-	const path = physicalPath(scope, vpath, ctx);
+	const path = physicalPath(scope, vpath, ctx, who);
 	if (!existsSync(path)) throw new NoteError("not_found", "note not found");
 	const raw = readFileSync(path, "utf8");
 	const { meta, body } = parseNote(raw);
@@ -229,9 +277,9 @@ function accessedMeta(meta: NoteMeta, scope: Scope, now: number): NoteMeta {
 }
 
 /** Read a note and, as a side effect, bump last_accessed/access_count in the file. */
-export function readNote(ctx: ExtensionContext, vpath: string, scope: Scope): { meta: NoteMeta; body: string; text: string; resolvedScope: Scope } | undefined {
+export function readNote(ctx: ExtensionContext, vpath: string, scope: Scope, who?: string): { meta: NoteMeta; body: string; text: string; resolvedScope: Scope } | undefined {
 	assertVirtualPath(vpath);
-	const path = physicalPath(scope, vpath, ctx);
+	const path = physicalPath(scope, vpath, ctx, who);
 	if (!existsSync(path)) return undefined;
 	const now = Date.now();
 	const parsed = parseNote(readFileSync(path, "utf8"), now);
@@ -242,13 +290,14 @@ export function readNote(ctx: ExtensionContext, vpath: string, scope: Scope): { 
 }
 
 /** Merged rows across homes, most recently updated first (address breaks ties). */
-export function listNotes(ctx: ExtensionContext, opts: { scope?: Scope; pattern?: string } = {}): NoteRow[] {
-	const matcher = matcherFor(opts.pattern);
+export function listNotes(ctx: ExtensionContext, opts: { scope?: Scope; who?: string; pattern?: string } = {}): NoteRow[] {
+	const matcher = matcherFor(normalizePattern(opts.pattern, ctx));
 	const rows: NoteRow[] = [];
-	for (const scope of opts.scope === undefined ? SCOPE_ORDER : [opts.scope]) {
-		const root = scopeDir(scope, ctx);
+	for (const home of homesFor(ctx, opts)) {
+		const scope = home.scope;
+		const root = scopeDir(scope, ctx, home.who);
 		for (const path of walkMarkdown(root)) {
-			const address = addressFor(scope, path);
+			const address = addressFor(ctx, scope, path, home.who);
 			if (matcher && !matcher.test(address)) continue;
 			const { meta, body } = parseNote(readFileSync(`${root}/${path}`, "utf8"));
 			meta.scope = scope;
@@ -260,13 +309,14 @@ export function listNotes(ctx: ExtensionContext, opts: { scope?: Scope; pattern?
 }
 
 /** Case-sensitive literal substring search over note bodies, with a match address per line. */
-export function searchNotes(ctx: ExtensionContext, queries: string[], opts: { scope?: Scope; pattern?: string } = {}): NoteSearchRow[] {
-	const matcher = matcherFor(opts.pattern);
+export function searchNotes(ctx: ExtensionContext, queries: string[], opts: { scope?: Scope; who?: string; pattern?: string } = {}): NoteSearchRow[] {
+	const matcher = matcherFor(normalizePattern(opts.pattern, ctx));
 	const rows: NoteSearchRow[] = [];
-	for (const scope of opts.scope === undefined ? SCOPE_ORDER : [opts.scope]) {
-		const root = scopeDir(scope, ctx);
+	for (const home of homesFor(ctx, opts)) {
+		const scope = home.scope;
+		const root = scopeDir(scope, ctx, home.who);
 		for (const path of walkMarkdown(root)) {
-			const address = addressFor(scope, path);
+			const address = addressFor(ctx, scope, path, home.who);
 			if (matcher && !matcher.test(address)) continue;
 			const { meta, body } = parseNote(readFileSync(`${root}/${path}`, "utf8"));
 			meta.scope = scope;

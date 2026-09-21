@@ -11,14 +11,14 @@ const home = () => mkdtempSync(join(tmpdir(), "dream-doctor-"));
 
 test("doctor validates note homes and references without changing files", async () => {
 	const root = home();
-	mkdirSync(join(root, "personal"));
-	writeFileSync(join(root, "personal/a.md"), note());
-	writeFileSync(join(root, "personal/MAP.md"), note("- `a.md`\n- `@personal/a.md`"));
-	const before = readFileSync(join(root, "personal/a.md"));
+	mkdirSync(join(root, "human"));
+	writeFileSync(join(root, "human/a.md"), note());
+	writeFileSync(join(root, "human/MAP.md"), note("- `a.md`\n- `@human/a.md`"));
+	const before = readFileSync(join(root, "human/a.md"));
 	assert.deepEqual(doctor(root), []);
 	assert.equal(await main(["doctor", "--notes-home", root], { runDreamer: async () => { throw new Error("must not run"); } }), 0);
-	assert.deepEqual(readFileSync(join(root, "personal/a.md")), before);
-	assert.deepEqual(readdirSync(root), ["personal"]);
+	assert.deepEqual(readFileSync(join(root, "human/a.md")), before);
+	assert.deepEqual(readdirSync(root), ["human"]);
 });
 
 test("doctor reports layout, metadata, links and locks; never repairs", () => {

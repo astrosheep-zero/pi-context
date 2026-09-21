@@ -10,7 +10,7 @@ import { NoteError, editNote, listNotes, readNote, searchNotes, writeNote } from
 const ORIGIN = Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("self"), Type.Literal("external")], {
 	description: "Where the note's content came from. user: written or dictated by the human. self: written by you, the agent (default). external: anything else — third-party text, tool output, fetched material.",
 }));
-const ADDRESS_DESCRIPTION = "Address forms are bare `<vpath>` for this session, `@project/<vpath>` for this project's home, and `@personal/<vpath>` for the human's cross-project home. `@` means leaving home. Any other `@` prefix, or `@` inside a vpath, is a hard error: legal prefixes are `@project/` and `@personal/`; bare names are the session home. There is no cross-home fallback. Paths reject `..`, absolute paths, and backslashes.";
+const ADDRESS_DESCRIPTION = "Address forms are bare `<vpath>` for this session, `@project/<vpath>` for this project, `@human/<vpath>` for the human's cross-project home, `@self/<vpath>` / `@agents/<name>/<vpath>` for agent homes, and `@model/<vpath>` / `@models/<name>/<vpath>` for model homes. `@self` and `@model` mean the current agent/model; the `<name>` forms name one absolutely. The word after `@` is always one of the reserved home names — names live at the second level, never `@faye/`. `@` means leaving home. Any other `@` prefix, or `@` inside a vpath, is a hard error. There is no cross-home fallback. Paths reject `..`, absolute paths, and backslashes. Homes you do not own (`@agents/<other>/`, `@models/<other>/`) are read-only.";
 
 function failure(error: unknown) {
 	if (error instanceof NoteError) {
@@ -31,7 +31,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 			const content = params.content;
 			try {
 				const destination = assertAddress(params.address);
-				writeNote(ctx, destination.path, content, { scope: destination.scope, origin: (params.origin ?? "self") as Origin, stale: params.stale });
+				writeNote(ctx, destination.path, content, { scope: destination.scope, who: destination.who, origin: (params.origin ?? "self") as Origin, stale: params.stale });
 				return output({ address: params.address, written: true });
 			} catch (error) { return failure(error); }
 		},
@@ -44,7 +44,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _update, ctx) {
 			try {
 				const destination = assertAddress(params.address);
-				const { applied, diff } = editNote(ctx, destination.path, destination.scope, params.edits, { origin: params.origin as Origin | undefined, stale: params.stale, replaceAll: params.replace_all });
+				const { applied, diff } = editNote(ctx, destination.path, destination.scope, params.edits, { origin: params.origin as Origin | undefined, stale: params.stale, replaceAll: params.replace_all }, destination.who);
 				return output({ address: params.address, applied, diff });
 			} catch (error) { return failure(error); }
 		},
@@ -58,7 +58,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 			let note: ReturnType<typeof readNote>;
 			try {
 				const destination = assertAddress(params.address);
-				note = readNote(ctx, destination.path, destination.scope);
+				note = readNote(ctx, destination.path, destination.scope, destination.who);
 			} catch (error) { return failure(error); }
 			if (!note) return output({ error: "note not found", address: params.address });
 			const text = note.text;
@@ -73,7 +73,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 
 	pi.registerTool(defineTool({
 		name: "notes_list", label: "Notes list",
-		description: `List note files as rows carrying address, updated_at, and stale, most recently updated first. ${ADDRESS_DESCRIPTION} All three homes are merged. A glob pattern (* within a path segment, ** across segments) filters full address strings: *.md is session-only, @project/** is project-only, and ** covers every home.`,
+		description: `List note files as rows carrying address, updated_at, and stale, most recently updated first. ${ADDRESS_DESCRIPTION} Listings merge your five reachable homes: this session, @project/, @human/, your @self home, and the current @model home; other agents and models appear only under an explicit glob (@agents/<name>/**, @models/<name>/**, or a glob in the name segment to scan a whole namespace).`,
 		parameters: Type.Object({ pattern: nullableString(), cursor: cursor(), max_results: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			let rows: ReturnType<typeof listNotes>;
@@ -89,7 +89,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 
 	pi.registerTool(defineTool({
 		name: "notes_search", label: "Notes search",
-		description: `Case-sensitive literal substring search over note bodies; query is one string or several (OR), each matched line appears once. ${ADDRESS_DESCRIPTION} All three homes are merged and every entry carries its full address. Patterns glob over full address strings. Each file entry carries matches_total, its full match count before capping. Each match carries line, text, offset_chars (a code-point offset into the serialized note returned by notes_read, at the earliest query match), and truncated.`,
+		description: `Case-sensitive literal substring search over note bodies; query is one string or several (OR), each matched line appears once. ${ADDRESS_DESCRIPTION} Search merges the same five reachable homes as notes_list; explicit globs reach other agents and models. Patterns glob over full address strings. Each file entry carries matches_total, its full match count before capping. Each match carries line, text, offset_chars (a code-point offset into the serialized note returned by notes_read, at the earliest query match), and truncated.`,
 		parameters: Type.Object({ query: searchQuery(), pattern: nullableString(), cursor: cursor(), max_matches_per_file: positiveInteger(), max_files: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const queries = searchQueries(params.query);

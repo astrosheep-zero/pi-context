@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export type Scope = "session" | "project" | "personal";
+export type Scope = "session" | "project" | "human" | "agent" | "model";
 
 /** Physical home of the on-disk note store: $PI_NOTES_HOME or ~/.agents/notes. */
 export function notesRoot(): string {
@@ -44,11 +44,68 @@ function sessionId(ctx: ExtensionContext): string {
 	return ctx.sessionManager.getSessionId();
 }
 
-/** Absolute directory holding every note of one scope. */
-export function scopeDir(scope: Scope, ctx: ExtensionContext): string {
-	if (scope === "personal") return join(notesRoot(), "personal");
+/** The one legal home-name shape: lowercase [a-z0-9-] runs separated by single dashes. */
+export const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * Identity slugs: one declared name per home, never detected from prompt content.
+ * `PI_NOTES_AGENT` declares who is running (default "root"); the model slug derives
+ * from the live model id, provider prefix stripped. Both slugified to [a-z0-9-].
+ */
+export function slugify(value: string): string {
+	const slug = value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+	return slug.length > 0 ? slug : "root";
+}
+
+/** The current agent's home name: the launch-declared identity, defaulting to "root". */
+export function agentSlug(_ctx: ExtensionContext): string {
+	return slugify(process.env.PI_NOTES_AGENT ?? "root");
+}
+
+/** The current model's home name, live-resolved from ctx.model; "default" when unknown. */
+export function modelSlug(ctx: ExtensionContext): string {
+	const id = ctx.model?.id;
+	if (!id) return "default";
+	return slugify(id.split("/").pop() ?? id);
+}
+
+/**
+ * Absolute directory holding every note of one scope. `who` names an agent or model
+ * home absolutely; omitted, the current one resolves (agent from PI_NOTES_AGENT,
+ * model live from ctx.model).
+ */
+export function scopeDir(scope: Scope, ctx: ExtensionContext, who?: string): string {
+	if (scope === "human") return join(notesRoot(), "human");
 	if (scope === "project") return join(notesRoot(), "project", projectKey(ctx.cwd));
+	if (scope === "agent") return join(notesRoot(), "agents", who ?? agentSlug(ctx));
+	if (scope === "model") return join(notesRoot(), "models", who ?? modelSlug(ctx));
 	return join(sessionHomesRoot(), sessionId(ctx));
+}
+
+/**
+ * One-time migration of the pre-v0.25 `personal/` home to `human/`. Runs at extension
+ * activation; returns a warning string when both directories exist (no auto-merge),
+ * undefined otherwise. Old note bodies are history, not addresses, and stay untouched.
+ */
+export function migrateLegacyHomes(home = notesRoot()): string | undefined {
+	const legacy = join(home, "personal");
+	const modern = join(home, "human");
+	if (!existsSync(legacy)) return undefined;
+	if (existsSync(modern)) return "both personal/ and human/ exist under the notes home; migrate by hand, no automatic merge";
+	renameSync(legacy, modern);
+	return undefined;
+}
+
+/** Every existing home directory of the agents/ or models/ namespace, as slugs. */
+export function namespaceSlugs(namespace: "agents" | "models", home = notesRoot()): string[] {
+	try {
+		return readdirSync(join(home, namespace), { withFileTypes: true })
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => entry.name)
+			.sort();
+	} catch {
+		return [];
+	}
 }
 
 /**
@@ -60,6 +117,6 @@ export function noteFileName(vpath: string): string {
 }
 
 /** Absolute file path for a virtual path in a scope. Callers validate the vpath first. */
-export function physicalPath(scope: Scope, vpath: string, ctx: ExtensionContext): string {
-	return join(scopeDir(scope, ctx), ...noteFileName(vpath).split("/"));
+export function physicalPath(scope: Scope, vpath: string, ctx: ExtensionContext, who?: string): string {
+	return join(scopeDir(scope, ctx, who), ...noteFileName(vpath).split("/"));
 }

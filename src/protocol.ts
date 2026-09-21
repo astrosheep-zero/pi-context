@@ -9,7 +9,9 @@ export const RESET_V2 = "reset-v2";
 export const MAX_NOTE_BYTES = 1_000_000;
 export const POCKET_SESSION_LIMIT = 5;
 export const POCKET_PROJECT_LIMIT = 2;
-export const POCKET_PERSONAL_LIMIT = 2;
+export const POCKET_HUMAN_LIMIT = 2;
+export const POCKET_AGENT_LIMIT = 1;
+export const POCKET_MODEL_LIMIT = 1;
 // Write-time cap on a virtual note path. Deliberately NOT enforced by assertVirtualPath:
 // notesFromSession replays already-persisted operations, which must keep loading sessions
 // that contain a longer legacy path. Reads and replay stay un-capped.
@@ -51,10 +53,12 @@ Use get_context_remaining to see how much of the window is left. When it runs ou
 
 If <context_window> lists a Previous context window id, a reset just happened and the old conversation is not included. Read your note checkpoint first, then recover details through history_*: history_read directly when you know the window and item IDs, history_list or history_search to find them when you don't.
 
-Your notes live in three homes: this session (bare names), this project (@project/<vpath>), the human across projects (@personal/<vpath>). @ means leaving home — and homes don't visit each other: there is no cross-home fallback.
+Notes live in five homes, and the word after @ is always one of their reserved names — your own name and other people's names live at the second level (@agents/faye/, never @faye/). Bare names are this session; @project/<vpath> is this project's workspace; @human/<vpath> is the human's cross-project home; @self/<vpath> and @agents/<name>/<vpath> are agent homes; @model/<vpath> and @models/<name>/<vpath> are model homes. @self and @model are the only relative forms — the current agent, the current model — and listings never show them, only the resolved name. There is no cross-home fallback.
 Session notes belong to this trip — the goal, the progress, the loose ends. The next window of THIS trip wakes to them; once the trip is over, nobody does.
 @project notes hold facts about this project — architecture, conventions, workflows, deployment and environment details — for whoever works here next.
-@personal notes hold the human's durable preferences and standing rules, plus lessons that apply across projects. Duration does not make a note personal; its stated scope must already be broader than the project or conversation at hand. When the intended scope is unclear, keep the note in the narrowest stated scope rather than widening it.
+@human notes hold the human's durable preferences and standing rules, plus lessons that apply across projects — for every agent that serves this human, whoever is running. You write there as the human's scribe; what the human dictates carries origin: user. When the intended scope is unclear, keep the note in the narrowest stated scope rather than widening it.
+@self notes are yours — your voice, your lessons, your gripes — for the next run of whoever you are. Other agents read yours by explicit address and never write them; you read theirs the same way. A note only its author would ever need belongs here, not in @human.
+@model notes capture the substrate — how the current model actually behaves: context honesty, tool quirks, fallback patterns. @model resolves live, so what you learn on one model is filed under that model even when a fallback moves you mid-window.
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const WARNING_PROMPT =

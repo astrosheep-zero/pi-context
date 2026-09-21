@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join, relative } from "node:path";
-import { assertAddress } from "../notes/address.js";
+import { ADDRESS_FORMS, assertAddress } from "../notes/address.js";
+import { SLUG_PATTERN } from "../notes/paths.js";
 
 /** Read-only diagnostics. Never follows symlinks or acquires/removes a dream lock. */
 export function doctor(home: string): string[] {
@@ -41,10 +42,17 @@ export function doctor(home: string): string[] {
 			if (!address.startsWith("@") && basename(path) !== "MAP.md") continue;
 			try {
 				const parsed = assertAddress(address);
-				const targetHome = parsed.scope === "personal" ? join(home, "personal") : parsed.scope === "project" ? project : root;
+				// Relative homes (@self/, @model/) name whoever is running; a static doctor
+				// cannot resolve them, so only absolute links are checked.
+				if ((parsed.scope === "agent" || parsed.scope === "model") && parsed.who === undefined) continue;
+				const targetHome = parsed.scope === "human" ? join(home, "human")
+					: parsed.scope === "project" ? project
+					: parsed.scope === "agent" ? join(home, "agents", parsed.who!)
+					: parsed.scope === "model" ? join(home, "models", parsed.who!)
+					: root;
 				if (!targetHome) { report(path, `${address}: project context unavailable; use a resolvable reference`); continue; }
 				if (!existsSync(join(targetHome, parsed.path))) report(path, `${address}: target missing; update or remove the reference`);
-			} catch { report(path, `${address}: invalid address; use bare, @project/ or @personal/ addresses`); }
+			} catch { report(path, `${address}: invalid address; ${ADDRESS_FORMS}`); }
 		}
 	};
 	const walk = (dir: string, root: string, project?: string) => {
@@ -64,14 +72,27 @@ export function doctor(home: string): string[] {
 		for (const name of readdirSync(home)) {
 			const path = join(home, name);
 			inspect(path, () => {
-				if (name === "global") { report(path, "legacy home; manually migrate to personal/ without overwriting existing files"); return; }
+				if (name === "global") { report(path, "legacy home; manually migrate to human/ without overwriting existing files"); return; }
+				if (name === "personal") { report(path, "legacy home; migrate to human/ (rename the directory), merging by hand if human/ already exists"); return; }
 				if (name === ".dream.lock") {
 					const valid = lstatSync(path).isFile() && /^[1-9]\d* [\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}\s*$/i.test(readFileSync(path, "utf8"));
 					report(path, `${valid ? "lock present" : "malformed lock"}; verify no dream is running before manual removal; liveness not inferred`);
 					return;
 				}
 				if ([".git", "dreams", "snapshots", "trash", ".dream.lock.last-run"].includes(name)) return;
-				if (name === "personal") { if (directory(path)) walk(path, path); return; }
+				if (name === "human") { if (directory(path)) walk(path, path); return; }
+				if (name === "agents" || name === "models") {
+					if (!directory(path)) return;
+					for (const slug of readdirSync(path)) {
+						const dir = join(path, slug);
+						inspect(dir, () => {
+							if (!SLUG_PATTERN.test(slug)) report(dir, `invalid ${name.slice(0, -1)} slug; expected [a-z0-9-]`);
+							if (!directory(dir)) return;
+							walk(dir, dir);
+						});
+					}
+					return;
+				}
 				if (name === "project" || name === "pi") {
 					if (!directory(path)) return;
 					const homes = name === "pi" ? join(path, "session") : path;
@@ -89,7 +110,7 @@ export function doctor(home: string): string[] {
 					}
 					return;
 				}
-				report(path, "unexpected root entry; expected personal/, project/, pi/session/ or dream artifacts");
+				report(path, "unexpected root entry; expected human/, project/, agents/, models/, pi/session/ or dream artifacts");
 			});
 		}
 	});

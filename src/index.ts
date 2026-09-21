@@ -6,6 +6,7 @@ import { deriveThresholds, mergePiContextSettings } from "./thresholds.js";
 import { STATE_TYPE, NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, WARNING_TYPE, RESET_MARKER_TYPE, CONTINUATION_TYPE, RESET_V2, MAX_NOTE_BYTES, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, WARNING_RUNWAY_TOKENS, RESET_SUMMARY, CONTINUATION, WARNING_PROMPT } from "./protocol.js";
 import { historyFromSession, hasWindowMessage, currentWindowId, resetV2WindowId, rootWindowId, windowIdOf } from "./history.js";
 import { assertVirtualPath } from "./notes/model.js";
+import { migrateLegacyHomes } from "./notes/paths.js";
 import { bootBlock } from "./prompts.js";
 export { historyFromSession } from "./history.js";
 export { notesFromSession } from "./notes/model.js";
@@ -17,6 +18,10 @@ import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function piContext(pi: ExtensionAPI) {
 	let enabled = true;
+	// One-time layout migration (pre-v0.25 personal/ → human/); a conflict warning goes to
+	// the debug log, never into a prompt, so the boot head stays cache-stable.
+	const migrationWarning = migrateLegacyHomes();
+	if (migrationWarning) console.warn(`pi-context: ${migrationWarning}`);
 	registerBudget(pi, () => enabled);
 	registerWarning(pi, () => enabled);
 
