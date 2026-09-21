@@ -86,31 +86,19 @@ type ReadResult = { header: string; content: string; offset_chars: number; total
 type SearchHit = { item_id: string; truncated: boolean; total_chars: number; truncated_content: string; match_offset_chars: number };
 type Match = { line: number; text: string; truncated: boolean; offset_chars: number };
 
-/** Decode a raw notes or history read without including its metadata in the payload. */
+/** Decode either raw read through the shared READ WINDOW grammar without including metadata in the payload. */
 function resultRead(result: AgentToolResult<unknown>): ReadResult {
 	const text = result.content[0];
 	assert.ok(text && text.type === "text", "read result carries text");
-	const note = /^(--- READ WINDOW ---\naddress: [^\n]*\nchars: \[(\d+),(\d+)\) of (\d+)\nnext_offset_chars: (null|\d+)\n)\n/.exec(text.text);
-	if (note) {
-		const header = note[1]!;
-		const content = text.text.slice(note[0].length);
-		const offset_chars = Number(note[2]);
-		const end = Number(note[3]);
-		const total_chars = Number(note[4]);
-		const next_offset_chars = note[5] === "null" ? null : Number(note[5]);
-		assert.equal([...content].length, end - offset_chars, "READ WINDOW range matches the delivered payload");
-		return { header, content, offset_chars, total_chars, next_offset_chars };
-	}
-	const newline = text.text.indexOf("\n");
-	assert.ok(newline !== -1, "raw read carries a header line and a payload");
-	const header = text.text.slice(0, newline);
-	const content = text.text.slice(newline + 1);
-	const match = header.match(/ · chars (\d+)-(\d+) of (\d+) · (end|continue at offset_chars=(\d+))/);
-	assert.ok(match, `read header names the char range and resume cursor: ${header}`);
-	const offset_chars = Number(match[1]);
-	const total_chars = Number(match[3]);
-	const next_offset_chars = match[4] === "end" ? null : Number(match[5]);
-	assert.equal([...content].length, Number(match[2]) - offset_chars, "the header range matches the delivered payload");
+	const block = /^(--- READ WINDOW ---\n(?:[a-z_]+: [^\n]*\n)+chars: \[(\d+),(\d+)\) of (\d+)\nnext_offset_chars: (null|\d+)\n)\n/.exec(text.text);
+	assert.ok(block, "raw read carries one READ WINDOW block followed by exactly one blank line");
+	const header = block[1]!;
+	const content = text.text.slice(block[0].length);
+	const offset_chars = Number(block[2]);
+	const end = Number(block[3]);
+	const total_chars = Number(block[4]);
+	const next_offset_chars = block[5] === "null" ? null : Number(block[5]);
+	assert.equal([...content].length, end - offset_chars, "READ WINDOW range matches the delivered payload");
 	return { header, content, offset_chars, total_chars, next_offset_chars };
 }
 

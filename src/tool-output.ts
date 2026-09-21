@@ -115,22 +115,14 @@ export function readCharacterWindow<T>(text: string, offsetChars: number | undef
 }
 
 /**
- * One-line bracketed header preceding a raw character-window payload: the identity, the
- * delivered char range, and either the resume cursor or `end`.
+ * Fixed metadata block preceding any raw character-window payload. Callers supply their
+ * source identity fields in wire order; range and continuation semantics are shared.
  */
-export function characterWindowHeader(identity: string, window: CharacterWindow, tail = ""): string {
-	// The range end is offset + delivered count, never `total_chars`: a read resolved past the
-	// end delivers zero characters there, and the header must not render an inverted range.
-	const end = window.offset_chars + Array.from(window.content).length;
-	const resume = window.next_offset_chars === null ? "end" : `continue at offset_chars=${window.next_offset_chars}`;
-	return `[${identity} · chars ${window.offset_chars}-${end} of ${window.total_chars} · ${resume}${tail}]`;
-}
-
-/** Fixed metadata block preceding a raw notes_read character window. */
-export function noteReadWindowBlock(address: string, window: CharacterWindow): string {
+export function readWindowBlock(identity: ReadonlyArray<readonly [string, string]>, window: CharacterWindow): string {
 	const end = window.offset_chars + Array.from(window.content).length;
 	const next = window.next_offset_chars === null ? "null" : String(window.next_offset_chars);
-	return `--- READ WINDOW ---\naddress: ${address}\nchars: [${window.offset_chars},${end}) of ${window.total_chars}\nnext_offset_chars: ${next}\n`;
+	const fields = identity.map(([name, value]) => `${name}: ${value}`).join("\n");
+	return `--- READ WINDOW ---\n${fields}\nchars: [${window.offset_chars},${end}) of ${window.total_chars}\nnext_offset_chars: ${next}\n`;
 }
 
 /**

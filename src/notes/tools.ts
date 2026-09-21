@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { localIso } from "./model.js";
-import { DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS, middleTruncate, noteReadWindowBlock, output, outputRaw, page, prefixFit, readCharacterWindow, withinTextBudget } from "../tool-output.js";
+import { DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS, middleTruncate, output, outputRaw, page, prefixFit, readCharacterWindow, readWindowBlock, withinTextBudget } from "../tool-output.js";
 import { cursor, nullableString, positiveInteger, searchQueries, searchQuery } from "../tool-schema.js";
 import { assertAddress } from "./address.js";
 import { type Origin } from "./frontmatter.js";
@@ -52,7 +52,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 
 	pi.registerTool(defineTool({
 		name: "notes_read", label: "Notes read",
-		description: `Read a character window of a note file, frontmatter included. ${ADDRESS_DESCRIPTION} offset_chars is the code-point offset to start from (default 0) — a negative value counts back from the end — and limit_chars caps the window (default ${DEFAULT_READ_WINDOW_CHARS}, max ${MAX_READ_WINDOW_CHARS}). Each response delivers the longest fitting prefix of that window: concatenate only the content after its READ WINDOW block to reconstruct the note.`,
+		description: `Read a character window of a note file, frontmatter included. ${ADDRESS_DESCRIPTION} offset_chars is the code-point offset to start from (default 0) — a negative value counts back from the end — and limit_chars caps the window (default ${DEFAULT_READ_WINDOW_CHARS}, max ${MAX_READ_WINDOW_CHARS}). Each response delivers the longest fitting prefix of that window in the shared READ WINDOW block: concatenate only the content after the block to reconstruct the note.`,
 		parameters: Type.Object({ address: Type.String(), offset_chars: Type.Optional(Type.Integer({ description: "Code-point offset to start from (default 0). A negative value counts back from the end; the response echoes the resolved absolute offset. Pass the previous next_offset_chars back unchanged to continue." })), limit_chars: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_READ_WINDOW_CHARS, description: `Largest requested window in code points (default ${DEFAULT_READ_WINDOW_CHARS}). A window too large for the wire budget is cut short; next_offset_chars names where the next read resumes.` })) }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			let note: ReturnType<typeof readNote>;
@@ -66,7 +66,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 			if (typeof params.offset_chars === "number" && params.offset_chars > totalChars) return output({ error: `offset_chars ${params.offset_chars} is past the end: the note has ${totalChars} chars; the largest legal offset is ${totalChars} (an empty end-read)`, address: params.address, offset_chars: params.offset_chars, total_chars: totalChars });
 			return readCharacterWindow(text, params.offset_chars, params.limit_chars, (window) => {
 				const { content, ...rest } = window;
-				return outputRaw(noteReadWindowBlock(params.address, window), content, { address: params.address, ...rest });
+				return outputRaw(readWindowBlock([["address", params.address]], window), content, { address: params.address, ...rest });
 			}, (result) => withinTextBudget(result.content[0].text));
 		},
 	}));

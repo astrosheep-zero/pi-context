@@ -215,7 +215,7 @@ export function assertWithinBudget(result: AgentToolResult<unknown>, message: st
 	assert.ok(bytes <= TOOL_OUTPUT_MAX_BYTES, `${message}: ${bytes} bytes over the ${TOOL_OUTPUT_MAX_BYTES}-byte budget`);
 }
 
-/** Decoded raw read response: either a notes READ WINDOW block or history's bracketed header. */
+/** Decoded raw read response using the shared READ WINDOW grammar. */
 export type ReadWindow = {
 	header: string;
 	content: string;
@@ -225,32 +225,19 @@ export type ReadWindow = {
 	details: Record<string, unknown>;
 };
 
-/** Decode a raw notes or history read without including its metadata in the payload. */
+/** Decode either raw read without including its shared metadata block in the payload. */
 export function resultRead(result: AgentToolResult<unknown>): ReadWindow {
 	const text = result.content[0];
 	assert.ok(text && text.type === "text", "read result carries text");
-	const note = /^(--- READ WINDOW ---\naddress: [^\n]*\nchars: \[(\d+),(\d+)\) of (\d+)\nnext_offset_chars: (null|\d+)\n)\n/.exec(text.text);
-	if (note) {
-		const header = note[1]!;
-		const content = text.text.slice(note[0].length);
-		const offset_chars = Number(note[2]);
-		const end = Number(note[3]);
-		const total_chars = Number(note[4]);
-		const next_offset_chars = note[5] === "null" ? null : Number(note[5]);
-		assert.equal(Array.from(content).length, end - offset_chars, "READ WINDOW range matches the delivered payload");
-		return { header, content, offset_chars, total_chars, next_offset_chars, details: (result.details ?? {}) as Record<string, unknown> };
-	}
-	const newline = text.text.indexOf("\n");
-	assert.ok(newline !== -1, "raw read carries a header line and a payload");
-	const header = text.text.slice(0, newline);
-	const content = text.text.slice(newline + 1);
-	const match = header.match(/ · chars (\d+)-(\d+) of (\d+) · (end|continue at offset_chars=(\d+))/);
-	assert.ok(match, `read header names the char range and resume cursor: ${header}`);
-	const offset_chars = Number(match[1]);
-	const end = Number(match[2]);
-	const total_chars = Number(match[3]);
-	const next_offset_chars = match[4] === "end" ? null : Number(match[5]);
-	assert.equal(Array.from(content).length, end - offset_chars, "the header range matches the delivered payload");
+	const block = /^(--- READ WINDOW ---\n(?:[a-z_]+: [^\n]*\n)+chars: \[(\d+),(\d+)\) of (\d+)\nnext_offset_chars: (null|\d+)\n)\n/.exec(text.text);
+	assert.ok(block, "raw read carries one READ WINDOW block followed by exactly one blank line");
+	const header = block[1]!;
+	const content = text.text.slice(block[0].length);
+	const offset_chars = Number(block[2]);
+	const end = Number(block[3]);
+	const total_chars = Number(block[4]);
+	const next_offset_chars = block[5] === "null" ? null : Number(block[5]);
+	assert.equal(Array.from(content).length, end - offset_chars, "READ WINDOW range matches the delivered payload");
 	return { header, content, offset_chars, total_chars, next_offset_chars, details: (result.details ?? {}) as Record<string, unknown> };
 }
 
@@ -906,7 +893,9 @@ test("history_read delivers a prefix and next_offset_chars names the delivered c
 	assert.equal(read.content.includes("…"), false, "no marker is appended to the payload");
 	assert.ok(original.startsWith(read.content), "the delivered text is a prefix of the item");
 	assert.equal(read.total_chars, original.length);
-	assert.deepEqual(Object.keys(read.details), ["window_id", "item_id", "offset_chars", "total_chars", "next_offset_chars", "limit_chars"], "history_read details carries exactly the slim window metadata");
+	assert.equal(read.header, `--- READ WINDOW ---\nwindow_id: ${historyFromSession(ctx)[0]!.windowId}\nitem_id: ${id}\nchars: [0,${read.next_offset_chars}) of ${read.total_chars}\nnext_offset_chars: ${read.next_offset_chars}\n`, "the paged history block names identities, half-open range, and resume cursor");
+	assert.deepEqual(Object.keys(read.details), ["window_id", "item_id", "offset_chars", "total_chars", "next_offset_chars"], "history_read details carries exactly the raw window identity and cursor metadata");
+	assert.equal("limit_chars" in read.details, false, "history_read details omits the request cap");
 	assert.equal("content" in read.details, false, "details never duplicates the payload");
 	assert.equal(read.next_offset_chars, read.offset_chars + Array.from(read.content).length, "the cursor is offset plus delivered code points");
 	assert.ok(read.next_offset_chars !== null && read.next_offset_chars < read.total_chars, "the cursor points at the first undelivered character");
@@ -918,6 +907,7 @@ test("history_read delivers a prefix and next_offset_chars names the delivered c
 		const page = resultRead(
 			await call(captured, "history_read", { window_id: historyFromSession(ctx)[0]!.windowId, item_id: id, offset_chars: offset, limit_chars: 50000 }, ctx),
 		);
+		assert.equal(page.header, `--- READ WINDOW ---\nwindow_id: ${historyFromSession(ctx)[0]!.windowId}\nitem_id: ${id}\nchars: [${page.offset_chars},${page.offset_chars + Array.from(page.content).length}) of ${page.total_chars}\nnext_offset_chars: ${page.next_offset_chars}\n`, "every history page retains the exact shared READ WINDOW block");
 		assert.equal(page.next_offset_chars, page.offset_chars + Array.from(page.content).length < page.total_chars ? page.offset_chars + Array.from(page.content).length : null, "the cursor is offset plus delivered, null only at item end");
 		parts.push(page.content);
 		next = page.next_offset_chars;
@@ -1996,6 +1986,8 @@ test("argument footguns die loudly and tool-run metadata surfaces (A1/A2/A3/B4/B
 	assert.equal(noteEnd.content, "", "notes: offset == total is the legal empty end-read");
 	assert.equal(noteEnd.next_offset_chars, null, "notes: the end-read terminates");
 	assert.equal(noteEnd.header, `--- READ WINDOW ---\naddress: a.md\nchars: [${noteTotal},${noteTotal}) of ${noteTotal}\nnext_offset_chars: null\n`, "notes: empty end-read retains the exact READ WINDOW block");
+	const itemFull = resultRead(await call(captured, "history_read", { window_id: windowId, item_id: target.item_id }, ctx));
+	assert.equal(itemFull.header, `--- READ WINDOW ---\nwindow_id: ${windowId}\nitem_id: ${target.item_id}\nchars: [0,11) of 11\nnext_offset_chars: null\n`, "history: a fitting read retains the exact shared READ WINDOW block");
 	const itemPastEnd = resultJson<{ error?: string; offset_chars?: number; total_chars?: number; window_id?: string; item_id?: string }>(
 		await call(captured, "history_read", { window_id: windowId, item_id: target.item_id, offset_chars: 12 }, ctx),
 	);
@@ -2004,7 +1996,7 @@ test("argument footguns die loudly and tool-run metadata surfaces (A1/A2/A3/B4/B
 	assert.equal(itemPastEnd.item_id, target.item_id, "history: the error echoes the item_id");
 	const itemEnd = resultRead(await call(captured, "history_read", { window_id: windowId, item_id: target.item_id, offset_chars: 11 }, ctx));
 	assert.equal(itemEnd.content, "", "history: offset == total is the legal empty end-read");
-	assert.equal(itemEnd.next_offset_chars, null, "history: the end-read terminates");
+	assert.equal(itemEnd.header, `--- READ WINDOW ---\nwindow_id: ${windowId}\nitem_id: ${target.item_id}\nchars: [11,11) of 11\nnext_offset_chars: null\n`, "history: empty end-read retains the exact READ WINDOW block");
 
 	// A3: editing a missing note is the typed not-found arm; write still creates it.
 	const editMissing = resultJson<{ error?: string; path?: string }>(await call(captured, "notes_edit", { path: "missing.md", stale: true }, ctx));

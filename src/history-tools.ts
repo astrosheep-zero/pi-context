@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { output, outputRaw, page, middleTruncate, prefixFit, earliestMatchOffsetChars, readCharacterWindow, characterWindowHeader, withinTextBudget, DEFAULT_READ_WINDOW_CHARS, HISTORY_PREVIEW_CHARS, MAX_READ_WINDOW_CHARS } from "./tool-output.js";
+import { output, outputRaw, page, middleTruncate, prefixFit, earliestMatchOffsetChars, readCharacterWindow, readWindowBlock, withinTextBudget, DEFAULT_READ_WINDOW_CHARS, HISTORY_PREVIEW_CHARS, MAX_READ_WINDOW_CHARS } from "./tool-output.js";
 import { positiveInteger, recentFirst, nullableString, role, cursor, searchQuery, searchQueries } from "./tool-schema.js";
 import { historyFromSession, filteredItems, visibleItem, allItems, vacuousRoleToolCombo, unknownWindowId } from "./history.js";
 
@@ -61,7 +61,7 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "history_read",
 		label: "History read item",
-		description: "Read a bounded character range from one session item. Each response delivers the longest contiguous prefix of the requested window that fits the wire budget: follow the resume cursor to reconstruct the item exactly. A negative offset_chars counts back from the item's end. Offsets and counts are code points (an emoji or CJK character counts as one). The response is the raw item text behind a one-line [bracketed] header naming the item, the resolved offset, the delivered char range, and the resume cursor (continue at offset_chars=N, or end).",
+		description: "Read a bounded character range from one session item. Each response delivers the longest contiguous prefix of the requested window that fits the wire budget: follow the resume cursor to reconstruct the item exactly. A negative offset_chars counts back from the item's end. Offsets and counts are code points (an emoji or CJK character counts as one). The response begins with the shared READ WINDOW block naming window_id and item_id; concatenate only the content after that block to reconstruct the item.",
 		parameters: Type.Object({ item_id: Type.String(), offset_chars: Type.Optional(Type.Integer({ description: "Code-point offset to start from. A negative value counts back from the end; the response echoes the resolved absolute offset. Pass the previous next_offset_chars back unchanged to continue." })), limit_chars: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_READ_WINDOW_CHARS, description: `Largest requested window in code points (default ${DEFAULT_READ_WINDOW_CHARS}). A window too large for the wire budget is cut short; next_offset_chars names where the next read resumes.` })), window_id: Type.String() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const item = allItems(ctx).find((candidate) => candidate.windowId === params.window_id && candidate.itemId === params.item_id);
@@ -72,10 +72,9 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 			if (typeof params.offset_chars === "number" && params.offset_chars > totalChars) {
 				return output({ error: `offset_chars ${params.offset_chars} is past the end: the item has ${totalChars} chars; the largest legal offset is ${totalChars} (an empty end-read)`, window_id: item.windowId, item_id: item.itemId, offset_chars: params.offset_chars, total_chars: totalChars });
 			}
-			const limit_chars = Math.min(params.limit_chars ?? DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS);
 			return readCharacterWindow(item.content, params.offset_chars, params.limit_chars, (window) => {
 				const { content, ...cursor } = window;
-				return outputRaw(characterWindowHeader(`${item.windowId} · item ${item.itemId}`, window), content, { window_id: item.windowId, item_id: item.itemId, ...cursor, limit_chars });
+				return outputRaw(readWindowBlock([["window_id", item.windowId], ["item_id", item.itemId]], window), content, { window_id: item.windowId, item_id: item.itemId, ...cursor });
 			}, (result) => withinTextBudget(result.content[0].text));
 		},
 	}));
