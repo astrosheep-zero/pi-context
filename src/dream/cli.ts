@@ -7,6 +7,7 @@ import { materialGate, timeGate } from "./gates.js";
 import { loadPlaybook, runDreamer, type DreamerSessionFactory, type DreamResult, type DreamWrite } from "./runner.js";
 import { gitCommit } from "./git.js";
 import { readDreamerSettings, type DreamerSetting } from "../thresholds.js";
+import { doctor } from "./doctor.js";
 import { notesRoot } from "../notes/paths.js";
 
 function args(argv: string[]) { const out: Record<string, string | boolean> = {}; for (let i=0;i<argv.length;i++) { const a=argv[i]!; if (a === "--force" || a === "--help") out[a.slice(2)] = true; else if (a.startsWith("--")) out[a.slice(2)] = argv[++i] ?? ""; } return out; }
@@ -55,7 +56,15 @@ function finishDream(home: string, stamp: string, reportPath: string, failed: bo
 }
 
 export async function main(argv = process.argv.slice(2), deps: DreamDependencies = {}): Promise<number> {
-	const a = args(argv); if (a.help) { console.log("dream --notes-home <dir> [--min-hours 24] [--min-sessions 3] [--force] [--dreamer <model pattern>] [--playbook <path>]\nDreamer model: --dreamer wins, else pi-context.dreamer from settings, else the automatic model. Default playbook: <installed package root>/playbook.md; --playbook overrides it."); return 0; }
+	if (argv[0] === "doctor") {
+		const options = args(argv.slice(1));
+		if (options.help) { console.log("dream doctor [--notes-home <dir>] — read-only diagnostics; no model or repairs"); return 0; }
+		const home = resolve(String(options["notes-home"] ?? notesRoot()));
+		const issues = doctor(home);
+		console.log(issues.length ? issues.join("\n") : `dream doctor: OK (${home})`);
+		return issues.length ? 1 : 0;
+	}
+	const a = args(argv); if (a.help) { console.log("dream doctor [--notes-home <dir>] — read-only diagnostics\ndream --notes-home <dir> [--min-hours 24] [--min-sessions 3] [--force] [--dreamer <model pattern>] [--playbook <path>]\nDreamer model: --dreamer wins, else pi-context.dreamer from settings, else the automatic model. Default playbook: <installed package root>/playbook.md; --playbook overrides it."); return 0; }
 	const home = resolve(String(a["notes-home"] ?? notesRoot())); process.env.PI_NOTES_HOME = home; mkdirSync(home, { recursive: true });
 	const lockPath = join(home, ".dream.lock"); const stampPath = lastRunPath(lockPath);
 	const minHours = Number(a["min-hours"] ?? 24); const minSessions = Number(a["min-sessions"] ?? 3);
