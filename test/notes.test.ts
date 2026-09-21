@@ -31,8 +31,21 @@ function setUpdatedAt(scope: Scope, path: string, ctx: ReturnType<typeof context
 }
 
 type Meta = Record<string, unknown>;
-type Listed = { files: Array<{ path: string; scope: string; origin: string; status: string; stale: boolean; size_bytes: number; created_at: string; updated_at: string }> };
-type Searched = { files: Array<{ path: string; scope: string; created_at: string; updated_at: string; matches_total: number; matches: Array<{ line: number; text: string; offset_chars: number; truncated: boolean; total_chars: number }> }> };
+type Listed = { files: Array<{ path: string; address: string; origin: string; status: string; stale: boolean; size_bytes: number; created_at: string; updated_at: string }> };
+type Searched = { files: Array<{ path: string; address: string; created_at: string; updated_at: string; matches_total: number; matches: Array<{ line: number; text: string; offset_chars: number; truncated: boolean; total_chars: number }> }> };
+
+function assertNoPublicScope(value: unknown, label: string): void {
+	if (Array.isArray(value)) {
+		for (const item of value) assertNoPublicScope(item, label);
+		return;
+	}
+	if (!value || typeof value !== "object") return;
+	for (const [key, child] of Object.entries(value)) {
+		assert.notEqual(key, "scope", `${label} does not expose scope`);
+		assert.notEqual(key, "resolved_scope", `${label} does not expose resolved_scope`);
+		assertNoPublicScope(child, label);
+	}
+}
 
 test("exactly the five notes tools are registered; the legacy five are gone", () => {
 	const captured = makeExtension(manager());
@@ -41,6 +54,10 @@ test("exactly the five notes tools are registered; the legacy five are gone", ()
 	}
 	for (const legacy of ["notes_write_file", "notes_append_to_file", "notes_read_file", "notes_search_contents", "notes_list_files"]) {
 		assert.equal(captured.tools.get(legacy), undefined, `${legacy} is unregistered`);
+	}
+	for (const name of ["notes_write", "notes_edit", "notes_read", "notes_list", "notes_search"]) {
+		const description = captured.tools.get(name)?.description ?? "";
+		assert.equal(/resolved_scope|\bscope\b/.test(description), false, `${name} describes home identity through address only`);
 	}
 	assert.equal(captured.tools.get("notes_write")?.executionMode, "sequential");
 	assert.equal(captured.tools.get("notes_edit")?.executionMode, "sequential");
@@ -54,11 +71,12 @@ test("write lands a real markdown file with harness frontmatter and a pure body"
 	const ctx = context(session);
 	const sessionId = session.getSessionId();
 
-	const result = resultJson<{ path: string; scope: string; size_bytes: number; meta: Meta }>(
+	const result = resultJson<{ address: string; size_bytes: number; meta: Meta }>(
 		await call(captured, "notes_write", { path: "a/b.md", content: "hello" }, ctx),
 	);
-	assert.equal(result.scope, "session");
+	assert.equal(result.address, "a/b.md");
 	assert.equal(result.size_bytes, 5);
+	assertNoPublicScope(result, "notes_write");
 	const file = physicalPath("session", "a/b.md", ctx);
 	assert.equal(file, join(root, "pi", "session", sessionId, "a", "b.md"));
 	assert.ok(existsSync(file), "the note is a real file under the session scope dir");
@@ -134,11 +152,12 @@ test("edit is body-scoped with named failures and a replace_all escape hatch", a
 	);
 	assert.equal(missing.edit_index, 0, "a zero-match anchor names the failing edit index");
 
-	const all = resultJson<{ applied: number; resolved_scope: string }>(
+	const all = resultJson<{ address: string; applied: number; diff: string; meta: Meta }>(
 		await call(captured, "notes_edit", { path: "edit.md", edits: [{ oldText: "beta", newText: "B" }], replace_all: true }, ctx),
 	);
 	assert.equal(all.applied, 1);
-	assert.equal(all.resolved_scope, "session", "the success return names the layer the file was resolved from");
+	assert.equal(all.address, "edit.md");
+	assertNoPublicScope(all, "notes_edit");
 	assert.equal(resultRead(await call(captured, "notes_read", { path: "edit.md" }, ctx)).content.endsWith("alpha\nB\nB\ngamma"), true, "replace_all replaces every occurrence");
 
 	// An anchor that occurs only in frontmatter is not matched: edits are body-only.
@@ -184,9 +203,10 @@ test("metadata-only edit updates setters without touching the body", async () =>
 	const ctx = context(session);
 	await call(captured, "notes_write", { path: "journal.md", content: "log line" }, ctx);
 
-	const bare = resultJson<{ applied: number; resolved_scope: string; meta: Meta }>(await call(captured, "notes_edit", { path: "journal.md", stale: true }, ctx));
+	const bare = resultJson<{ address: string; applied: number; meta: Meta }>(await call(captured, "notes_edit", { path: "journal.md", stale: true }, ctx));
 	assert.equal(bare.applied, 0, "a metadata-only update applies no edits");
-	assert.equal(bare.resolved_scope, "session");
+	assert.equal(bare.address, "journal.md");
+	assertNoPublicScope(bare, "notes_edit metadata-only");
 	assert.equal(bare.meta.stale, true, "stale is set without a body edit");
 	assert.equal(resultRead(await call(captured, "notes_read", { path: "journal.md" }, ctx)).content.endsWith("log line"), true, "the body is untouched");
 
@@ -294,7 +314,44 @@ test.skip("scope resolution and movement are superseded by explicit address test
 	assert.equal(readFileSync(physicalPath("personal", "clash.md", ctx), "utf8"), beforePersonal, "the target survives a refused move");
 });
 
-test("list and search merge scopes and carry scope; the path jail rejects escapes", async () => {
+test("all notes tool results use address as the only home identity", async () => {
+	freshRoot();
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const notes = [
+		{ address: "session.md", body: "session needle" },
+		{ address: "@project/project.md", body: "project needle" },
+		{ address: "@personal/personal.md", body: "personal needle" },
+	] as const;
+
+	for (const note of notes) {
+		const written = resultJson<{ address: string }>(await call(captured, "notes_write", { address: note.address, content: note.body }, ctx));
+		assert.equal(written.address, note.address, `notes_write returns ${note.address}`);
+		assertNoPublicScope(written, `notes_write ${note.address}`);
+
+		const edited = resultJson<{ address: string }>(await call(captured, "notes_edit", { address: note.address, edits: [{ oldText: "needle", newText: "match" }] }, ctx));
+		assert.equal(edited.address, note.address, `notes_edit returns ${note.address}`);
+		assertNoPublicScope(edited, `notes_edit ${note.address}`);
+
+		const rawRead = await call(captured, "notes_read", { address: note.address }, ctx);
+		const read = resultRead(rawRead);
+		assert.equal(read.details.address, note.address, `notes_read details returns ${note.address}`);
+		assert.equal(read.header.includes("scope"), false, `notes_read header omits scope for ${note.address}`);
+		assert.equal(read.header.includes("resolved_scope"), false, `notes_read header omits resolved_scope for ${note.address}`);
+		assertNoPublicScope(read.details, `notes_read ${note.address}`);
+	}
+
+	const listed = resultJson<Listed>(await call(captured, "notes_list", { pattern: "**" }, ctx));
+	assert.deepEqual(listed.files.map((file) => file.address).sort(), notes.map((note) => note.address).sort(), "notes_list returns each full address");
+	assertNoPublicScope(listed, "notes_list");
+
+	const searched = resultJson<Searched>(await call(captured, "notes_search", { query: "match", pattern: "**" }, ctx));
+	assert.deepEqual(searched.files.map((file) => file.address), notes.map((note) => note.address).sort(), "notes_search returns each full address");
+	assertNoPublicScope(searched, "notes_search");
+});
+
+test("list and search merge scopes and carry addresses; the path jail rejects escapes", async () => {
 	freshRoot();
 	const session = manager();
 	const captured = makeExtension(session);
@@ -305,7 +362,7 @@ test("list and search merge scopes and carry scope; the path jail rejects escape
 	await call(captured, "notes_write", { path: "three.md", content: "needle three", scope: "personal" }, ctx);
 
 	const listed = resultJson<Listed>(await call(captured, "notes_list", {}, ctx));
-	assert.deepEqual([...listed.files].map((file) => file.scope).sort(), ["personal", "project", "session"], "every merged row carries its scope");
+	assert.deepEqual([...listed.files].map((file) => file.address).sort(), ["@personal/three.md", "@project/two.md", "one.md"], "every merged row carries its full address");
 	for (const row of listed.files) {
 		assert.equal(typeof row.size_bytes, "number");
 		assert.equal(row.origin, "self");
@@ -313,11 +370,12 @@ test("list and search merge scopes and carry scope; the path jail rejects escape
 		assert.equal(row.stale, false);
 	}
 	const scoped = resultJson<Listed>(await call(captured, "notes_list", { scope: "personal" }, ctx));
-	assert.deepEqual(scoped.files.map((file) => file.path), ["three.md"], "a scope filter narrows the set");
+	assert.deepEqual(scoped.files.map((file) => file.path), ["three.md"], "an address-pattern filter narrows the set");
 
 	const searched = resultJson<Searched>(await call(captured, "notes_search", { query: "needle" }, ctx));
 	assert.equal(searched.files.length, 3, "literal search finds matches in every scope");
-	assert.deepEqual([...searched.files].map((file) => file.scope).sort(), ["personal", "project", "session"]);
+	assert.deepEqual([...searched.files].map((file) => file.address).sort(), ["@personal/three.md", "@project/two.md", "one.md"]);
+	for (const row of [...listed.files, ...searched.files]) assertNoPublicScope(row, "notes_list/search");
 	assert.equal(searched.files.every((file) => file.matches_total === 1), true);
 	const hit = searched.files[0]!.matches[0]!;
 	assert.equal(hit.line, 1);
@@ -522,7 +580,8 @@ test("full addresses drive outputs and patterns; on-disk scope is read then drop
 	const legacy = physicalPath("project", "legacy.md", ctx);
 	writeFileSync(legacy, "---\nscope: personal\norigin: self\nstatus: active\nstale: false\ncreated_at: 2026-01-01T00:00:00.000+00:00\nupdated_at: 2026-01-01T00:00:00.000+00:00\nlast_accessed: 2026-01-01T00:00:00.000+00:00\naccess_count: 0\n---\n\nlegacy");
 	const legacyRead = resultRead(await call(captured, "notes_read", { address: "@project/legacy.md" }, ctx));
-	assert.equal(legacyRead.details.scope, "project", "scope is derived from the file location");
+	assert.equal(legacyRead.details.address, "@project/legacy.md", "the read keeps the requested address while deriving its home internally");
+	assertNoPublicScope(legacyRead.details, "legacy notes_read");
 	await call(captured, "notes_edit", { address: "@project/legacy.md", stale: true }, ctx);
 	assert.equal(/^scope:/m.test(readFileSync(legacy, "utf8")), false, "the next write removes legacy scope frontmatter");
 });

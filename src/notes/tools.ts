@@ -13,7 +13,8 @@ const ORIGIN = Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("sel
 const ADDRESS_DESCRIPTION = "Address forms are bare `<vpath>` for this session, `@project/<vpath>` for this project's home, and `@personal/<vpath>` for the human's cross-project home. `@` means leaving home. Any other `@` prefix, or `@` inside a vpath, is a hard error: legal prefixes are `@project/` and `@personal/`; bare names are the session home. There is no cross-home fallback. Paths reject `..`, absolute paths, and backslashes.";
 
 function wireMeta(meta: NoteMeta): Record<string, unknown> {
-	return { ...meta, created_at: localIso(meta.created_at), updated_at: localIso(meta.updated_at), last_accessed: localIso(meta.last_accessed) };
+	const { scope: _scope, ...withoutScope } = meta;
+	return { ...withoutScope, created_at: localIso(meta.created_at), updated_at: localIso(meta.updated_at), last_accessed: localIso(meta.last_accessed) };
 }
 
 function failure(error: unknown) {
@@ -36,20 +37,20 @@ export function registerNotesTools(pi: ExtensionAPI) {
 			try {
 				const destination = assertAddress(params.address);
 				const { meta } = writeNote(ctx, destination.path, content, { scope: destination.scope, origin: (params.origin ?? "self") as Origin, stale: params.stale });
-				return output({ address: params.address, scope: meta.scope, size_bytes: Buffer.byteLength(stripLeadingFrontmatter(content), "utf8"), meta: wireMeta(meta) });
+				return output({ address: params.address, size_bytes: Buffer.byteLength(stripLeadingFrontmatter(content), "utf8"), meta: wireMeta(meta) });
 			} catch (error) { return failure(error); }
 		},
 	}));
 
 	pi.registerTool(defineTool({
 		name: "notes_edit", label: "Notes edit",
-		description: `Edit a note body by exact-text replacement; frontmatter is never editable this way. ${ADDRESS_DESCRIPTION} Each oldText must occur exactly once unless replace_all is set; a multi-match anchor fails with its match line numbers and a zero-match anchor names the failing edit index. edits may be omitted (or empty) for a metadata-only update, which requires at least one of origin/stale. Moving while awake means notes_write at a new address and notes_edit at the old address with stale=true. The success return carries resolved_scope and a diff of what changed.`,
+		description: `Edit a note body by exact-text replacement; frontmatter is never editable this way. ${ADDRESS_DESCRIPTION} Each oldText must occur exactly once unless replace_all is set; a multi-match anchor fails with its match line numbers and a zero-match anchor names the failing edit index. edits may be omitted (or empty) for a metadata-only update, which requires at least one of origin/stale. Moving while awake means notes_write at a new address and notes_edit at the old address with stale=true. The success return carries the address and a diff of what changed.`,
 		parameters: Type.Object({ address: Type.String(), edits: Type.Optional(Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }, { additionalProperties: false }))), origin: ORIGIN, stale: Type.Optional(Type.Boolean()), replace_all: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), executionMode: "sequential",
 		async execute(_id, params, _signal, _update, ctx) {
 			try {
 				const destination = assertAddress(params.address);
-				const { meta, applied, resolved_scope, diff } = editNote(ctx, destination.path, destination.scope, params.edits, { origin: params.origin as Origin | undefined, stale: params.stale, replaceAll: params.replace_all });
-				return output({ address: params.address, applied, resolved_scope, diff, meta: wireMeta(meta) });
+				const { meta, applied, diff } = editNote(ctx, destination.path, destination.scope, params.edits, { origin: params.origin as Origin | undefined, stale: params.stale, replaceAll: params.replace_all });
+				return output({ address: params.address, applied, diff, meta: wireMeta(meta) });
 			} catch (error) { return failure(error); }
 		},
 	}));
@@ -73,19 +74,19 @@ export function registerNotesTools(pi: ExtensionAPI) {
 			const limit_chars = Math.min(params.limit_chars ?? DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS);
 			return readCharacterWindow(text, params.offset_chars, params.limit_chars, (window) => {
 				const { content, ...rest } = window;
-				return outputRaw(characterWindowHeader(params.address, window, ` · ${note.resolvedScope} · created ${created_at} · updated ${updated_at}`), content, { address: params.address, scope: note.resolvedScope, ...rest, limit_chars, created_at, updated_at });
+				return outputRaw(characterWindowHeader(params.address, window, ` · created ${created_at} · updated ${updated_at}`), content, { address: params.address, ...rest, limit_chars, created_at, updated_at });
 			}, (result) => withinTextBudget(result.content[0].text));
 		},
 	}));
 
 	pi.registerTool(defineTool({
 		name: "notes_list", label: "Notes list",
-		description: `List note files as rows carrying address, scope, origin, status, stale, size_bytes, created_at, and updated_at, most recently updated first. ${ADDRESS_DESCRIPTION} All three homes are merged. A glob pattern (* within a path segment, ** across segments) filters full address strings: *.md is session-only, @project/** is project-only, and ** covers every home.`,
+		description: `List note files as rows carrying address, origin, status, stale, size_bytes, created_at, and updated_at, most recently updated first. ${ADDRESS_DESCRIPTION} All three homes are merged. A glob pattern (* within a path segment, ** across segments) filters full address strings: *.md is session-only, @project/** is project-only, and ** covers every home.`,
 		parameters: Type.Object({ pattern: nullableString(), cursor: cursor(), max_results: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			let rows: ReturnType<typeof listNotes>;
 			try { rows = listNotes(ctx, { pattern: params.pattern ?? undefined }); } catch (error) { return failure(error); }
-			const files: Array<{ address: string; scope: string; origin: Origin; status: string; stale: boolean; size_bytes: number; created_at: string; updated_at: string; address_truncated?: boolean }> = rows.map((row) => ({ address: row.address, scope: row.scope, origin: row.meta.origin, status: row.meta.status, stale: row.meta.stale, size_bytes: row.sizeBytes, created_at: localIso(row.meta.created_at), updated_at: localIso(row.meta.updated_at) }));
+			const files: Array<{ address: string; origin: Origin; status: string; stale: boolean; size_bytes: number; created_at: string; updated_at: string; address_truncated?: boolean }> = rows.map((row) => ({ address: row.address, origin: row.meta.origin, status: row.meta.status, stale: row.meta.stale, size_bytes: row.sizeBytes, created_at: localIso(row.meta.created_at), updated_at: localIso(row.meta.updated_at) }));
 			return output(page(files, params.cursor ?? 0, "files", params.max_results, (file, fits) => {
 				if (fits(file)) return file;
 				const address = middleTruncate(file.address, (candidate) => fits({ ...file, address: candidate, address_truncated: true }));
@@ -96,16 +97,16 @@ export function registerNotesTools(pi: ExtensionAPI) {
 
 	pi.registerTool(defineTool({
 		name: "notes_search", label: "Notes search",
-		description: `Case-sensitive literal substring search over note bodies; query is one string or several (OR), each matched line appears once. ${ADDRESS_DESCRIPTION} All three homes are merged and every entry carries its full address and derived scope. Patterns glob over full address strings. Each file entry carries matches_total, its full match count before capping. Each match carries line, text, offset_chars (the body-absolute code-point offset of the earliest match).`,
+		description: `Case-sensitive literal substring search over note bodies; query is one string or several (OR), each matched line appears once. ${ADDRESS_DESCRIPTION} All three homes are merged and every entry carries its full address. Patterns glob over full address strings. Each file entry carries matches_total, its full match count before capping. Each match carries line, text, offset_chars (the body-absolute code-point offset of the earliest match).`,
 		parameters: Type.Object({ query: searchQuery(), pattern: nullableString(), cursor: cursor(), max_matches_per_file: positiveInteger(), max_files: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const queries = searchQueries(params.query);
 			let rows: ReturnType<typeof searchNotes>;
 			try { rows = searchNotes(ctx, queries, { pattern: params.pattern ?? undefined }); } catch (error) { return failure(error); }
 			const maxPerFile = params.max_matches_per_file ?? Number.POSITIVE_INFINITY;
-			const result: Array<{ address: string; scope: string; created_at: string; updated_at: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number; offset_chars: number }>; address_truncated?: boolean }> = rows.map((row) => {
+			const result: Array<{ address: string; created_at: string; updated_at: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; total_chars: number; offset_chars: number }>; address_truncated?: boolean }> = rows.map((row) => {
 				const matches = row.matches.map((match) => ({ line: match.line, text: match.text, truncated: false, total_chars: Array.from(match.text).length, offset_chars: match.offsetChars }));
-				return { address: row.address, scope: row.scope, created_at: localIso(row.meta.created_at), updated_at: localIso(row.meta.updated_at), matches_total: matches.length, matches: matches.slice(0, maxPerFile) };
+				return { address: row.address, created_at: localIso(row.meta.created_at), updated_at: localIso(row.meta.updated_at), matches_total: matches.length, matches: matches.slice(0, maxPerFile) };
 			});
 			const fitFile = (file: (typeof result)[number], fits: (candidate: (typeof result)[number]) => boolean) => {
 				if (fits(file)) return file;

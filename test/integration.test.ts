@@ -411,11 +411,11 @@ test("notes_list is most-recently-updated first across merged scopes", async () 
 	put("project", "c.md", base + 5);
 	put("personal", "e.md", base + 20);
 	const files = async (params: Record<string, unknown>) =>
-		resultJson<{ files: Array<{ address: string; scope: string }> }>(await call(captured, "notes_list", params, ctx)).files;
+		resultJson<{ files: Array<{ address: string }> }>(await call(captured, "notes_list", params, ctx)).files;
 	assert.deepEqual((await files({})).map((file) => file.address), ["@personal/e.md", "a.md", "b.md", "@project/c.md"], "updated_at descending with address ascending as the tiebreak");
 	// A same-path pair in two scopes keeps both rows; equal timestamps tie-break by scope name.
 	put("personal", "a.md", base + 10);
-	assert.deepEqual((await files({})).filter((file) => file.address.endsWith("a.md")).map((file) => file.scope), ["personal", "session"], "equal timestamps tie-break by full address");
+	assert.deepEqual((await files({})).filter((file) => file.address.endsWith("a.md")).map((file) => file.address), ["@personal/a.md", "a.md"], "equal timestamps tie-break by full address");
 	assert.deepEqual((await files({ pattern: "*.md" })).map((file) => file.address), ["a.md", "b.md"], "a bare pattern narrows to the session home");
 });
 
@@ -434,7 +434,6 @@ test("notes are real files that persist across sessions and round-trip Unicode",
 	const read = resultRead(rawRead);
 	assert.equal(read.details.address, "@personal/checkpoint/进度.md");
 	assert.equal(read.content, "Café", "a negative offset reads the body tail in one call");
-	assert.equal(read.details.scope, "personal");
 	const searched = resultJson<{ files: Array<{ path: string; created_at: unknown; updated_at: unknown; matches: Array<{ line: number }> }> }>(
 		await call(restoredCaptured, "notes_search", { query: "Café", scope: "personal" }, restoredCtx),
 	);
@@ -818,8 +817,8 @@ test("an over-budget note is delivered as a prefix and resumed by next_offset_ch
 	assert.ok(first.content.length > 0, "the page is not empty");
 	assert.equal(first.content.includes("…"), false, "the payload is a plain prefix with no marker");
 	assert.ok(first.content.startsWith("---\n"), "the frontmatter is delivered first");
-	assert.equal(first.header, `[huge.md · chars 0-${first.next_offset_chars} of ${first.total_chars} · continue at offset_chars=${first.next_offset_chars} · session · created ${String(first.details.created_at)} · updated ${String(first.details.updated_at)}]`, "the raw header names the address, delivered range, resume cursor, scope and timestamps");
-	assert.deepEqual(Object.keys(first.details).sort(), ["address", "created_at", "limit_chars", "next_offset_chars", "offset_chars", "scope", "total_chars", "updated_at"], "notes_read details carries exactly the slim window metadata plus scope");
+	assert.equal(first.header, `[huge.md · chars 0-${first.next_offset_chars} of ${first.total_chars} · continue at offset_chars=${first.next_offset_chars} · created ${String(first.details.created_at)} · updated ${String(first.details.updated_at)}]`, "the raw header names the address, delivered range, resume cursor, and timestamps");
+	assert.deepEqual(Object.keys(first.details).sort(), ["address", "created_at", "limit_chars", "next_offset_chars", "offset_chars", "total_chars", "updated_at"], "notes_read details carries exactly the slim window metadata plus address");
 	assert.equal("content" in first.details, false, "details never duplicates the payload");
 	assert.equal(first.offset_chars, 0, "the default window starts at the resolved offset 0");
 	// Following the cursor reconstructs frontmatter + body by plain concatenation.
