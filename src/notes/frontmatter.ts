@@ -25,7 +25,7 @@ export type NoteMeta = {
 	[key: string]: unknown;
 };
 
-const SCOPES: readonly Scope[] = ["session", "project", "global"];
+const SCOPES: readonly Scope[] = ["session", "project", "personal"];
 const ORIGINS: readonly Origin[] = ["user", "self", "external"];
 const STATUSES: readonly NoteStatus[] = ["active", "superseded", "pending", "archived"];
 const TIMESTAMP_KEYS = ["created_at", "updated_at", "last_accessed"] as const;
@@ -112,7 +112,7 @@ function parseFrontmatter(raw: string): { fields: Record<string, unknown>; body:
 export function parseNote(raw: string, now = Date.now()): { meta: NoteMeta; body: string } {
 	const { fields, body } = parseFrontmatter(raw);
 	const meta = { ...fields } as Record<string, unknown>;
-	meta.scope = isScope(meta.scope) ? meta.scope : "global";
+	meta.scope = isScope(meta.scope) ? meta.scope : "personal";
 	meta.origin = isOrigin(meta.origin) ? meta.origin : "self";
 	meta.status = isStatus(meta.status) ? meta.status : "active";
 	meta.stale = meta.stale === true;

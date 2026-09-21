@@ -3,7 +3,7 @@ import type { Scope } from "./paths.js";
 
 export type NoteAddress = { scope: Scope; path: string };
 
-const ADDRESS_FORMS = "legal prefixes are @project/ and @global/; bare names are the session home";
+const ADDRESS_FORMS = "legal prefixes are @project/ and @personal/; bare names are the session home";
 
 /**
  * Decode the one public note address into its physical home and virtual path. This is a
@@ -16,9 +16,9 @@ export function assertAddress(value: unknown): NoteAddress {
 	if (value.startsWith("@project/")) {
 		scope = "project";
 		path = value.slice("@project/".length);
-	} else if (value.startsWith("@global/")) {
-		scope = "global";
-		path = value.slice("@global/".length);
+	} else if (value.startsWith("@personal/")) {
+		scope = "personal";
+		path = value.slice("@personal/".length);
 	} else if (value.startsWith("@")) {
 		throw new Error(`invalid note address: ${ADDRESS_FORMS}`);
 	}

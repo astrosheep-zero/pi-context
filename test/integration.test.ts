@@ -181,12 +181,12 @@ export async function call(
 	if (noteCall && "path" in params && !("address" in params)) {
 		const { path, scope, ...rest } = params;
 		assert.equal(typeof path, "string", "legacy note fixture path is a string");
-		const address = scope === "project" ? `@project/${path}` : scope === "global" ? `@global/${path}` : path;
+		const address = scope === "project" ? `@project/${path}` : scope === "personal" ? `@personal/${path}` : path;
 		return tool.execute("call-1", { ...rest, address }, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
 	}
-	if ((name === "notes_list" || name === "notes_search") && params.scope === "global") {
+	if ((name === "notes_list" || name === "notes_search") && params.scope === "personal") {
 		const { scope: _scope, pattern, ...rest } = params;
-		return tool.execute("call-1", { ...rest, pattern: `@global/${typeof pattern === "string" ? pattern : "**"}` }, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
+		return tool.execute("call-1", { ...rest, pattern: `@personal/${typeof pattern === "string" ? pattern : "**"}` }, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
 	}
 	if ((name === "notes_list" || name === "notes_search") && params.scope === "session") {
 		const { scope: _scope, pattern, ...rest } = params;
@@ -199,7 +199,7 @@ export function resultJson<T>(result: AgentToolResult<unknown>): T {
 	const text = result.content[0];
 	assert.ok(text && text.type === "text", "tool result carries text");
 	const value = JSON.parse(text.text) as Record<string, unknown>;
-	const suffix = (address: string) => address.startsWith("@project/") ? address.slice("@project/".length) : address.startsWith("@global/") ? address.slice("@global/".length) : address;
+	const suffix = (address: string) => address.startsWith("@project/") ? address.slice("@project/".length) : address.startsWith("@personal/") ? address.slice("@personal/".length) : address;
 	const legacyPath = (row: Record<string, unknown>) => {
 		if (typeof row.address === "string" && row.path === undefined) Object.defineProperty(row, "path", { value: suffix(row.address), enumerable: false });
 	};
@@ -400,7 +400,7 @@ test("notes_list is most-recently-updated first across merged scopes", async () 
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
-	const put = (scope: "session" | "project" | "global", path: string, updated: number) => {
+	const put = (scope: "session" | "project" | "personal", path: string, updated: number) => {
 		const file = physicalPath(scope, path, ctx);
 		mkdirSync(dirname(file), { recursive: true });
 		writeFileSync(file, `---\nscope: ${scope}\norigin: self\nstatus: active\nstale: false\ncreated_at: ${localIso(updated - 1000)}\nupdated_at: ${localIso(updated)}\nlast_accessed: ${localIso(updated)}\naccess_count: 0\n---\n\nbody`);
@@ -409,13 +409,13 @@ test("notes_list is most-recently-updated first across merged scopes", async () 
 	put("session", "b.md", base + 10);
 	put("session", "a.md", base + 10);
 	put("project", "c.md", base + 5);
-	put("global", "e.md", base + 20);
+	put("personal", "e.md", base + 20);
 	const files = async (params: Record<string, unknown>) =>
 		resultJson<{ files: Array<{ address: string; scope: string }> }>(await call(captured, "notes_list", params, ctx)).files;
-	assert.deepEqual((await files({})).map((file) => file.address), ["@global/e.md", "a.md", "b.md", "@project/c.md"], "updated_at descending with address ascending as the tiebreak");
+	assert.deepEqual((await files({})).map((file) => file.address), ["@personal/e.md", "a.md", "b.md", "@project/c.md"], "updated_at descending with address ascending as the tiebreak");
 	// A same-path pair in two scopes keeps both rows; equal timestamps tie-break by scope name.
-	put("global", "a.md", base + 10);
-	assert.deepEqual((await files({})).filter((file) => file.address.endsWith("a.md")).map((file) => file.scope), ["global", "session"], "equal timestamps tie-break by full address");
+	put("personal", "a.md", base + 10);
+	assert.deepEqual((await files({})).filter((file) => file.address.endsWith("a.md")).map((file) => file.scope), ["personal", "session"], "equal timestamps tie-break by full address");
 	assert.deepEqual((await files({ pattern: "*.md" })).map((file) => file.address), ["a.md", "b.md"], "a bare pattern narrows to the session home");
 });
 
@@ -423,30 +423,30 @@ test("notes are real files that persist across sessions and round-trip Unicode",
 	const original = manager();
 	const captured = makeExtension(original);
 	const ctx = context(original);
-	await call(captured, "notes_write", { path: "checkpoint/进度.md", content: "第一行\nneedle Café", scope: "global" }, ctx);
+	await call(captured, "notes_write", { path: "checkpoint/进度.md", content: "第一行\nneedle Café", scope: "personal" }, ctx);
 
-	// A brand-new session over the same physical root sees the global note: nothing is replayed
+	// A brand-new session over the same physical root sees the personal note: nothing is replayed
 	// from session entries, the file itself is the durable artifact.
 	const restored = manager();
 	const restoredCaptured = makeExtension(restored);
 	const restoredCtx = context(restored);
-	const rawRead = await call(restoredCaptured, "notes_read", { path: "checkpoint/进度.md", scope: "global", offset_chars: -4 }, restoredCtx);
+	const rawRead = await call(restoredCaptured, "notes_read", { path: "checkpoint/进度.md", scope: "personal", offset_chars: -4 }, restoredCtx);
 	const read = resultRead(rawRead);
-	assert.equal(read.details.address, "@global/checkpoint/进度.md");
+	assert.equal(read.details.address, "@personal/checkpoint/进度.md");
 	assert.equal(read.content, "Café", "a negative offset reads the body tail in one call");
-	assert.equal(read.details.scope, "global");
+	assert.equal(read.details.scope, "personal");
 	const searched = resultJson<{ files: Array<{ path: string; created_at: unknown; updated_at: unknown; matches: Array<{ line: number }> }> }>(
-		await call(restoredCaptured, "notes_search", { query: "Café", scope: "global" }, restoredCtx),
+		await call(restoredCaptured, "notes_search", { query: "Café", scope: "personal" }, restoredCtx),
 	);
 	assert.equal(searched.files[0]?.matches[0]?.line, 2);
 	const listedFiles = resultJson<{ files: Array<{ path: string; created_at: unknown; updated_at: unknown }> }>(
-		await call(restoredCaptured, "notes_list", { pattern: "checkpoint/**", scope: "global" }, restoredCtx),
+		await call(restoredCaptured, "notes_list", { pattern: "checkpoint/**", scope: "personal" }, restoredCtx),
 	);
 	assert.equal(listedFiles.files.length, 1, "glob ** crosses into the checkpoint directory");
 	assert.equal(listedFiles.files[0]?.path, "checkpoint/进度.md");
 	// A single-segment * never crosses `/`, so a nested-only store matches nothing at the root.
 	const rootOnly = resultJson<{ files: Array<{ path: string }> }>(
-		await call(restoredCaptured, "notes_list", { pattern: "*", scope: "global" }, restoredCtx),
+		await call(restoredCaptured, "notes_list", { pattern: "*", scope: "personal" }, restoredCtx)
 	);
 	assert.equal(rootOnly.files.length, 0, "glob * stays within one segment");
 	assert.equal(searched.files[0]?.created_at, listedFiles.files[0]?.created_at, "note tools agree on the timestamp format");
@@ -537,23 +537,23 @@ test("the boot block gives awake agents the notes-home file layout", () => {
 	const session = manager();
 	const rendered = bootBlock(context(session), "pcw:test:root", undefined, false);
 	assert.equal(rendered.includes(process.env.PI_NOTES_HOME ?? ""), false, "the absolute notes home is never exposed");
-	assert.match(rendered, /bare <vpath>.*@project\/<vpath>.*@global\/<vpath>/);
+	assert.match(rendered, /bare <vpath>.*@project\/<vpath>.*@personal\/<vpath>/);
 	assert.match(rendered, /there is no cross-home fallback/);
 	assert.match(rendered, /Any other note is a plain file — use the file tools/);
 });
 
-test("the boot block keeps fresh global and project maps resident, never a session map", async () => {
+test("the boot block keeps fresh personal and project maps resident, never a session map", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	await call(captured, "notes_write", { address: "MAP.md", content: "MAP: session" }, ctx);
 	await call(captured, "notes_write", { address: "@project/MAP.md", content: "MAP: project" }, ctx);
-	await call(captured, "notes_write", { address: "@global/MAP.md", content: "MAP: global" }, ctx);
+	await call(captured, "notes_write", { address: "@personal/MAP.md", content: "MAP: personal" }, ctx);
 	const rendered = bootBlock(ctx, "pcw:test:root", undefined, false);
-	assert.ok(rendered.includes("MAP: global"));
+	assert.ok(rendered.includes("MAP: personal"));
 	assert.ok(rendered.includes("MAP: project"));
 	assert.equal(rendered.includes("MAP: session"), false);
-	assert.ok(rendered.indexOf("MAP: global") < rendered.indexOf("MAP: project"), "global map precedes project map");
+	assert.ok(rendered.indexOf("MAP: personal") < rendered.indexOf("MAP: project"), "personal map precedes project map");
 });
 
 

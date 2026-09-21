@@ -10,7 +10,7 @@ import { NoteError, editNote, listNotes, readNote, searchNotes, writeNote } from
 const ORIGIN = Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("self"), Type.Literal("external")], {
 	description: "Where the note's content came from. user: written or dictated by the human. self: written by you, the agent (default). external: anything else — third-party text, tool output, fetched material.",
 }));
-const ADDRESS_DESCRIPTION = "Address forms are bare `<vpath>` for this session, `@project/<vpath>` for this project's home, and `@global/<vpath>` for the global home. `@` means leaving home. Any other `@` prefix, or `@` inside a vpath, is a hard error: legal prefixes are `@project/` and `@global/`; bare names are the session home. There is no cross-home fallback. Paths reject `..`, absolute paths, and backslashes.";
+const ADDRESS_DESCRIPTION = "Address forms are bare `<vpath>` for this session, `@project/<vpath>` for this project's home, and `@personal/<vpath>` for the human's cross-project home. `@` means leaving home. Any other `@` prefix, or `@` inside a vpath, is a hard error: legal prefixes are `@project/` and `@personal/`; bare names are the session home. There is no cross-home fallback. Paths reject `..`, absolute paths, and backslashes.";
 
 function wireMeta(meta: NoteMeta): Record<string, unknown> {
 	return { ...meta, created_at: localIso(meta.created_at), updated_at: localIso(meta.updated_at), last_accessed: localIso(meta.last_accessed) };

@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export type Scope = "session" | "project" | "global";
+export type Scope = "session" | "project" | "personal";
 
 /** Physical home of the on-disk note store: $PI_NOTES_HOME or ~/.agents/notes. */
 export function notesRoot(): string {
@@ -46,7 +46,7 @@ function sessionId(ctx: ExtensionContext): string {
 
 /** Absolute directory holding every note of one scope. */
 export function scopeDir(scope: Scope, ctx: ExtensionContext): string {
-	if (scope === "global") return join(notesRoot(), "global");
+	if (scope === "personal") return join(notesRoot(), "personal");
 	if (scope === "project") return join(notesRoot(), "project", projectKey(ctx.cwd));
 	return join(sessionHomesRoot(), sessionId(ctx));
 }

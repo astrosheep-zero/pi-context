@@ -9,7 +9,7 @@ export const RESET_V2 = "reset-v2";
 export const MAX_NOTE_BYTES = 1_000_000;
 export const POCKET_SESSION_LIMIT = 5;
 export const POCKET_PROJECT_LIMIT = 2;
-export const POCKET_GLOBAL_LIMIT = 2;
+export const POCKET_PERSONAL_LIMIT = 2;
 // Write-time cap on a virtual note path. Deliberately NOT enforced by assertVirtualPath:
 // notesFromSession replays already-persisted operations, which must keep loading sessions
 // that contain a longer legacy path. Reads and replay stay un-capped.
@@ -51,11 +51,10 @@ Use get_context_remaining to see how much of the window is left. When it runs ou
 
 If <context_window> lists a Previous context window id, a reset just happened and the old conversation is not included. Read your note checkpoint first, then recover details through history_*: history_read directly when you know the window and item IDs, history_list or history_search to find them when you don't.
 
-Your notes live in three homes: this session (bare names), this repo (@project/<vpath>), everywhere you go (@global/<vpath>). @ means leaving home — and homes don't visit each other: there is no cross-home fallback.
-Notes carry what exists nowhere else — what the human told you, what you discovered, where you stand.
-Session notes belong to this trip — the goal, the progress, the loose ends, packed for the road. The next window of THIS trip wakes to them; once the trip is over, nobody does.
-@project notes hold what you learned by working here — the things you only know because you were here — for whoever works here next.
-@global notes travel with you. Every window. Every conversation. Every trip. So before you drop anything in there, ask yourself: does this deserve to stare you in the face every single time you talk to the human? No? Then keep your weird junk OUT.
+Your notes live in three homes: this session (bare names), this project (@project/<vpath>), the human across projects (@personal/<vpath>). @ means leaving home — and homes don't visit each other: there is no cross-home fallback.
+Session notes belong to this trip — the goal, the progress, the loose ends. The next window of THIS trip wakes to them; once the trip is over, nobody does.
+@project notes hold facts about this project — architecture, conventions, workflows, deployment and environment details — for whoever works here next.
+@personal notes hold the human's durable preferences and standing rules, plus lessons that apply across projects. Duration does not make a note personal; its stated scope must already be broader than the project or conversation at hand. When the intended scope is unclear, keep the note in the narrowest stated scope rather than widening it.
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const WARNING_PROMPT =

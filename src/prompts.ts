@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { historyFromSession } from "./history.js";
 import { listNotes } from "./notes/store.js";
-import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, POCKET_GLOBAL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "./protocol.js";
+import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, POCKET_PERSONAL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "./protocol.js";
 
 /** Codex-style <context_window> identity block: agent name and first/current/previous window ids only. */
 function identityBlock(agentName: string, firstWindowId: string, currentWindowId: string, previousWindowId?: string): string {
@@ -23,11 +23,11 @@ function relativeTime(timestamp: number, now: number): string {
 }
 
 /**
- * Boot notes index. Map residency ("地图在场"): fresh MAP.md bodies from the global and
+ * Boot notes index. Map residency ("地图在场"): fresh MAP.md bodies from the personal and
  * project homes are both injected, broadest first; stale maps are skipped per home, and the
  * session home is never peeked — a session MAP.md is an ordinary note. The pocket then lists
  * recent fresh notes under per-home quotas (POCKET_SESSION_LIMIT / POCKET_PROJECT_LIMIT /
- * POCKET_GLOBAL_LIMIT), most-recently-updated first within each home, one metadata line
+ * POCKET_PERSONAL_LIMIT), most-recently-updated first within each home, one metadata line
  * each: address, line count, UTF-8 byte count, relative update time at window open. Bodies never render
  * in the pocket; stale notes are excluded; MAP.md itself never takes a pocket seat.
  */
@@ -35,21 +35,21 @@ function notesIndex(ctx: ExtensionContext): string {
 	const sections: string[] = [];
 	// Map residency ("地图在场"): scope-native maps, both fresh ones injected broadest-first.
 	// A session MAP.md is an ordinary note, never resident; stale maps skip independently.
-	for (const scope of ["global", "project"] as const) {
+	for (const scope of ["personal", "project"] as const) {
 		const toc = listNotes(ctx, { scope }).find((row) => row.path === "MAP.md");
 		if (toc && !toc.meta.stale) {
 			if (toc.body.length > 0) sections.push(toc.body);
 		}
 	}
 	// listNotes is most-recently-updated first within each home. Per-home quotas keep session
-	// churn from evicting project or global notes; maps never take pocket seats.
+	// churn from evicting project or personal notes; maps never take pocket seats.
 	const recentNotes = [
 		...listNotes(ctx, { scope: "session" }).filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_SESSION_LIMIT),
 		...listNotes(ctx, { scope: "project" }).filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_PROJECT_LIMIT),
-		...listNotes(ctx, { scope: "global" }).filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_GLOBAL_LIMIT),
+		...listNotes(ctx, { scope: "personal" }).filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_PERSONAL_LIMIT),
 	];
 	if (recentNotes.length > 0) {
-		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (by home, most recent first within each: up to ${POCKET_SESSION_LIMIT} from this session, ${POCKET_PROJECT_LIMIT} from this project, ${POCKET_GLOBAL_LIMIT} from global). A note's content never appears here, so its name has to say what the note is about:`];
+		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (by home, most recent first within each: up to ${POCKET_SESSION_LIMIT} from this session, ${POCKET_PROJECT_LIMIT} from this project, ${POCKET_PERSONAL_LIMIT} from personal). A note's content never appears here, so its name has to say what the note is about:`];
 		const now = Date.now();
 		for (const row of recentNotes) {
 			lines.push(`- ${row.address} (${row.body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${relativeTime(row.meta.updated_at, now)})`);
@@ -60,7 +60,7 @@ function notesIndex(ctx: ExtensionContext): string {
 }
 
 function notesHomeBlock(): string {
-	return "Notes_* addresses have three homes: bare <vpath> is this session, @project/<vpath> is this project, and @global/<vpath> is global. @ means leaving home; there is no cross-home fallback. Any other note is a plain file — use the file tools.";
+	return "Notes_* addresses have three homes: bare <vpath> is this session, @project/<vpath> is this project, and @personal/<vpath> is the human's cross-project home. @ means leaving home; there is no cross-home fallback. Any other note is a plain file — use the file tools.";
 }
 
 /**

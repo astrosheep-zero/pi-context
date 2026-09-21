@@ -32,10 +32,10 @@ export type NoteRow = { address: string; scope: Scope; path: string; meta: NoteM
 export type NoteMatch = { line: number; text: string; offsetChars: number };
 export type NoteSearchRow = { address: string; scope: Scope; path: string; meta: NoteMeta; matches: NoteMatch[] };
 
-const SCOPE_ORDER: readonly Scope[] = ["session", "project", "global"];
+const SCOPE_ORDER: readonly Scope[] = ["session", "project", "personal"];
 
 function assertScope(value: unknown): Scope {
-	if (!isScope(value)) throw new NoteError("invalid_scope", `scope must be one of session, project, global (got ${JSON.stringify(value)})`);
+	if (!isScope(value)) throw new NoteError("invalid_scope", `scope must be one of session, project, personal (got ${JSON.stringify(value)})`);
 	return value;
 }
 
