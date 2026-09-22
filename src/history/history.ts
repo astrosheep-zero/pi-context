@@ -1,8 +1,8 @@
 import type { TextContent, ToolCall } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { SessionReader } from "./session-reader.js";
-import { isWindowMarker, rootWindowId } from "./context-window.js";
-import { HISTORY_PREVIEW_CHARS } from "./tool-output.js";
+import type { SessionReader } from "../session-reader.js";
+import { isWindowMarker, rootWindowId } from "../context/context-window.js";
+import { HISTORY_PREVIEW_CHARS } from "../tool-output.js";
 
 type HistoryItem = {
 	windowId: string;

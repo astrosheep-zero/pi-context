@@ -1,0 +1,154 @@
+import assert from "node:assert/strict";
+import { join } from "node:path";
+import test from "node:test";
+import { SettingsManager } from "@earendil-works/pi-coding-agent";
+import { internal } from "../src/index.js";
+import {
+	appendText,
+	call,
+	commitTurnEndBoundary,
+	context,
+	installExtensionTestEnvironment,
+	makeExtension,
+	manager,
+	noticesOf,
+	resultJson,
+	runContextHook,
+	runHandlers,
+	runCommand,
+	sentOf,
+	settingsFixture,
+	writeJson,
+} from "./helpers/extension.js";
+
+const testEnvironment = installExtensionTestEnvironment("pi-context-integration");
+test.beforeEach(() => testEnvironment.beforeEach());
+test.afterEach(() => testEnvironment.afterEach());
+test.after(() => testEnvironment.dispose());
+
+test("low-budget guidance and warning persist at turn_end, once per active window", async () => {
+	const sessionManager = manager();
+	const captured = makeExtension(sessionManager);
+	const low = context(sessionManager, undefined, { tokens: 170_000, percent: 85, contextWindow: 200_000 });
+	assert.equal(await runContextHook(captured, low), undefined, "guidance is staged, not injected into this request");
+	assert.equal(captured.sent.length, 0, "guidance does not trigger a detached turn");
+	const guidanceBoundary = await commitTurnEndBoundary(captured, sessionManager, low);
+	assert.equal(guidanceBoundary.entries.filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1);
+	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1);
+	assert.equal(await runContextHook(captured, low), undefined, "the same window does not repeat guidance");
+
+	const warningContext = context(sessionManager, undefined, { tokens: 199_000, percent: 99.5, contextWindow: 200_000 });
+	const warning = await runContextHook(captured, warningContext);
+	assert.equal(warning?.messages.length, 1, "the warning is visible in the current provider request");
+	assert.equal((warning?.messages[0] as { customType?: string }).customType, internal.WARNING_TYPE);
+	const warningBoundary = await commitTurnEndBoundary(captured, sessionManager, warningContext);
+	assert.equal(warningBoundary.entries.filter((entry) => entry.type === "custom_message" && entry.customType === internal.WARNING_TYPE).length, 1);
+	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.WARNING_TYPE).length, 1);
+});
+
+test("the visible countdown ends at the warning line, clamps at zero, and preserves unknown usage", async () => {
+	const fixture = settingsFixture({
+		reserveTokens: 16_384,
+		project: { compaction: { reserveTokens: 32_768 } },
+	});
+	const sm = manager();
+	const captured = makeExtension(sm);
+	runHandlers(captured, "session_tree", {}, context(sm, undefined, undefined, true, fixture.cwd, true));
+	const readBudget = async (tokens: number | null, trusted = true) => {
+		const ctx = context(sm, undefined, { tokens, contextWindow: 200_000, percent: tokens === null ? null : tokens / 2000 }, true, fixture.cwd, trusted);
+		return resultJson<{ remaining_tokens: number | null }>(await call(captured, "get_context_remaining", {}, ctx)).remaining_tokens;
+	};
+	assert.equal(await readBudget(72_563), 82_381, "the reported 127437 physical tokens exclude reserve plus runway (45056)");
+	assert.equal(await readBudget(167_232), 0, "inside the runway the countdown reads zero");
+	assert.equal(await readBudget(190_000), 0, "below the reserve, still zero");
+	assert.equal(await readBudget(210_000), 0, "over the physical window");
+	assert.equal(await readBudget(null), null, "unknown usage remains unknown");
+	const absent = context(sm, undefined, undefined, true, fixture.cwd);
+	assert.equal(resultJson<{ remaining_tokens: number | null }>(await call(captured, "get_context_remaining", {}, absent)).remaining_tokens, null);
+	const untrusted = context(sm, undefined, { tokens: 72_563, contextWindow: 200_000, percent: 36.2815 }, true, fixture.cwd, false);
+	runHandlers(captured, "session_start", {}, untrusted);
+	assert.equal(await readBudget(72_563, false), 98_765, "session start reloads the global reserve when the project is untrusted");
+});
+
+test("absent pi-context key or margins reproduce the default reminder threshold at Pi's default reserve", async () => {
+	assert.equal(internal.DEFAULT_RESERVE_TOKENS, 16_384);
+	assert.equal(internal.DEFAULT_RESERVE_TOKENS + internal.DEFAULT_REMINDER_MARGIN_TOKENS, 40_960);
+
+	for (const [label, options] of [
+		["absent key", { global: {} }],
+		["absent margins", { global: { [internal.PI_CONTEXT_SETTINGS_KEY]: {} } }],
+	] as const) {
+		const fixture = settingsFixture(options);
+		const sm = manager();
+		const captured = makeExtension(sm);
+		// Thresholds are resolved once per session and cached; branch navigation clears the
+		// cache without emitting a boot block, so the next read uses this fixture.
+		runHandlers(captured, "session_tree", {}, context(sm, undefined, undefined, true, fixture.cwd));
+		const window = 200_000;
+		const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
+		const first = at(40_961);
+		assert.equal(await runContextHook(captured, first), undefined, `${label}: nothing injected above the default reminder`);
+		assert.equal(sentOf(captured, internal.GUIDANCE_TYPE).length, 0, `${label}: no guidance above the default reminder`);
+		const crossing = at(40_960);
+		assert.equal(await runContextHook(captured, crossing), undefined, `${label}: default reminder crossing persists only`);
+		await commitTurnEndBoundary(captured, sm, crossing);
+		assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1, `${label}: default reminder fires`);
+		assert.equal(noticesOf(first).length, 0, `${label}: valid defaults warn nobody`);
+	}
+});
+
+test("project pi-context reminder margin and reserve override global per key", async () => {
+	const fixture = settingsFixture({
+		reserveTokens: 20_000,
+		global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 30_000 } },
+		project: { compaction: { reserveTokens: 50_000 }, [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 40_000 } },
+	});
+	// Project reserve wins: reminder = 50000 + 40000 (project margin).
+	const sm = manager();
+	const captured = makeExtension(sm);
+	runHandlers(captured, "session_tree", {}, context(sm, undefined, undefined, true, fixture.cwd));
+	const window = 300_000;
+	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
+	assert.equal(await runContextHook(captured, at(90_001)), undefined, "nothing injected above the project-derived reminder");
+	assert.equal(sentOf(captured, internal.GUIDANCE_TYPE).length, 0);
+	const crossing = at(90_000);
+	assert.equal(await runContextHook(captured, crossing), undefined, "project-derived reminder crossing persists only");
+	await commitTurnEndBoundary(captured, sm, crossing);
+	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1, "project reminder margin wins");
+});
+
+test("an invalid reminder margin degrades to its default with one warning and never throws", async () => {
+	const fixture = settingsFixture({ global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 0 } } });
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const ctx = context(sm, undefined, undefined, true, fixture.cwd);
+	assert.doesNotThrow(() => runHandlers(captured, "session_start", { reason: "startup" }, ctx));
+	const notices = noticesOf(ctx).filter((notice) => notice.type === "warning");
+	assert.equal(notices.length, 1, "one warning for the offending key");
+	assert.equal(notices[0]?.type, "warning");
+	assert.match(notices[0]?.message ?? "", /reminderMarginTokens/);
+	assert.match(notices[0]?.message ?? "", /24576/);
+
+	const window = 200_000;
+	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
+	// The degraded reminder is Pi's default reserve + default margin = 40960.
+	assert.equal(await runContextHook(captured, at(40_961)), undefined, "nothing injected above the degraded reminder");
+	const crossing = at(40_960);
+	assert.equal(await runContextHook(captured, crossing), undefined, "degraded reminder uses its default");
+	await commitTurnEndBoundary(captured, sm, crossing);
+	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1, "the degraded reminder is persisted once");
+	assert.equal(noticesOf(ctx).filter((notice) => notice.type === "warning").length, 1, "warning stays one-time across handler calls");
+});
+
+test("the warning supersedes the early reminder when usage jumps across both thresholds", async () => {
+	const sm = manager();
+	appendText(sm, "user", "ongoing work");
+	const captured = makeExtension(sm);
+	const ctx = context(sm, undefined, { tokens: 199_000, percent: 99.5, contextWindow: 200_000 }, false);
+	const warningResult = await runContextHook(captured, ctx);
+	assert.deepEqual(warningResult?.messages.map((message) => (message as { customType?: string }).customType), [internal.WARNING_TYPE]);
+	await commitTurnEndBoundary(captured, sm, ctx);
+	const reloaded = makeExtension(sm);
+	runHandlers(reloaded, "context", {}, ctx);
+	assert.equal(reloaded.sent.length, 0, "persisted warning also suppresses a late reminder after reload");
+});

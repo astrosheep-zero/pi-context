@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { output, outputRaw, page, middleTruncate, prefixFit, earliestMatchOffsetChars, readCharacterWindow, readWindowBlock, withinTextBudget, DEFAULT_READ_WINDOW_CHARS, HISTORY_PREVIEW_CHARS, MAX_READ_WINDOW_CHARS } from "./tool-output.js";
-import { positiveInteger, recentFirst, nullableString, role, cursor, searchQuery, searchQueries } from "./tool-schema.js";
+import { output, outputRaw, page, middleTruncate, prefixFit, earliestMatchOffsetChars, readCharacterWindow, readWindowBlock, withinTextBudget, DEFAULT_READ_WINDOW_CHARS, HISTORY_PREVIEW_CHARS, MAX_READ_WINDOW_CHARS } from "../tool-output.js";
+import { positiveInteger, recentFirst, nullableString, role, cursor, searchQuery, searchQueries } from "../tool-schema.js";
 import { historyFromSession, filteredItems, visibleItem, allItems, vacuousRoleToolCombo, unknownWindowId } from "./history.js";
 
 /**

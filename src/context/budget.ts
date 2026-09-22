@@ -1,10 +1,10 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext, type SessionBoundaryDraft, type SettingsManager } from "@earendil-works/pi-coding-agent";
-import { GUIDANCE_CLOSE_TAG, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, WARNING_PROMPT, WARNING_TYPE } from "./protocol.js";
+import { GUIDANCE_CLOSE_TAG, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, WARNING_PROMPT, WARNING_TYPE } from "../protocol.js";
 import { readThresholdSettings, type ResolvedThresholds, type ThresholdSettingsResolution } from "./thresholds.js";
 import { currentWindowId, hasWindowMessage, windowUsage } from "./context-window.js";
 import { tokenBudgetGuidance } from "./prompts.js";
-import { output } from "./tool-output.js";
+import { output } from "../tool-output.js";
 
 /** Remaining tokens in the provider's active window, or null without a usable estimate. */
 export function remainingTokens(ctx: Pick<ExtensionContext, "sessionManager" | "getContextUsage" | "model">): number | null {
@@ -40,6 +40,17 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean, setti
 	const invalidateThresholds = () => { cachedPolicy = undefined; };
 	let pendingGuidance: { windowId: string; content: string } | undefined;
 	let pendingWarning: { windowId: string; content: string } | undefined;
+	let pendingNotices: Array<{ windowId: string; customType: string }> = [];
+	const notifyCommittedReminders = (ctx: ExtensionContext) => {
+		const windowId = currentWindowId(ctx);
+		for (const notice of pendingNotices) {
+			if (notice.windowId !== windowId || !hasWindowMessage(ctx, notice.customType)) continue;
+			ctx.ui.notify(notice.customType === WARNING_TYPE
+				? "pi-context: context budget critical — final checkpoint warning recorded for the model."
+				: "pi-context: context budget low — checkpoint reminder recorded for the model, kept out of the chat view.", "warning");
+		}
+		pendingNotices = [];
+	};
 
 	const clearStaged = () => {
 		pendingGuidance = undefined;
@@ -47,6 +58,7 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean, setti
 	};
 	const resetForTransition = () => {
 		clearStaged();
+		pendingNotices = [];
 		invalidateThresholds();
 		notifiedWarnings.clear();
 	};
@@ -58,12 +70,14 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean, setti
 		];
 		clearStaged();
 		const windowId = currentWindowId(ctx);
-		return staged.flatMap((draft) => draft?.windowId === windowId ? [{
+		const drafts = staged.filter((draft): draft is NonNullable<typeof draft> => draft !== undefined && draft.windowId === windowId);
+		pendingNotices = drafts.map(({ windowId, customType }) => ({ windowId, customType }));
+		return drafts.map((draft) => ({
 			type: "custom_message" as const,
 			customType: draft.customType,
 			content: draft.content,
 			display: false,
-		}] : []);
+		}));
 	};
 
 	pi.on("session_start", (_event, ctx) => { resetForTransition(); thresholdsFor(ctx); });
@@ -72,7 +86,13 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean, setti
 	pi.on("session_shutdown", resetForTransition);
 	// A request can fail before Pi emits turn_end. agent_settled is the public
 	// lifecycle point that must discard an uncommitted draft before the next prompt.
-	pi.on("agent_settled", clearStaged);
+	// UI notices follow committed reminders. Aborted requests can retry their drafts
+	// without showing the same low-budget notification twice.
+	pi.on("turn_start", (_event, ctx) => notifyCommittedReminders(ctx));
+	pi.on("agent_settled", (_event, ctx) => {
+		notifyCommittedReminders(ctx);
+		clearStaged();
+	});
 	pi.on("context", (_event, ctx) => {
 		if (!isEnabled()) return undefined;
 		// The early reminder persists once per window the first time remaining crosses
@@ -94,7 +114,6 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean, setti
 				display: false,
 				timestamp: Date.now(),
 			};
-			ctx.ui.notify("pi-context: context budget critical — final checkpoint warning steered to the model.", "warning");
 			return { messages: [..._event.messages, warningMessage] };
 		}
 		if (hasWindowMessage(ctx, GUIDANCE_TYPE) || pendingGuidance?.windowId === windowId) return undefined;
@@ -103,7 +122,6 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean, setti
 			// otherwise cross the marker and leak the old window's reminder forward.
 			const left = Math.max(0, remaining - warning);
 			pendingGuidance = { windowId, content: tokenBudgetGuidance(left) };
-			ctx.ui.notify("pi-context: context budget low — checkpoint reminder recorded for the model, kept out of the chat view.", "warning");
 		}
 		return undefined;
 	});
@@ -125,6 +143,6 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean, setti
 		automaticResetEnabled,
 		resetDue,
 		consumeTurnEnd,
-		clear: clearStaged,
+		clear: () => { clearStaged(); pendingNotices = []; },
 	};
 }

@@ -6,7 +6,7 @@ import { acquireLock, failLock, lastRunPath, releaseLock } from "./lock.js";
 import { materialGate, timeGate } from "./gates.js";
 import { loadPlaybook, runDreamer, type DreamerSessionFactory, type DreamResult, type DreamWrite } from "./runner.js";
 import { gitCommit } from "./git.js";
-import { readDreamerSettings, type DreamerSetting } from "../thresholds.js";
+import { readDreamerSettings, type DreamerSetting } from "./settings.js";
 import { doctor } from "./doctor.js";
 import { notesRoot } from "../notes/paths.js";
 

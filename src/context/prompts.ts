@@ -1,6 +1,5 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { listNotes, type NoteRow, type Scope } from "./notes/store.js";
-import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, POCKET_AGENT_LIMIT, POCKET_HUMAN_LIMIT, POCKET_MODEL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "./protocol.js";
+import type { NotesHome, NotesSnapshot } from "../notes/notes-snapshot.js";
+import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, POCKET_AGENT_LIMIT, POCKET_HUMAN_LIMIT, POCKET_MODEL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "../protocol.js";
 
 /** Codex-style <context_window> identity block: the resolved agent and model names plus first/current/previous window ids. */
 function identityBlock(agentName: string, modelName: string, firstWindowId: string, currentWindowId: string, previousWindowId?: string): string {
@@ -21,49 +20,11 @@ function relativeTime(timestamp: number, now: number): string {
 	return seconds > 0 ? `in ${amount}` : `${amount} ago`;
 }
 
-const BOOT_NOTE_HOMES = [
-	{ scope: "session", label: "this session" },
-	{ scope: "project", label: "@project" },
-	{ scope: "human", label: "@human" },
-	{ scope: "agent", label: "@self" },
-	{ scope: "model", label: "@model" },
-] as const satisfies ReadonlyArray<{ scope: Scope; label: string }>;
-
-export type BootNotesHome = (typeof BOOT_NOTE_HOMES)[number];
-export type BootNotesLoader = (ctx: ExtensionContext, scope: Scope) => NoteRow[];
-export type BootNotesSnapshot = {
-	/** Wall-clock instant captured when this boot began; rendering never consults Date.now(). */
-	readonly openedAt: number;
-	readonly homes: ReadonlyMap<Scope, readonly NoteRow[]>;
-	readonly unavailable: readonly BootNotesHome[];
-};
-
-/**
- * Acquire the five homes once for one boot. Only filesystem-style errno failures are isolated;
- * malformed note data and unrelated construction errors remain visible to the caller.
- */
-export function loadBootNotesSnapshot(ctx: ExtensionContext, loadHome: BootNotesLoader = (context, scope) => listNotes(context, { scope })): BootNotesSnapshot {
-	const openedAt = Date.now();
-	const homes = new Map<Scope, readonly NoteRow[]>();
-	const unavailable: BootNotesHome[] = [];
-	for (const home of BOOT_NOTE_HOMES) {
-		try {
-			homes.set(home.scope, loadHome(ctx, home.scope));
-		} catch (error) {
-			const code = typeof error === "object" && error !== null ? (error as NodeJS.ErrnoException).code : undefined;
-			if (typeof code !== "string" || !/^E[A-Z0-9_]+$/.test(code) || code.startsWith("ERR_")) throw error;
-			homes.set(home.scope, []);
-			unavailable.push(home);
-		}
-	}
-	return { openedAt, homes, unavailable };
-}
-
-function rowsFor(snapshot: BootNotesSnapshot, scope: Scope): readonly NoteRow[] {
+function rowsFor(snapshot: NotesSnapshot, scope: NotesHome["scope"]) {
 	return snapshot.homes.get(scope) ?? [];
 }
 
-function notesUnavailableNotice(snapshot: BootNotesSnapshot): string | undefined {
+function notesUnavailableNotice(snapshot: NotesSnapshot): string | undefined {
 	if (snapshot.unavailable.length === 0) return undefined;
 	const homes = snapshot.unavailable.map((home) => home.label).join(", ");
 	const noun = snapshot.unavailable.length === 1 ? "home's index was" : "home indexes were";
@@ -80,7 +41,7 @@ function notesUnavailableNotice(snapshot: BootNotesSnapshot): string | undefined
  * UTF-8 byte count, relative update time at window open. Bodies never render
  * in the pocket; stale notes are excluded; MAP.md itself never takes a pocket seat.
  */
-function notesIndex(snapshot: BootNotesSnapshot): string {
+function notesIndex(snapshot: NotesSnapshot): string {
 	const sections: string[] = [];
 	// Map residency ("地图在场"): scope-native maps, fresh ones injected broadest-first.
 	// A session MAP.md is an ordinary note, never resident; stale maps skip independently.
@@ -115,7 +76,7 @@ function notesHomeBlock(): string {
 
 /**
  * Render a static, once-per-window boot block from explicit data. This function does not read
- * notes or call runtime UI APIs; acquisition belongs to loadBootNotesSnapshot and its caller.
+ * notes or call runtime UI APIs; acquisition belongs to loadNotesSnapshot and its caller.
  */
 export type BootRenderData = {
 	readonly agentName: string;
@@ -124,7 +85,7 @@ export type BootRenderData = {
 	readonly currentWindowId: string;
 	readonly previousWindowId?: string;
 	readonly resetLine: boolean;
-	readonly notes: BootNotesSnapshot;
+	readonly notes: NotesSnapshot;
 };
 
 export function renderBootBlock(data: BootRenderData): string {

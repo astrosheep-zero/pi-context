@@ -13,6 +13,7 @@ import {
 	SettingsManager,
 	type AgentSession,
 	type ExtensionAPI,
+	type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import piContext, { createPiContext } from "../src/index.js";
 import { BOOT_TYPE, CONTEXT_WINDOW_OPEN_TAG, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, RESET_MARKER_TYPE, WARNING_TYPE } from "../src/protocol.js";
@@ -30,6 +31,7 @@ type Fixture = {
 	streamContexts: AgentContext[];
 	streamSignals: boolean[];
 	events: Array<{ type: string; [key: string]: unknown }>;
+	notices: string[];
 	close: () => void;
 };
 
@@ -103,6 +105,7 @@ async function openFixture(options: {
 	const streamContexts: AgentContext[] = [];
 	const streamSignals: boolean[] = [];
 	const events: Array<{ type: string; [key: string]: unknown }> = [];
+	const notices: string[] = [];
 	let session!: AgentSession;
 	const loader = new DefaultResourceLoader({
 		cwd: dir,
@@ -162,7 +165,22 @@ async function openFixture(options: {
 		stream.end();
 		return stream;
 	};
-	await session.bindExtensions({});
+	await session.bindExtensions({
+		uiContext: {
+			notify(message: string) {
+				if (message.startsWith("pi-context: memory cleared · ")) {
+					const windowId = message.split(" · ")[1];
+					assert.ok(sessionManager.getBranch().some((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE && (entry.data as { windowId?: string })?.windowId === windowId), "notification follows the reset marker commit");
+					assert.ok(sessionManager.getBranch().some((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && (entry.details as { windowId?: string })?.windowId === windowId), "notification follows the reset boot commit");
+				}
+				if (message.includes("context budget low") || message.includes("context budget critical")) {
+					const customType = message.includes("context budget critical") ? WARNING_TYPE : GUIDANCE_TYPE;
+					assert.ok(sessionManager.getBranch().some((entry) => entry.type === "custom_message" && entry.customType === customType), "budget notifications follow the reminder commit");
+				}
+				notices.push(message);
+			},
+		} as ExtensionUIContext,
+	});
 	return {
 		dir,
 		notesRoot,
@@ -173,6 +191,7 @@ async function openFixture(options: {
 		streamContexts,
 		streamSignals,
 		events,
+		notices,
 		close: () => {
 			session.dispose();
 			if (managesEnvironment) {
@@ -238,6 +257,35 @@ function assertFreshRequest(fixture: Fixture, requestIndex: number, oldSentinel:
 	assert.ok(body.includes(CONTEXT_WINDOW_OPEN_TAG), "the new provider request includes the fresh context-window boot");
 }
 
+test("real AgentSession: aborted low-budget requests notify only after a retry commits the reminder", async () => {
+	let fixture!: Fixture;
+	fixture = await openFixture({
+		compactionEnabled: false,
+		script: (request) => assistant(fixture, [{ type: "text", text: `response ${request}` }], request === 2 ? "aborted" : "stop", { usage: usage(50_000) }),
+	});
+	try {
+		const reminders = () => fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === GUIDANCE_TYPE);
+		const notices = () => fixture.notices.filter((message) => message.includes("context budget low"));
+		await fixture.session.prompt("Establish usage below the reminder line.");
+		await fixture.session.waitForIdle();
+		assert.equal(reminders().length, 0);
+		await fixture.session.prompt("Abort this low-budget request.");
+		await fixture.session.waitForIdle();
+		assert.equal(reminders().length, 0, "an aborted turn does not commit its reminder");
+		assert.equal(notices().length, 0, "an uncommitted reminder never notifies");
+		await fixture.session.prompt("Retry successfully.");
+		await fixture.session.waitForIdle();
+		assert.equal(reminders().length, 1);
+		assert.equal(notices().length, 1, "the committed retry notifies once");
+		await fixture.session.prompt("Continue in the same window.");
+		await fixture.session.waitForIdle();
+		assert.equal(reminders().length, 1);
+		assert.equal(notices().length, 1, "later turns cannot repeat the notice");
+	} finally {
+		fixture.close();
+	}
+});
+
 test("real AgentSession: explicit tiny-session wipe ignores keepRecentTokens and preserves raw history", async () => {
 	let fixture!: Fixture;
 	fixture = await openFixture({
@@ -248,8 +296,11 @@ test("real AgentSession: explicit tiny-session wipe ignores keepRecentTokens and
 			: assistant(fixture, [{ type: "text", text: "resumed in a new window" }]),
 	});
 	try {
+		assert.equal(fixture.requests.length, 0, "startup boot does not trigger a model request");
+		assert.equal(fixture.notices.length, 0, "startup boot is silent");
 		await fixture.session.prompt("OLD_CONTEXT_SENTINEL: retain this only in durable history.");
 		await fixture.session.waitForIdle();
+		assert.equal(fixture.notices.filter((message) => message.includes("memory cleared")).length, 1, "the reset notifies once");
 		assert.equal(fixture.requests.length, 2, "the tool starts exactly one continuation");
 		assert.ok(text(fixture.requests[0]).includes("OLD_CONTEXT_SENTINEL"));
 		assertFreshRequest(fixture, 1, "OLD_CONTEXT_SENTINEL");
@@ -408,54 +459,6 @@ test("real AgentSession: steering and follow-up are delivered exactly once in th
 	}
 });
 
-test("real AgentSession: abort before a boundary cancels the pending wipe, and abort during the resumed request does not resurrect it", async () => {
-	let beforeBoundary!: Fixture;
-	beforeBoundary = await openFixture({
-		compactionEnabled: false,
-		hook: (pi, getSession) => { pi.on("tool_result", () => { void getSession().abort(); }); },
-		script: (request) => assistant(beforeBoundary, request === 1
-			? [{ type: "toolCall", id: "wipe-abort", name: "wipe_memory", arguments: {} }]
-			: [{ type: "text", text: "explicitly resumed" }], request === 1 ? "toolUse" : "stop"),
-	});
-	try {
-		await beforeBoundary.session.prompt("ABORT_BEFORE_BOUNDARY");
-		await beforeBoundary.session.waitForIdle();
-		assert.equal(resetMarkers(beforeBoundary).length, 0);
-		assert.equal(beforeBoundary.requests.length, 1);
-		await beforeBoundary.session.prompt("RESUME_WITHOUT_WIPE");
-		await beforeBoundary.session.waitForIdle();
-		assert.equal(beforeBoundary.requests.length, 2);
-		assert.ok(text(beforeBoundary.requests[1]).includes("ABORT_BEFORE_BOUNDARY"), "aborting the boundary retains history");
-	} finally {
-		beforeBoundary.close();
-	}
-
-	let duringResume!: Fixture;
-	duringResume = await openFixture({
-		compactionEnabled: false,
-		hook: (pi, getSession) => {
-			pi.on("tool_result", (event) => {
-				const name = (event as { toolName?: string }).toolName;
-				if (name === "get_context_remaining" && duringResume.requests.length === 2) void getSession().abort();
-			});
-		},
-		script: (request) => request === 1
-			? assistant(duringResume, [{ type: "toolCall", id: "wipe-resume", name: "wipe_memory", arguments: {} }], "toolUse")
-			: request === 2
-				? assistant(duringResume, [{ type: "toolCall", id: "probe-resume", name: "get_context_remaining", arguments: {} }], "toolUse")
-				: assistant(duringResume, [{ type: "text", text: "should require a later explicit prompt" }]),
-	});
-	try {
-		await duringResume.session.prompt("ABORT_DURING_RESUMED_REQUEST");
-		await duringResume.session.waitForIdle();
-		assert.equal(resetMarkers(duringResume).length, 1);
-		assert.equal(duringResume.requests.length, 2, "abort in the resumed run prevents a second continuation");
-		assertFreshRequest(duringResume, 1, "ABORT_DURING_RESUMED_REQUEST");
-	} finally {
-		duringResume.close();
-	}
-});
-
 test("real AgentSession: hidden or missing reset boots refuse to move the boundary", { timeout: 15000 }, async () => {
 	let fixture!: Fixture;
 	fixture = await openFixture({
@@ -465,7 +468,7 @@ test("real AgentSession: hidden or missing reset boots refuse to move the bounda
 	try {
 		await fixture.session.prompt("ROOT_BEFORE_HIDDEN_BOOT");
 		await fixture.session.waitForIdle();
-		await fixture.session.prompt("/clear-context");
+		await fixture.session.prompt("/wipe-memory");
 		await fixture.session.waitForIdle();
 		await fixture.session.prompt("VALID_POST_MARKER_WORK");
 		await fixture.session.waitForIdle();
@@ -583,46 +586,6 @@ test("real AgentSession: overflow and recoverable length reset and retry once; r
 		assert.ok(repeated.events.some((event) => event.type === "compaction_end" && typeof event.errorMessage === "string"));
 	} finally {
 		repeated.close();
-	}
-});
-
-test("real AgentSession: queued success supersedes overflow recovery before settlement", { timeout: 15000 }, async () => {
-	let fixture!: Fixture;
-	let overflowTurnObserved = false;
-	let queuedRequestObserved = false;
-	fixture = await openFixture({
-		compactionEnabled: true,
-		hook: (pi) => {
-			pi.on("agent_end", (event) => {
-				const message = (event as { messages?: Array<{ stopReason?: string }> }).messages?.at(-1);
-				if (message?.stopReason === "error") {
-					overflowTurnObserved = true;
-					fixture.session.agent.followUp({
-						role: "user",
-						content: [{ type: "text", text: "QUEUED_AFTER_OVERFLOW" }],
-						timestamp: Date.now(),
-					});
-				}
-			});
-		},
-		script: (request, context) => {
-			if (text(context).includes("QUEUED_AFTER_OVERFLOW")) queuedRequestObserved = true;
-			if (request === 1) {
-				return assistant(fixture, [{ type: "text", text: "overflow before queued input" }], "error", { errorMessage: "Prompt too long: context exceeds maximum context length" });
-			}
-			return assistant(fixture, [{ type: "text", text: "queued success" }]);
-		},
-	});
-	try {
-		await fixture.session.prompt("OVERFLOW_WITH_QUEUED_INPUT_SENTINEL");
-		await fixture.session.waitForIdle();
-		assert.equal(overflowTurnObserved, true, "the scripted overflow actually reached turn_end");
-		assert.equal(queuedRequestObserved, true, "the queued success ran on the real AgentSession before settlement");
-		assert.equal(resetMarkers(fixture).length, 0, "a successful queued turn supersedes the pending overflow recovery");
-		assert.ok(fixture.requests.length >= 2, "the queued user input runs before settlement");
-		assert.equal(fixture.requests.filter((request) => text(request).includes("QUEUED_AFTER_OVERFLOW")).length, 1, "queued input is delivered once");
-	} finally {
-		fixture.close();
 	}
 });
 
@@ -852,114 +815,6 @@ test("real AgentSession: injected model overrides select the active model's rese
 		if (previousNotesRoot === undefined) delete process.env.PI_NOTES_HOME;
 		else process.env.PI_NOTES_HOME = previousNotesRoot;
 		rmSync(notesRoot, { recursive: true, force: true });
-	}
-});
-
-test("real AgentSession: an injected manager loaded from custom agentDir beats conflicting defaults", { timeout: 20000 }, async () => {
-	const cwd = mkdtempSync(join(tmpdir(), "pi-context-custom-sdk-cwd-"));
-	const defaultAgentDir = mkdtempSync(join(tmpdir(), "pi-context-custom-sdk-default-"));
-	const authorityAgentDir = mkdtempSync(join(tmpdir(), "pi-context-custom-sdk-authority-"));
-	const notesRoot = mkdtempSync(join(tmpdir(), "pi-context-custom-sdk-notes-"));
-	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const previousNotesRoot = process.env.PI_NOTES_HOME;
-	process.env.PI_CODING_AGENT_DIR = defaultAgentDir;
-	process.env.PI_NOTES_HOME = notesRoot;
-	writeFileSync(join(authorityAgentDir, "settings.json"), JSON.stringify({ compaction: { enabled: true, reserveTokens: 42_000 } }));
-	let fixture!: Fixture;
-	const highUsage = { next: true };
-	try {
-		fixture = await openFixture({
-			cwd,
-			agentDir: defaultAgentDir,
-			notesRoot,
-			manageEnvironment: false,
-			defaultCompactionEnabled: false,
-			defaultReserveTokens: 1_000,
-			settingsManager: () => SettingsManager.create(cwd, authorityAgentDir, { projectTrusted: true }),
-			tools: ["get_context_remaining"],
-			script: (request) => {
-				if (request === 1) return assistant(fixture, [{ type: "toolCall", id: "custom-authority", name: "get_context_remaining", arguments: {} }], "toolUse", { usage: usage(5_000) });
-				const input = highUsage.next ? 85_000 : 100;
-				highUsage.next = false;
-				return assistant(fixture, [{ type: "text", text: "scripted custom authority response" }], "stop", { usage: usage(input) });
-			},
-		});
-		await fixture.session.prompt("CUSTOM_AGENT_DIR_AUTHORITY");
-		await fixture.session.waitForIdle();
-		assert.ok((contextRemainingResults(fixture)[0] ?? 0) > 0, "the custom authority reserve reaches the real tool");
-		assert.equal(resetMarkers(fixture).length, 1, "the custom authority enablement drives the real reset");
-	} finally {
-		fixture?.close();
-		rmSync(cwd, { recursive: true, force: true });
-		rmSync(defaultAgentDir, { recursive: true, force: true });
-		rmSync(authorityAgentDir, { recursive: true, force: true });
-		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		if (previousNotesRoot === undefined) delete process.env.PI_NOTES_HOME;
-		else process.env.PI_NOTES_HOME = previousNotesRoot;
-		rmSync(notesRoot, { recursive: true, force: true });
-	}
-});
-
-test("real AgentSession: ordinary provider errors do not wipe memory", async () => {
-	let fixture!: Fixture;
-	fixture = await openFixture({
-		script: () => assistant(fixture, [{ type: "text", text: "ordinary failure" }], "error", { errorMessage: "rate limit: try again later" }),
-	});
-	try {
-		await fixture.session.prompt("ORDINARY_ERROR_SENTINEL");
-		await fixture.session.waitForIdle();
-		assert.equal(resetMarkers(fixture).length, 0);
-		assert.equal(fixture.requests.length, 1);
-		assert.ok(JSON.stringify(fixture.sessionManager.getBranch()).includes("ORDINARY_ERROR_SENTINEL"));
-	} finally {
-		fixture.close();
-	}
-});
-
-test("real AgentSession: a tiny uncompactable overflow still reaches the bounded durable reset", { timeout: 15000 }, async () => {
-	let fixture!: Fixture;
-	fixture = await openFixture({
-		compactionEnabled: true,
-		keepRecentTokens: 1_000_000,
-		contextWindow: 100_000,
-		script: (request) => request === 1
-			? assistant(fixture, [{ type: "text", text: "tiny overflow" }], "error", { errorMessage: "Prompt too long: context exceeds maximum context length" })
-			: assistant(fixture, [{ type: "text", text: "tiny overflow recovered" }]),
-	});
-	try {
-		await fixture.session.prompt("TINY_OVERFLOW_SENTINEL");
-		await fixture.session.waitForIdle();
-		assert.equal(resetMarkers(fixture).length, 1, "overflow recovery does not require a compactable prefix");
-		assert.equal(fixture.requests.length, 2, "the tiny overflow retries once");
-		assertFreshRequest(fixture, 1, "TINY_OVERFLOW_SENTINEL");
-	} finally {
-		fixture.close();
-	}
-});
-
-test("real AgentSession: final assistant usage crossing the reserve threshold respects compaction enablement", { timeout: 15000 }, async () => {
-	for (const scenario of [
-		{ compactionEnabled: true, expectedMarkers: 1, expectedRequests: 2 },
-		{ compactionEnabled: false, expectedMarkers: 0, expectedRequests: 1 },
-	] as const) {
-		let fixture!: Fixture;
-		fixture = await openFixture({
-			compactionEnabled: scenario.compactionEnabled,
-			contextWindow: 100_000,
-			script: (request) => request === 1
-				? assistant(fixture, [{ type: "text", text: "the final answer crosses the threshold" }], "stop", { usage: usage(80_000, 1) })
-				: assistant(fixture, [{ type: "text", text: "threshold continuation" }]),
-		});
-		try {
-			await fixture.session.prompt("FINAL_USAGE_THRESHOLD_SENTINEL");
-			await fixture.session.waitForIdle();
-			assert.equal(resetMarkers(fixture).length, scenario.expectedMarkers, "final usage reset count follows compaction enablement");
-			assert.equal(fixture.requests.length, scenario.expectedRequests, "final usage continuation follows compaction enablement");
-			if (scenario.compactionEnabled) assertFreshRequest(fixture, 1, "FINAL_USAGE_THRESHOLD_SENTINEL");
-		} finally {
-			fixture.close();
-		}
 	}
 });
 

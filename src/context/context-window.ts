@@ -2,8 +2,8 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { convertToLlm, type CustomEntry, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
-import { BOOT_TYPE, RESET_MARKER_TYPE } from "./protocol.js";
-import type { SessionReader } from "./session-reader.js";
+import { BOOT_TYPE, RESET_MARKER_TYPE } from "../protocol.js";
+import type { SessionReader } from "../session-reader.js";
 
 export type WindowMarker = CustomEntry<{ windowId: string }> & { data: { windowId: string } };
 

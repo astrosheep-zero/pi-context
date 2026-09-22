@@ -1,10 +1,51 @@
-import { assertVirtualPath } from "./model.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { agentSlug, modelSlug, SLUG_PATTERN, type Scope } from "./paths.js";
 
 export type NoteAddress = { scope: Scope; path: string; who?: string };
 
 export const ADDRESS_FORMS = "legal prefixes are @project/, @human/, @self/, @agents/<name>/, @model/, and @models/<name>/; bare names are the session home";
+
+export function assertVirtualPath(value: unknown): string {
+	if (typeof value !== "string" || value.length === 0) throw new Error("path must be a non-empty virtual relative path");
+	if (value.includes("\0") || value.includes("\\") || value.startsWith("/")) throw new Error("path must be a safe virtual relative path");
+	const parts = value.split("/");
+	if (parts.some((part) => part.length === 0 || part === "." || part === "..")) throw new Error("path contains an unsupported component");
+	return value;
+}
+
+/**
+ * Minimal glob over virtual note paths: `*` matches any run within a segment (never
+ * `/`), `**` matches any run across segments (a leading double-star followed by a
+ * slash also matches zero segments, so it covers the root too), `?` matches exactly
+ * one non-`/` character. Everything else is literal and the match is anchored to the
+ * whole path.
+ */
+export function globToRegExp(pattern: string): RegExp {
+	let source = "^";
+	for (let index = 0; index < pattern.length; index++) {
+		const char = pattern[index]!;
+		if (char === "*") {
+			if (pattern[index + 1] === "*") {
+				const followedBySlash = pattern[index + 2] === "/";
+				source += followedBySlash ? "(?:[^]*\\/)?" : "[^]*";
+				index += followedBySlash ? 2 : 1;
+			} else {
+				source += "[^/]*";
+			}
+		} else {
+			source += char.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+		}
+	}
+	return new RegExp(`${source}$`);
+}
+
+/** Glob patterns are not virtual paths (`*` is legal), so they get their own guard: no NUL, no backslashes. */
+export function assertGlobPattern(value: unknown): string | undefined {
+	if (value === undefined || value === null || value === "") return undefined;
+	if (typeof value !== "string") throw new Error("glob pattern must be a string");
+	if (value.includes("\0") || value.includes("\\")) throw new Error("glob pattern must not contain NUL or backslashes");
+	return value;
+}
 
 /**
  * Decode the one public note address into its physical home and virtual path. This is a

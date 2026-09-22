@@ -1,6 +1,9 @@
 // Live smoke: render the REAL boot block against the REAL notes homes (~/.agents/notes),
 // cwd = /Users/astrosheep/playground. Imports only src modules — no test side effects.
-import { bootBlock } from "../src/prompts.ts";
+import { renderBootBlock } from "../src/context/prompts.ts";
+import { loadNotesSnapshot } from "../src/notes/notes-snapshot.ts";
+import { agentSlug, modelSlug } from "../src/notes/paths.ts";
+import { rootWindowId } from "../src/context/context-window.ts";
 
 const ctx = {
 	cwd: process.argv[2] ?? "/Users/astrosheep/playground",
@@ -10,5 +13,12 @@ const ctx = {
 		getBranch: () => [],
 	},
 };
-const boot = bootBlock(ctx as never, "pcw:smoke:current", undefined, false);
+const boot = renderBootBlock({
+	agentName: agentSlug(ctx as never),
+	modelName: modelSlug(ctx as never),
+	firstWindowId: rootWindowId(ctx.sessionManager.getSessionId()),
+	currentWindowId: "pcw:smoke:current",
+	resetLine: false,
+	notes: loadNotesSnapshot(ctx as never),
+});
 console.log(boot);

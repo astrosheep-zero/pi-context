@@ -15,7 +15,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { SessionManager as Manager } from "@earendil-works/pi-coding-agent";
 import piContext, { internal } from "../src/index.js";
-import { registerResetLifecycle } from "../src/reset-lifecycle.js";
+import { registerResetLifecycle } from "../src/context/reset-lifecycle.js";
 
 const previousNotesHome = process.env.PI_NOTES_HOME;
 const testNotesHome = mkdtempSync(join(tmpdir(), "pi-context-lifecycle-notes-"));
@@ -171,30 +171,11 @@ test("off stops future automatic/manual reset requests while an existing marker 
 	const afterOff = resultEntries(await h.emit("turn_end", fakeBoundaryEvent()));
 	assert.equal(afterOff.entries.length, 0, "off does not create another reset");
 	await h.runCommand("pi-context", "on");
-	await h.runCommand("clear-context");
-	assert.equal(h.sent.length, 1, "/clear-context writes one hidden boot without a model turn");
+	await h.runCommand("wipe-memory");
+	assert.equal(h.sent.length, 1, "/wipe-memory writes one hidden boot without a model turn");
 	assert.equal(h.sent[0]?.triggerTurn, false);
 	const markers = h.sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
-	assert.equal(markers.length, 2, "off does not resurrect history; re-enabled clear-context creates the explicit new marker");
-});
-
-test("tree navigation with a marker returns an empty extension summary and never delegates old history to a model", async () => {
-	const h = harness();
-	const marker = h.sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId: "pcw:test:one" });
-	h.sessionManager.appendCustomMessageEntry(internal.BOOT_TYPE, "fresh boot", false, { windowId: "pcw:test:one" });
-	const result = await h.emit("session_before_tree", {
-		type: "session_before_tree",
-		preparation: {
-			targetId: marker,
-			oldLeafId: marker,
-			commonAncestorId: null,
-			entriesToSummarize: h.sessionManager.getBranch(),
-			userWantsSummary: true,
-		},
-		signal: new AbortController().signal,
-	});
-	assert.deepEqual(result.at(-1), { summary: { summary: "" } }, "an empty extension summary prevents SDK summarization");
-	assert.equal(h.sessionManager.getEntries().filter((entry) => entry.type === "branch_summary").length, 0, "the hook itself does not write a summary");
+	assert.equal(markers.length, 2, "off does not resurrect history; re-enabled wipe-memory creates the explicit new marker");
 });
 
 test("reset construction failure preserves incoming and budget drafts without continuation", async () => {

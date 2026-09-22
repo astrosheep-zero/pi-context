@@ -1,6 +1,6 @@
 {
   "name": "@astrosheep/pi-context",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "type": "module",
   "description": "Codex-style context windows for Pi: durable reset windows, session history tools, and persistent notes.",
   "license": "MIT",
@@ -15,7 +15,7 @@
   },
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/extension.js"
     ]
   },
   "files": [
@@ -30,7 +30,7 @@
     "dream": "dist/src/dream/cli.js"
   },
   "scripts": {
-    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json && node -e \"require('node:fs').chmodSync('dist/src/dream/cli.js', 0o755)\"",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json && node scripts/build-extension.mjs && node -e \"require('node:fs').chmodSync('dist/src/dream/cli.js', 0o755)\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js",
     "prepublishOnly": "npm run typecheck",
@@ -46,6 +46,7 @@
     "@earendil-works/pi-ai": "^0.87.0",
     "@earendil-works/pi-coding-agent": "^0.87.0",
     "@types/node": "^22.19.19",
+    "esbuild": "^0.28.2",
     "typescript": "^5.9.3"
   },
   "publishConfig": {

@@ -1,0 +1,323 @@
+import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import test from "node:test";
+import { internal } from "../src/index.js";
+import { loadNotesSnapshot as loadNotesSnapshot } from "../src/notes/notes-snapshot.js";
+import { renderBootBlock } from "../src/context/prompts.js";
+import { localIso } from "../src/notes/frontmatter.js";
+import { physicalPath, scopeDir } from "../src/notes/paths.js";
+import { listNotes, type NoteRow, type Scope } from "../src/notes/store.js";
+import { TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
+import {
+	assertWithinBudget,
+	call,
+	context,
+	explicitBoot,
+	installExtensionTestEnvironment,
+	makeExtension,
+	manager,
+	resultJson,
+	resultRead,
+	runHandlers,
+} from "./helpers/extension.js";
+
+const testEnvironment = installExtensionTestEnvironment("pi-context-integration");
+test.beforeEach(() => testEnvironment.beforeEach());
+test.afterEach(() => testEnvironment.afterEach());
+test.after(() => testEnvironment.dispose());
+
+test("notes_list is most-recently-updated first across merged scopes", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const put = (scope: "session" | "project" | "human", path: string, updated: number) => {
+		const file = physicalPath(scope, path, ctx);
+		mkdirSync(dirname(file), { recursive: true });
+		writeFileSync(file, `---\nscope: ${scope}\norigin: self\nstatus: active\nstale: false\ncreated_at: ${localIso(updated - 1000)}\nupdated_at: ${localIso(updated)}\nlast_accessed: ${localIso(updated)}\naccess_count: 0\n---\n\nbody`);
+	};
+	const base = 1_700_000_000_000;
+	put("session", "b.md", base + 10);
+	put("session", "a.md", base + 10);
+	put("project", "c.md", base + 5);
+	put("human", "e.md", base + 20);
+	const files = async (params: Record<string, unknown>) =>
+		resultJson<{ files: Array<{ address: string }> }>(await call(captured, "notes_list", params, ctx)).files;
+	assert.deepEqual((await files({})).map((file) => file.address), ["@human/e.md", "a.md", "b.md", "@project/c.md"], "updated_at descending with address ascending as the tiebreak");
+	// A same-path pair in two scopes keeps both rows; equal timestamps tie-break by scope name.
+	put("human", "a.md", base + 10);
+	assert.deepEqual((await files({})).filter((file) => file.address.endsWith("a.md")).map((file) => file.address), ["@human/a.md", "a.md"], "equal timestamps tie-break by full address");
+	assert.deepEqual((await files({ pattern: "*.md" })).map((file) => file.address), ["a.md", "b.md"], "a bare pattern narrows to the session home");
+});
+
+test("notes are real files that persist across sessions and round-trip Unicode", async () => {
+	const original = manager();
+	const captured = makeExtension(original);
+	const ctx = context(original);
+	await call(captured, "notes_write", { path: "checkpoint/进度.md", content: "第一行\nneedle Café", scope: "human" }, ctx);
+
+	// A brand-new session over the same physical root sees the human note: nothing is replayed
+	// from session entries, the file itself is the durable artifact.
+	const restored = manager();
+	const restoredCaptured = makeExtension(restored);
+	const restoredCtx = context(restored);
+	const rawRead = await call(restoredCaptured, "notes_read", { path: "checkpoint/进度.md", scope: "human", offset_chars: -4 }, restoredCtx);
+	const read = resultRead(rawRead);
+	assert.equal(read.details.address, "@human/checkpoint/进度.md");
+	assert.equal(read.content, "Café", "a negative offset reads the body tail in one call");
+	const searched = resultJson<{ files: Array<{ path: string; created_at: unknown; updated_at: unknown; matches: Array<{ line: number }> }> }>(
+		await call(restoredCaptured, "notes_search", { query: "Café", scope: "human" }, restoredCtx),
+	);
+	assert.equal(searched.files[0]?.matches[0]?.line, 2);
+	const listedFiles = resultJson<{ files: Array<{ path: string; created_at: unknown; updated_at: unknown }> }>(
+		await call(restoredCaptured, "notes_list", { pattern: "checkpoint/**", scope: "human" }, restoredCtx),
+	);
+	assert.equal(listedFiles.files.length, 1, "glob ** crosses into the checkpoint directory");
+	assert.equal(listedFiles.files[0]?.path, "checkpoint/进度.md");
+	// A single-segment * never crosses `/`, so a nested-only store matches nothing at the root.
+	const rootOnly = resultJson<{ files: Array<{ path: string }> }>(
+		await call(restoredCaptured, "notes_list", { pattern: "*", scope: "human" }, restoredCtx)
+	);
+	assert.equal(rootOnly.files.length, 0, "glob * stays within one segment");
+	assert.equal(searched.files[0]?.created_at, listedFiles.files[0]?.created_at, "note tools agree on the timestamp format");
+	assert.equal(searched.files[0]?.updated_at, listedFiles.files[0]?.updated_at);
+	await assert.rejects(() => call(captured, "notes_write", { path: "../escape", content: "x" }, ctx), /unsupported component/);
+});
+
+test("stale lifecycle: writes and metadata-only edits close and revive a note", async () => {
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const ctx = context(sm);
+
+	await call(captured, "notes_write", { path: "journal.md", content: "log line" }, ctx);
+
+	// metadata-only: content unchanged, flag set, applied 0
+	const markOnly = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { path: "journal.md", stale: true }, ctx));
+	assert.equal(markOnly.applied, 0);
+	assert.equal(listNotes(ctx, { scope: "session" })[0]?.meta.stale, true);
+	assert.equal(resultRead(await call(captured, "notes_read", { path: "journal.md" }, ctx)).content.endsWith("log line"), true, "mark-only leaves content unchanged");
+
+	// explicit revive
+	const revived = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { path: "journal.md", stale: false }, ctx));
+	assert.equal(listNotes(ctx, { scope: "session" })[0]?.meta.stale, false, "stale:false revives");
+
+	// write+stale closure then plain write revival
+	await call(captured, "notes_write", { path: "journal.md", content: "final", stale: true }, ctx);
+	assert.equal(listNotes(ctx, { scope: "session" })[0]?.meta.stale, true);
+	await call(captured, "notes_write", { path: "journal.md", content: "reopened" }, ctx);
+	assert.equal(listNotes(ctx, { scope: "session" })[0]?.meta.stale, false, "writing without stale revives");
+
+	// metadata-only on a missing path is the typed not-found arm
+	const missing = resultJson<{ error?: string }>(await call(captured, "notes_edit", { path: "missing.md", stale: true }, ctx));
+	assert.equal(missing.error, "note not found");
+});
+
+test("the filesystem notes loader treats an absent home as empty but surfaces a real directory read failure", () => {
+	const sm = manager();
+	const ctx = context(sm);
+	assert.deepEqual(listNotes(ctx, { scope: "human" }), [], "a home that has not been created is empty");
+	const blockedHome = scopeDir("human", ctx);
+	writeFileSync(blockedHome, "not a directory");
+	assert.throws(
+		() => listNotes(ctx, { scope: "human" }),
+		(error: unknown) => (error as NodeJS.ErrnoException).code === "ENOTDIR",
+		"a non-ENOENT directory failure is not swallowed as an empty home",
+	);
+});
+
+test("boot note acquisition is one closed snapshot and isolates one or all failed homes", () => {
+	const sm = manager();
+	const ctx = context(sm);
+	const updated = Date.now();
+	const note = (scope: Scope, path: string, address: string, body: string): NoteRow => ({
+		address,
+		scope,
+		path,
+		body,
+		sizeBytes: Buffer.byteLength(body, "utf8"),
+		meta: {
+			scope,
+			origin: "self",
+			status: "active",
+			stale: false,
+			created_at: updated,
+			updated_at: updated,
+			last_accessed: updated,
+			access_count: 0,
+		},
+	});
+	const rows = new Map<Scope, NoteRow[]>([
+		["session", [note("session", "session.md", "session.md", "SESSION_POCKET_BODY")]],
+		["project", [note("project", "MAP.md", "@project/MAP.md", "PROJECT_MAP_BODY")]],
+		["human", [note("human", "human.md", "@human/human.md", "HUMAN_POCKET_BODY")]],
+		["agent", [note("agent", "MAP.md", "@agents/root/MAP.md", "AGENT_MAP_BODY")]],
+		["model", [note("model", "model.md", "@models/default/model.md", "MODEL_POCKET_BODY")]],
+	]);
+	const calls = new Map<Scope, number>();
+	const snapshot = loadNotesSnapshot(ctx, (_ctx, scope) => {
+		calls.set(scope, (calls.get(scope) ?? 0) + 1);
+		return rows.get(scope) ?? [];
+	});
+	assert.deepEqual([...calls.entries()], [["session", 1], ["project", 1], ["human", 1], ["agent", 1], ["model", 1]], "each selected home is loaded exactly once");
+	const renderData = {
+		agentName: "root",
+		modelName: "default",
+		firstWindowId: "pcw:test:root",
+		currentWindowId: "pcw:test:next",
+		previousWindowId: "pcw:test:root",
+		resetLine: true,
+		notes: snapshot,
+	};
+	const rendered = renderBootBlock(renderData);
+	assert.equal(renderBootBlock(renderData), rendered, "rendering the same boot data twice is deterministic");
+	assert.ok(rendered.includes("PROJECT_MAP_BODY") && rendered.includes("AGENT_MAP_BODY"), "MAP residency comes from the snapshot");
+	assert.ok(rendered.includes("session.md") && rendered.includes("@human/human.md"), "pocket rows come from the same snapshot");
+	assert.equal(rendered.includes("SESSION_POCKET_BODY"), false, "pocket bodies stay excluded");
+
+	const readFailure = (code: string): NodeJS.ErrnoException => Object.assign(new Error("scripted read failure"), { code });
+	const oneFailed = loadNotesSnapshot(ctx, (_ctx, scope) => {
+		if (scope === "human") throw readFailure("EIO");
+		return rows.get(scope) ?? [];
+	});
+	assert.deepEqual(oneFailed.unavailable.map((home) => home.label), ["@human"]);
+	const oneFailedText = renderBootBlock({
+		agentName: "root",
+		modelName: "default",
+		firstWindowId: "pcw:test:root",
+		currentWindowId: "pcw:test:next",
+		resetLine: true,
+		notes: oneFailed,
+	});
+	assert.ok(oneFailedText.includes("PROJECT_MAP_BODY") && oneFailedText.includes("notes_list can retry after recovery"), "healthy homes and the recovery notice survive one failure");
+	assert.equal(oneFailedText.includes("HUMAN_POCKET_BODY"), false, "the failed home's index is omitted");
+
+	const allFailed = loadNotesSnapshot(ctx, (_ctx, scope) => {
+		throw readFailure(scope === "session" ? "EACCES" : "EIO");
+	});
+	assert.equal(allFailed.unavailable.length, 5);
+	const allFailedText = renderBootBlock({
+		agentName: "root",
+		modelName: "default",
+		firstWindowId: "pcw:test:root",
+		currentWindowId: "pcw:test:next",
+		previousWindowId: "pcw:test:root",
+		resetLine: true,
+		notes: allFailed,
+	});
+	assert.ok(allFailedText.includes("pcw:test:root") && allFailedText.includes("pcw:test:next"), "identity survives an all-home failure");
+	assert.ok(allFailedText.includes("Your memory resets whenever the context window fills"), "protocol survives an all-home failure");
+	assert.equal(allFailedText.includes("scripted read failure"), false, "the model-facing notice does not expose OS/error details");
+	assert.throws(
+		() => loadNotesSnapshot(ctx, () => { throw new TypeError("programmer failure"); }),
+		(error: unknown) => error instanceof TypeError,
+		"unrelated TypeError construction failures remain visible",
+	);
+	assert.throws(
+		() => loadNotesSnapshot(ctx, () => { throw Object.assign(new Error("invalid argument"), { code: "ERR_INVALID_ARG_TYPE" }); }),
+		(error: unknown) => (error as NodeJS.ErrnoException).code === "ERR_INVALID_ARG_TYPE",
+		"Node ERR_* failures are not treated as filesystem errno failures",
+	);
+});
+
+test("the boot block gives awake agents the notes-home file layout", () => {
+	const session = manager();
+	const rendered = explicitBoot(context(session), "pcw:test:root", undefined, false);
+	assert.equal(rendered.includes(process.env.PI_NOTES_HOME ?? ""), false, "the absolute notes home is never exposed");
+	assert.match(rendered, /bare <vpath>.*@project\/<vpath>.*@human\/<vpath>/);
+});
+
+test("an over-budget note is delivered as a prefix and resumed by next_offset_chars", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const huge = `H${"x".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}`;
+	const text = `${huge}\ntail line`;
+	await call(captured, "notes_write", { path: "huge.md", content: text }, ctx);
+	const rawFirst = await call(captured, "notes_read", { path: "huge.md" }, ctx);
+	assertWithinBudget(rawFirst, "single oversized note");
+	const first = resultRead(rawFirst);
+	assert.ok(first.content.length > 0, "the page is not empty");
+	assert.equal(first.content.includes("…"), false, "the payload is a plain prefix with no marker");
+	assert.ok(first.content.startsWith("---\n"), "the frontmatter is delivered first");
+	assert.equal(first.header, `--- READ WINDOW ---\naddress: huge.md\nchars: [0,${first.next_offset_chars}) of ${first.total_chars}\nnext_offset_chars: ${first.next_offset_chars}\n`, "the raw block names the address, half-open range, and resume cursor");
+	assert.deepEqual(Object.keys(first.details).sort(), ["address", "next_offset_chars", "offset_chars", "total_chars"], "notes_read details carries exactly the raw window address and cursor metadata");
+	assert.equal("content" in first.details, false, "details never duplicates the payload");
+	assert.equal(first.offset_chars, 0, "the default window starts at the resolved offset 0");
+	// Following the cursor reconstructs frontmatter + body by plain concatenation.
+	const parts = [first.content];
+	let offset: number | null = first.next_offset_chars;
+	while (offset !== null) {
+		const rawChunk = await call(captured, "notes_read", { path: "huge.md", offset_chars: offset }, ctx);
+		assertWithinBudget(rawChunk, `huge note chunk at ${offset}`);
+		const chunk = resultRead(rawChunk);
+		assert.equal(chunk.offset_chars, offset, "the response echoes the resolved absolute offset");
+		parts.push(chunk.content);
+		offset = chunk.next_offset_chars;
+	}
+	assert.ok(parts.join("").endsWith(text), "the cursors reconstruct the body exactly");
+
+	// A success carries structured details; an error stays a JSON envelope with no details.
+	const missingResult = await call(captured, "notes_read", { path: "no-such.md" }, ctx);
+	const missing = resultJson<Record<string, unknown>>(missingResult);
+	assert.deepEqual(Object.keys(missing).sort(), ["address", "error"], "the read error carries exactly error and address");
+	assert.equal(missing.error, "note not found");
+	assert.equal(missingResult.details, undefined, "a JSON error carries no details metadata");
+});
+
+test("an over-budget note search match is a named prefix with an honest line address", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	// The query sits behind a prefix, so its address is a real body-absolute offset, not line 1.
+	const hugeLine = `${'p'.repeat(500)}needle ${"y".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}`;
+	await call(captured, "notes_write", { path: "a.md", content: "needle small" }, ctx);
+	await call(captured, "notes_write", { path: "search.md", content: hugeLine }, ctx);
+	const pages: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }> }> = [];
+	let cursor = 0;
+	let next: number | null = 0;
+	while (next !== null) {
+		const found = resultJson<{ files: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }> }>; next_cursor: number | null }>(
+			await call(captured, "notes_search", { query: "needle", cursor }, ctx),
+		);
+		assert.ok(Buffer.byteLength(JSON.stringify(found), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "match result stays within budget");
+		pages.push(...found.files);
+		next = found.next_cursor;
+		if (next !== null) cursor = next;
+	}
+	assert.deepEqual(pages.map((file) => file.path), ["a.md", "search.md"], "pagination reaches the oversized file instead of looping");
+	const oversized = pages[1]!;
+	assert.equal(oversized.matches_total, 1, "the file's full match count is named even though the line was cut");
+	assert.equal(oversized.matches.length, 1);
+	const match = oversized.matches[0]!;
+	assert.equal(match.truncated, true, "the oversized match line is flagged as truncated");
+	assert.ok(hugeLine.startsWith(match.text), "the match text is a plain prefix of the line");
+	assert.equal(match.text.includes("…"), false, "no marker is appended to the match text");
+	assert.equal(match.line, 1, "the informational line number survives");
+	const atMatch = resultRead(await call(captured, "notes_read", { path: "search.md", offset_chars: match.offset_chars }, ctx));
+	assert.ok(atMatch.content.startsWith("needle"), "the search offset starts a read at the matched substring");
+	// The body is reconstructible by following notes_read's cursor from the start of the file.
+	const parts: string[] = [];
+	let offset: number | null = 0;
+	while (offset !== null) {
+		const rawChunk = await call(captured, "notes_read", { path: "search.md", offset_chars: offset }, ctx);
+		assertWithinBudget(rawChunk, `search.md chunk at ${offset}`);
+		const chunk = resultRead(rawChunk);
+		assert.equal(chunk.offset_chars, offset, "the read echoes the resolved address");
+		parts.push(chunk.content);
+		offset = chunk.next_offset_chars;
+	}
+	assert.ok(parts.join("").endsWith(hugeLine), "resuming across pages reconstructs the matched body line");
+});
+
+test("notes_search scopes by glob pattern; a non-matching pattern is an empty page, not an error", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	await call(captured, "notes_write", { path: "deep/nested/a.md", content: "needle here" }, ctx);
+	await call(captured, "notes_write", { path: "top.md", content: "needle there" }, ctx);
+	const scoped = resultJson<{ files: Array<{ path: string }> }>(await call(captured, "notes_search", { query: "needle", pattern: "deep/**" }, ctx));
+	assert.deepEqual(scoped.files.map((file) => file.path), ["deep/nested/a.md"], "a glob scopes the search to the subtree");
+	const none = resultJson<{ files: unknown[]; error?: string }>(await call(captured, "notes_search", { query: "needle", pattern: "absent/**" }, ctx));
+	assert.equal(none.error, undefined, "a non-matching pattern is not an error");
+	assert.deepEqual(none.files, [], "a non-matching pattern is an empty page");
+});

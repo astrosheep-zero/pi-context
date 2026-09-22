@@ -1,4 +1,3 @@
-import { localIso } from "./model.js";
 import type { Scope } from "./paths.js";
 
 export type NoteStatus = "active" | "superseded" | "pending" | "archived";
@@ -31,6 +30,22 @@ const STATUSES: readonly NoteStatus[] = ["active", "superseded", "pending", "arc
 const TIMESTAMP_KEYS = ["created_at", "updated_at", "last_accessed"] as const;
 /** Emission order, exactly the Design's key list. */
 const KNOWN_KEYS = ["origin", "status", "stale", "created_at", "updated_at", "last_accessed", "access_count", "source_window", "supersedes", "recurrence_count", "recurrence_windows"] as const;
+
+const pad2 = (value: number) => String(value).padStart(2, "0");
+
+/**
+ * Format epoch milliseconds as an ISO 8601 string in the host's local time zone with an
+ * explicit numeric offset (e.g. 2026-09-15T17:31:45.392+08:00). A UTC host renders
+ * "+00:00"; the "Z" designator is never used, and Date.parse round-trips the value.
+ */
+export function localIso(epochMs: number): string {
+	const date = new Date(epochMs);
+	const offsetMinutes = -date.getTimezoneOffset();
+	const absOffset = Math.abs(offsetMinutes);
+	const offset = `${offsetMinutes < 0 ? "-" : "+"}${pad2(Math.floor(absOffset / 60))}:${pad2(absOffset % 60)}`;
+	const wallClock = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}.${String(date.getMilliseconds()).padStart(3, "0")}`;
+	return `${wallClock}${offset}`;
+}
 
 export function isScope(value: unknown): value is Scope {
 	return typeof value === "string" && (SCOPES as readonly string[]).includes(value);

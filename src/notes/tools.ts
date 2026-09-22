@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { localIso } from "./model.js";
+import { localIso } from "./frontmatter.js";
 import { DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS, middleTruncate, output, outputRaw, page, prefixFit, readCharacterWindow, readWindowBlock, withinTextBudget } from "../tool-output.js";
 import { cursor, nullableString, positiveInteger, searchQueries, searchQuery } from "../tool-schema.js";
 import { assertAddress } from "./address.js";

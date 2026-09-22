@@ -3,7 +3,7 @@ import { lstat, mkdir, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createAgentSession, createEditToolDefinition, createWriteToolDefinition, ModelRuntime, resolveModelScopeWithDiagnostics, SessionManager, type AgentSession, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { contentText } from "../history.js";
+import { contentText } from "../history/history.js";
 
 export type DreamWrite = { tool: "write" | "edit"; path: string };
 export type DreamResult = { report: string; writes: DreamWrite[]; error?: string };
