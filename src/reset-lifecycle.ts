@@ -38,15 +38,15 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 		overflowPending = false;
 		overflowRecoveryUsed = false;
 	};
-
-	const safeBuildReset = (ctx: ExtensionContext): SessionBoundaryDraft[] | undefined => {
+	const resetBoundaryResult = (entries: SessionBoundaryDraft[], ctx: ExtensionContext) => {
 		try {
-			return options.buildReset(ctx);
+			return { entries: [...entries, ...options.buildReset(ctx)], continue: true as const };
 		} catch (error) {
 			ctx.ui.notify(`pi-context: could not build reset (${String(error)}).`, "warning");
 			return undefined;
 		}
 	};
+
 	const thresholdDue = (ctx: ExtensionContext): boolean => {
 		const usage = windowUsage(ctx);
 		if (!usage || usage.tokens === null) return false;
@@ -55,37 +55,23 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 
 	pi.on("turn_end", (event, ctx) => {
 		if (!active) return undefined;
-		if (isAbort(event.message, event.outcome, ctx)) {
-			explicitRequested = false;
-			return undefined;
-		}
+		const requested = explicitRequested;
+		explicitRequested = false;
+		if (isAbort(event.message, event.outcome, ctx)) return undefined;
 		// Native overflow/length recovery is handled after turn_end through the bounded
 		// settle path; do not turn that failed response into a threshold reset.
 		if (isOverflowLike(event.message, ctx)) {
-			explicitRequested = false;
 			if (options.isEnabled() && options.automaticResetEnabled(ctx)) overflowPending = true;
 			return undefined;
 		}
-		if (event.outcome === "error") {
-			explicitRequested = false;
-			return undefined;
-		}
-		if (!options.isEnabled()) {
-			explicitRequested = false;
-			return undefined;
-		}
+		if (!options.isEnabled() || event.outcome === "error") return undefined;
 		overflowRecoveryUsed = false;
 		// The completed response may be the first event whose persisted usage crosses the
 		// reserve, so a final assistant response does not defer the reset until another prompt.
 		const autoThreshold = options.automaticResetEnabled(ctx) && thresholdDue(ctx);
-		if (!explicitRequested && !autoThreshold) {
-			return undefined;
-		}
-		explicitRequested = false;
+		if (!requested && !autoThreshold) return undefined;
 		overflowPending = false;
-		const drafts = safeBuildReset(ctx);
-		if (!drafts) return undefined;
-		return { entries: [...(event.entries ?? []), ...drafts], continue: true };
+		return resetBoundaryResult(event.entries, ctx);
 	});
 
 	pi.on("agent_before_settle", (event, ctx) => {
@@ -94,9 +80,7 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 		if (!options.isEnabled() || !options.automaticResetEnabled(ctx) || event.outcome === "aborted" || ctx.signal?.aborted) return undefined;
 		if (overflowRecoveryUsed) return undefined;
 		overflowRecoveryUsed = true;
-		const drafts = safeBuildReset(ctx);
-		if (!drafts) return undefined;
-		return { entries: [...(event.entries ?? []), ...drafts], continue: true };
+		return resetBoundaryResult(event.entries, ctx);
 	});
 
 	pi.on("session_before_compact", (event, ctx) => {

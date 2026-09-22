@@ -107,10 +107,9 @@ export default function piContext(pi: ExtensionAPI) {
 	// root windows only refresh a forked boot identity and retain the copied root transcript.
 	pi.on("context_with_system", (event, ctx) => {
 		const reset = currentReset(ctx);
-		const windowId = reset?.data?.windowId ?? rootWindowId(ctx.sessionManager.getSessionId());
+		const windowId = reset?.data.windowId ?? rootWindowId(ctx.sessionManager.getSessionId());
 		try {
-			const activeWindowId = reset?.data?.windowId;
-			return { messages: activeWindowId ? projectWindow(event.messages, activeWindowId) : projectRootWindow(event.messages, windowId) };
+			return { messages: reset ? projectWindow(event.messages, windowId) : projectRootWindow(event.messages, windowId) };
 		} catch (error) {
 			if (missingBootNotice !== windowId) {
 				missingBootNotice = windowId;

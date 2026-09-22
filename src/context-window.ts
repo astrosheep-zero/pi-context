@@ -11,9 +11,9 @@ function hasWindowId(details: unknown, windowId: string): boolean {
 		(details as { windowId: string }).windowId === windowId;
 }
 
-/** Match the current window boot in either a persisted session entry or provider message. */
-export function isWindowBoot(entry: { type?: string; role?: string; customType?: string; details?: unknown }, windowId?: string): boolean {
-	return (entry.type === "custom_message" || entry.role === "custom") && entry.customType === BOOT_TYPE && (windowId === undefined || hasWindowId(entry.details, windowId));
+/** Match a provider-facing boot message, optionally by window identity. */
+export function isWindowBoot(message: AgentMessage, windowId?: string): boolean {
+	return message.role === "custom" && message.customType === BOOT_TYPE && (windowId === undefined || hasWindowId(message.details, windowId));
 }
 
 /**
@@ -21,8 +21,7 @@ export function isWindowBoot(entry: { type?: string; role?: string; customType?:
  * The boot is the first conversation message of the window. Folding only its prefix
  * preserves later prompt/tool patches in place, including their cacheable ordering.
  */
-export function projectWindow(messages: AgentMessage[], windowId: string | undefined): AgentMessage[] {
-	if (!windowId) return messages;
+export function projectWindow(messages: AgentMessage[], windowId: string): AgentMessage[] {
 	const cut = messages.findIndex((message) => isWindowBoot(message, windowId));
 	if (cut < 0) throw new Error(`Missing boot for context window ${windowId}`);
 	const head = getCurrentSystemMessage(messages.slice(0, cut));
@@ -50,8 +49,7 @@ export function windowUsage(ctx: Pick<ExtensionContext, "sessionManager" | "getC
 	if (!reset) return ctx.getContextUsage();
 	const contextWindow = ctx.model?.contextWindow ?? ctx.getContextUsage()?.contextWindow;
 	if (!contextWindow) return undefined;
-	const windowId = reset.data?.windowId;
-	if (!windowId) return undefined;
+	const windowId = reset.data.windowId;
 	try {
 		const messages: AgentMessage[] = projectWindow(ctx.sessionManager.buildSessionProjection().messages, windowId);
 		const { tokens } = estimateContextTokens(convertToLlm(messages));
