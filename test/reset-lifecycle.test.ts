@@ -15,7 +15,14 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { SessionManager as Manager } from "@earendil-works/pi-coding-agent";
 import piContext, { internal } from "../src/index.js";
-import { registerResetLifecycle } from "../src/context/reset-lifecycle.js";
+import {
+	initialResetControl,
+	reduceResetControl,
+	registerResetLifecycle,
+	type ResetBeforeSettleFacts,
+	type ResetControlState,
+	type ResetTurnEndFacts,
+} from "../src/context/reset-lifecycle.js";
 
 const previousNotesHome = process.env.PI_NOTES_HOME;
 const testNotesHome = mkdtempSync(join(tmpdir(), "pi-context-lifecycle-notes-"));
@@ -109,6 +116,29 @@ function appendDrafts(sessionManager: SessionManager, entries: SessionBoundaryDr
 			case "compaction": sessionManager.appendCompaction(entry.summary, entry.firstKeptEntryId, 0, entry.details, true, entry.usage); break;
 		}
 	}
+}
+
+function turnEndFacts(overrides: Partial<ResetTurnEndFacts> = {}): ResetTurnEndFacts {
+	return {
+		aborted: false,
+		overflow: false,
+		failed: false,
+		enabled: true,
+		queued: false,
+		automaticResetEnabled: true,
+		thresholdDue: false,
+		...overrides,
+	};
+}
+
+function beforeSettleFacts(overrides: Partial<ResetBeforeSettleFacts> = {}): ResetBeforeSettleFacts {
+	return {
+		queued: false,
+		enabled: true,
+		automaticResetEnabled: true,
+		aborted: false,
+		...overrides,
+	};
 }
 
 function fakeBoundaryEvent(entries: SessionBoundaryDraft[] = []): TurnEndEvent {
@@ -276,4 +306,212 @@ test("a queued success clears an overflow failure before settle recovery can res
 	const settled = { ...queued, context: { ...queued.context, pendingMessages: [] }, outcome: "completed" };
 	assert.equal(await beforeSettle(settled, ctx), undefined, "the successful queued turn clears the stale recovery");
 	assert.equal(resetCount, 0);
+});
+
+test("reset-control: an explicit request deduplicates and is consumed at the turn boundary", () => {
+	const idle = Object.freeze({ ...initialResetControl() });
+	const first = reduceResetControl(idle, { type: "request" });
+	assert.equal(first.effect, "requested");
+	assert.deepEqual(first.state, { request: "explicit", overflow: "idle" });
+
+	const again = reduceResetControl(first.state, { type: "request" });
+	assert.equal(again.effect, "already-requested");
+	assert.deepEqual(again.state, first.state, "a duplicate request does not change state");
+
+	const committed = reduceResetControl(again.state, { type: "turn_end", facts: turnEndFacts() });
+	assert.equal(committed.effect, "commit-boundary");
+	assert.deepEqual(committed.state, initialResetControl(), "the request is consumed whether or not it commits");
+});
+
+test("reset-control: turn_end commits explicit and threshold resets, and skips disabled or failed turns", () => {
+	const explicit = reduceResetControl({ request: "explicit", overflow: "idle" }, { type: "turn_end", facts: turnEndFacts() });
+	assert.equal(explicit.effect, "commit-boundary");
+
+	const threshold = reduceResetControl(initialResetControl(), { type: "turn_end", facts: turnEndFacts({ thresholdDue: true }) });
+	assert.equal(threshold.effect, "commit-boundary");
+
+	const neither = reduceResetControl(initialResetControl(), { type: "turn_end", facts: turnEndFacts() });
+	assert.equal(neither.effect, "none");
+
+	const disabled = reduceResetControl({ request: "explicit", overflow: "idle" }, { type: "turn_end", facts: turnEndFacts({ enabled: false, thresholdDue: true }) });
+	assert.equal(disabled.effect, "none");
+	assert.deepEqual(disabled.state, initialResetControl(), "a disabled turn drops the explicit request without committing");
+
+	const failed = reduceResetControl({ request: "explicit", overflow: "idle" }, { type: "turn_end", facts: turnEndFacts({ failed: true, thresholdDue: true }) });
+	assert.equal(failed.effect, "none");
+	assert.deepEqual(failed.state, initialResetControl());
+});
+
+test("reset-control: aborted turns clear the boundary, settlement keeps only an explicit request", () => {
+	const both: ResetControlState = { request: "explicit", overflow: "pending" };
+
+	const aborted = reduceResetControl(both, { type: "turn_end", facts: turnEndFacts({ aborted: true }) });
+	assert.equal(aborted.effect, "none");
+	assert.deepEqual(aborted.state, initialResetControl(), "an abort manufactures no continuation");
+
+	const settled = reduceResetControl(both, { type: "settled" });
+	assert.deepEqual(settled.state, { request: "explicit", overflow: "idle" }, "settlement ends the failure chain only");
+
+	const cleared = reduceResetControl(both, { type: "clear" });
+	assert.deepEqual(cleared.state, initialResetControl());
+});
+
+test("reset-control: overflow recovery is armed at turn_end and spent exactly once at settle", () => {
+	const armed = reduceResetControl(initialResetControl(), { type: "turn_end", facts: turnEndFacts({ overflow: true, failed: true }) });
+	assert.deepEqual(armed.state, { request: "none", overflow: "pending" });
+
+	const recovered = reduceResetControl(armed.state, { type: "before_settle", facts: beforeSettleFacts() });
+	assert.equal(recovered.effect, "recover-overflow", "the first settle commits the bounded recovery");
+	assert.deepEqual(recovered.state, { request: "none", overflow: "spent" });
+
+	const repeated = reduceResetControl(recovered.state, { type: "before_settle", facts: beforeSettleFacts() });
+	assert.equal(repeated.effect, "none", "a spent recovery is never retried");
+
+	const rearmed = reduceResetControl(recovered.state, { type: "turn_end", facts: turnEndFacts({ overflow: true, failed: true }) });
+	assert.deepEqual(rearmed.state, { request: "none", overflow: "pending-spent" });
+	const bounded = reduceResetControl(rearmed.state, { type: "before_settle", facts: beforeSettleFacts() });
+	assert.equal(bounded.effect, "none", "a second failure chain stays bounded to the spent attempt");
+	assert.deepEqual(bounded.state, { request: "none", overflow: "spent" });
+});
+
+test("reset-control: a queued turn defers recovery and its success supersedes the failure", () => {
+	const armed = reduceResetControl(initialResetControl(), { type: "turn_end", facts: turnEndFacts({ overflow: true, failed: true }) }).state;
+	const deferred = reduceResetControl(armed, { type: "before_settle", facts: beforeSettleFacts({ queued: true }) });
+	assert.equal(deferred.effect, "none");
+	assert.deepEqual(deferred.state, armed, "a queued message leaves the overflow chain armed");
+
+	const success = reduceResetControl(armed, { type: "turn_end", facts: turnEndFacts() });
+	assert.deepEqual(success.state, initialResetControl(), "a successful queued turn clears the stale failure");
+});
+
+test("reset-control: disabled mode and explicit aborts disarm overflow without a recovery", () => {
+	const armed = reduceResetControl(initialResetControl(), { type: "turn_end", facts: turnEndFacts({ overflow: true, failed: true }) }).state;
+
+	const disabled = reduceResetControl(armed, { type: "before_settle", facts: beforeSettleFacts({ enabled: false }) });
+	assert.equal(disabled.effect, "none");
+	assert.deepEqual(disabled.state, { request: "none", overflow: "idle" });
+
+	const automaticOff = reduceResetControl(armed, { type: "before_settle", facts: beforeSettleFacts({ automaticResetEnabled: false }) });
+	assert.equal(automaticOff.effect, "none");
+	assert.deepEqual(automaticOff.state, { request: "none", overflow: "idle" });
+
+	const aborted = reduceResetControl(armed, { type: "before_settle", facts: beforeSettleFacts({ aborted: true }) });
+	assert.equal(aborted.effect, "none");
+	assert.deepEqual(aborted.state, { request: "none", overflow: "idle" });
+});
+
+test("reset-control: policy guards are consulted only in the branches that need them", () => {
+	const tracked = (overrides: {
+		aborted?: boolean;
+		overflow?: boolean;
+		failed?: boolean;
+		enabled?: boolean;
+		queuedResult?: boolean;
+		automaticResult?: boolean;
+		thresholdResult?: boolean;
+	}) => {
+		const calls = { queued: 0, automatic: 0, threshold: 0 };
+		const facts: ResetTurnEndFacts = {
+			aborted: overrides.aborted ?? false,
+			overflow: overrides.overflow ?? false,
+			failed: overrides.failed ?? false,
+			enabled: overrides.enabled ?? true,
+			get queued() { calls.queued += 1; return overrides.queuedResult ?? false; },
+			get automaticResetEnabled() { calls.automatic += 1; return overrides.automaticResult ?? true; },
+			get thresholdDue() { calls.threshold += 1; return overrides.thresholdResult ?? true; },
+		};
+		return { facts, calls };
+	};
+
+	const aborted = tracked({ aborted: true });
+	reduceResetControl(initialResetControl(), { type: "turn_end", facts: aborted.facts });
+	assert.deepEqual(aborted.calls, { queued: 0, automatic: 0, threshold: 0 }, "an abort consults no policy guard");
+
+	const failed = tracked({ failed: true });
+	reduceResetControl(initialResetControl(), { type: "turn_end", facts: failed.facts });
+	assert.deepEqual(failed.calls, { queued: 0, automatic: 0, threshold: 0 }, "a failed turn consults no threshold guard");
+
+	const disabled = tracked({ enabled: false });
+	reduceResetControl(initialResetControl(), { type: "turn_end", facts: disabled.facts });
+	assert.deepEqual(disabled.calls, { queued: 0, automatic: 0, threshold: 0 }, "a disabled turn consults no threshold guard");
+
+	const overflow = tracked({ overflow: true, queuedResult: false });
+	reduceResetControl(initialResetControl(), { type: "turn_end", facts: overflow.facts });
+	assert.deepEqual(overflow.calls, { queued: 1, automatic: 1, threshold: 0 }, "an overflow turn consults only the overflow guards");
+
+	const complete = tracked({ thresholdResult: false });
+	reduceResetControl(initialResetControl(), { type: "turn_end", facts: complete.facts });
+	assert.deepEqual(complete.calls, { queued: 0, automatic: 0, threshold: 1 }, "a completed turn consults only the threshold guard");
+
+	const settleCalls = { queued: 0, enabled: 0, automatic: 0 };
+	const settleFacts: ResetBeforeSettleFacts = {
+		get queued() { settleCalls.queued += 1; return true; },
+		get enabled() { settleCalls.enabled += 1; return true; },
+		get automaticResetEnabled() { settleCalls.automatic += 1; return true; },
+		aborted: false,
+	};
+	reduceResetControl({ request: "none", overflow: "pending" }, { type: "before_settle", facts: settleFacts });
+	assert.deepEqual(settleCalls, { queued: 1, enabled: 0, automatic: 0 }, "a queued settle consults only the pending-message guard");
+});
+
+test("a committed reset places incoming and budget drafts before marker -> boot -> continuation", async () => {
+	const sessionManager = Manager.inMemory("/private/tmp/pi-context-reset-ordering-test");
+	const handlers = new Map<string, Handler[]>();
+	const api = {
+		on(name: string, handler: Handler) {
+			const list = handlers.get(name) ?? [];
+			list.push(handler);
+			handlers.set(name, list);
+			return () => {};
+		},
+	} as unknown as ExtensionAPI;
+	const ctx = {
+		sessionManager,
+		model: undefined,
+		signal: undefined,
+		hasPendingMessages: () => false,
+		ui: { notify() {} },
+	} as unknown as ExtensionContext;
+	const windowId = "pcw:ordering:test";
+	const budgetDraft: SessionBoundaryDraft = { type: "custom_message", customType: internal.GUIDANCE_TYPE, content: "budget draft", display: false };
+	const lifecycle = registerResetLifecycle(api, {
+		isEnabled: () => true,
+		budget: {
+			automaticResetEnabled: () => true,
+			resetDue: () => false,
+			consumeTurnEnd: () => [budgetDraft],
+			clear: () => {},
+		},
+		buildReset: () => [
+			{ type: "custom", customType: internal.RESET_MARKER_TYPE, data: { windowId } },
+			{ type: "custom_message", customType: internal.BOOT_TYPE, content: "boot", display: false, details: { windowId } },
+			{ type: "custom_message", customType: internal.CONTINUATION_TYPE, content: "continuation", display: false },
+		],
+	});
+	lifecycle.request();
+	const incoming: SessionBoundaryDraft = { type: "custom_message", customType: "foreign/boundary", content: "incoming", display: false };
+	const results = [];
+	for (const handler of handlers.get("turn_end") ?? []) results.push(await handler(fakeBoundaryEvent([incoming]), ctx));
+	const result = resultEntries(results);
+	assert.equal(result.continue, true);
+	const customTypes = (entries: readonly { readonly type: string; readonly customType?: string }[]) => entries.map((entry) => {
+		assert.ok(entry.type === "custom" || entry.type === "custom_message", "the boundary only carries named reset drafts here");
+		return entry.customType;
+	});
+	assert.deepEqual(customTypes(result.entries), [
+		"foreign/boundary",
+		internal.GUIDANCE_TYPE,
+		internal.RESET_MARKER_TYPE,
+		internal.BOOT_TYPE,
+		internal.CONTINUATION_TYPE,
+	], "ordinary and budget drafts precede the closed reset shape");
+	appendDrafts(sessionManager, result.entries);
+	const branch = sessionManager.getBranch();
+	const markerIndex = branch.findIndex((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
+	assert.ok(markerIndex >= 0);
+	assert.deepEqual(customTypes(branch.slice(markerIndex)), [
+		internal.RESET_MARKER_TYPE,
+		internal.BOOT_TYPE,
+		internal.CONTINUATION_TYPE,
+	], "the persisted reset shape remains marker -> boot -> continuation");
 });
