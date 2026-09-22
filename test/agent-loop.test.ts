@@ -37,6 +37,7 @@ async function openFixture(options: {
 	compactionEnabled?: boolean;
 	keepRecentTokens?: number;
 	contextWindow?: number;
+	notesRootFile?: boolean;
 	systemPrompt?: string;
 	tools?: string[];
 	cwd?: string;
@@ -54,6 +55,10 @@ async function openFixture(options: {
 	const notesRoot = options.notesRoot ?? mkdtempSync(join(tmpdir(), "pi-context-agent-loop-notes-"));
 	const ownsNotesRoot = options.notesRoot === undefined;
 	const agentDir = options.agentDir ?? dir;
+	if (options.notesRootFile) {
+		rmSync(notesRoot, { recursive: true, force: true });
+		writeFileSync(notesRoot, "blocked notes root");
+	}
 	const previousDir = process.env.PI_CODING_AGENT_DIR;
 	const previousNotesRoot = process.env.PI_NOTES_HOME;
 	process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -235,6 +240,35 @@ test("real AgentSession: explicit tiny-session wipe ignores keepRecentTokens and
 		assert.equal((boot.details as { windowId: string }).windowId, windowId);
 		assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "compaction").length, 0, "the explicit path does not manufacture a native compaction");
 		assert.ok(JSON.stringify(fixture.sessionManager.getBranch()).includes("OLD_CONTEXT_SENTINEL"), "raw history remains readable");
+	} finally {
+		fixture.close();
+	}
+});
+
+test("real AgentSession: a reset survives all notes-home read failures with an incomplete boot", { timeout: 15000 }, async () => {
+	let fixture!: Fixture;
+	fixture = await openFixture({
+		compactionEnabled: false,
+		notesRootFile: true,
+		script: (request) => request === 1
+			? assistant(fixture, [{ type: "toolCall", id: "wipe-notes-failure", name: "wipe_memory", arguments: {} }], "toolUse")
+			: assistant(fixture, [{ type: "text", text: "resumed despite notes failure" }]),
+	});
+	try {
+		await fixture.session.prompt("NOTES_FAILURE_RESET_SENTINEL");
+		await fixture.session.waitForIdle();
+		assert.equal(fixture.requests.length, 2, "the failed notes index does not cancel the continuation");
+		assertFreshRequest(fixture, 1, "NOTES_FAILURE_RESET_SENTINEL");
+		assert.equal(resetMarkers(fixture).length, 1, "one reset marker is committed");
+		const marker = resetMarkers(fixture)[0]!;
+		assert.equal(marker.type, "custom");
+		const windowId = (marker.data as { windowId: string }).windowId;
+		const boot = fixture.sessionManager.getBranch().find((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && entry.details && typeof entry.details === "object" && (entry.details as { windowId?: unknown }).windowId === windowId);
+		assert.ok(boot && boot.type === "custom_message");
+		const bootText = typeof boot.content === "string" ? boot.content : JSON.stringify(boot.content);
+		assert.ok(bootText.includes("Notes index incomplete"));
+		assert.ok(bootText.includes("notes_list can retry after recovery"));
+		assert.ok(bootText.includes("<context_window_protocol>"));
 	} finally {
 		fixture.close();
 	}

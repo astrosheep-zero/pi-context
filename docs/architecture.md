@@ -10,11 +10,12 @@ pi-context uses Pi's session branch as the durable source of truth. It does not 
 | `history.ts` | Project branch entries into windows/items using the shared window identity | `SessionReader`, read-only branch and session ID |
 | `context-window.ts` | Own durable window identity, select the active boot, project provider context, and account for active-window usage | `SessionReader` plus Pi context/system projection APIs |
 | `notes/model.ts` | Replay persisted note operations and validate virtual paths/timestamps | Filesystem-backed notes homes; no session-branch selection |
+| `notes/store.ts` | Read and mutate the filesystem-backed homes; distinguish an absent home from a real read failure | Notes filesystem only; boot acquisition isolates one home at a time |
 | `history-tools.ts` | Public history schemas and tool results over branch projections | Pi tool API plus read projections |
 | `notes/tools.ts` | Filesystem note tool adapters; append validated note operations | Pi tool API plus notes filesystem |
 | `budget.ts` | Own the per-extension-instance settings cache, report usable budget, stage guidance/warning drafts, and resolve automatic reset decisions | Pi settings/context hooks |
 | `thresholds.ts` | Purely read settings and derive the reminder/reserve/warning lines from Pi's reserve plus the pi-context margins | Pi `SettingsManager`, read-only; no mutable cache |
-| `prompts.ts` | Render static boot block, note index, reminder and warning | Read projections and protocol text |
+| `prompts.ts` | Acquire the once-per-boot notes snapshot and render the static boot block, note index, reminder and warning | Explicit snapshot data and protocol text; rendering has no filesystem or UI effects |
 | `reset-lifecycle.ts` | Own reset requests, turn-end batching, recovery and continuation | Pi lifecycle hooks and injected boundary builder |
 | `protocol.ts` | Persisted entry tags, protocol text and defaults | No imports or effects |
 | `tool-schema.ts`, `tool-output.ts` | Shared wire-schema primitives and JSON result encoding | No session state |
@@ -32,6 +33,8 @@ The final context projection selects the active boot by `details.windowId` and f
 Boot and reminder deduplication inspect the current branch-local window. Reloading JSONL therefore does not duplicate messages, while navigation to a sibling branch cannot inherit another branch's window state. A fork/clone receives a new session ID while copying its selected path, so startup must also verify that a root boot's `details.windowId` matches the new `rootWindowId(sessionId)` before treating it as present.
 
 History reads reconstruct the selected session branch on demand without a cache, so branch navigation cannot expose history from a sibling.
+
+The boot notes index is a closed snapshot: the current session, project, human, agent, and model homes are each loaded at most once while constructing a boot. MAP bodies and pocket metadata are derived from that same snapshot, so a boot cannot mix two filesystem reads. A missing home (`ENOENT`) is normal. A real read failure omits only that home's index, preserves healthy homes, adds a model-facing `notes_list` recovery notice, and notifies the human once for that window. The window identity, reset/protocol text, and lifecycle boundary are still constructed through the normal path; note reads never mutate files or create fallback state.
 
 Note replay accepts only supported operations, safe virtual paths, representable timestamps and results within the UTF-8 size limit. Invalid operations are ignored; they cannot replace a valid note. Notes remain in their filesystem-backed homes, unchanged by session branch navigation.
 

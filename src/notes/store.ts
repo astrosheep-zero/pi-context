@@ -49,8 +49,12 @@ function walkMarkdown(dir: string, base = dir): string[] {
 	let entries: Dirent[];
 	try {
 		entries = readdirSync(dir, { withFileTypes: true });
-	} catch {
-		return [];
+	} catch (error) {
+		// A home that has never been created is normal. Every other directory
+		// failure must reach the boot snapshot boundary instead of masquerading as
+		// an empty home.
+		if (typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "ENOENT") return [];
+		throw error;
 	}
 	const paths: string[] = [];
 	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {

@@ -18,10 +18,11 @@ import {
 	type TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import piContext, { historyFromSession, internal, notesFromSession } from "../src/index.js";
-import { bootBlock } from "../src/prompts.js";
+import { loadBootNotesSnapshot, renderBootBlock } from "../src/prompts.js";
 import { localIso } from "../src/notes/model.js";
-import { physicalPath } from "../src/notes/paths.js";
-import { listNotes } from "../src/notes/store.js";
+import { agentSlug, modelSlug, physicalPath, scopeDir } from "../src/notes/paths.js";
+import { rootWindowId } from "../src/context-window.js";
+import { listNotes, type NoteRow, type Scope } from "../src/notes/store.js";
 import { middleTruncate, page, TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
 import { CONTINUATION_TYPE, NOTE_TYPE, MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
 
@@ -138,6 +139,18 @@ export function makeExtension(sessionManager: SessionManager): Captured {
 	// The harness implements only the ExtensionAPI members this extension uses.
 	piContext(api as unknown as ExtensionAPI);
 	return captured;
+}
+
+function explicitBoot(ctx: ExtensionContext, currentWindowId: string, previousWindowId: string | undefined, resetLine: boolean): string {
+	return renderBootBlock({
+		agentName: agentSlug(ctx),
+		modelName: modelSlug(ctx),
+		firstWindowId: rootWindowId(ctx.sessionManager.getSessionId()),
+		currentWindowId,
+		previousWindowId,
+		resetLine,
+		notes: loadBootNotesSnapshot(ctx),
+	});
 }
 
 export function context(
@@ -561,6 +574,113 @@ test("notes tools stay usable while a dream holds the lock", async () => {
 	assert.equal(edited.applied, 1, "notes_edit still applies while a dream lock is held");
 });
 
+test("the filesystem notes loader treats an absent home as empty but surfaces a real directory read failure", () => {
+	const sm = manager();
+	const ctx = context(sm);
+	assert.deepEqual(listNotes(ctx, { scope: "human" }), [], "a home that has not been created is empty");
+	const blockedHome = scopeDir("human", ctx);
+	writeFileSync(blockedHome, "not a directory");
+	assert.throws(
+		() => listNotes(ctx, { scope: "human" }),
+		(error: unknown) => (error as NodeJS.ErrnoException).code === "ENOTDIR",
+		"a non-ENOENT directory failure is not swallowed as an empty home",
+	);
+});
+
+test("boot note acquisition is one closed snapshot and isolates one or all failed homes", () => {
+	const sm = manager();
+	const ctx = context(sm);
+	const updated = Date.now();
+	const note = (scope: Scope, path: string, address: string, body: string): NoteRow => ({
+		address,
+		scope,
+		path,
+		body,
+		sizeBytes: Buffer.byteLength(body, "utf8"),
+		meta: {
+			scope,
+			origin: "self",
+			status: "active",
+			stale: false,
+			created_at: updated,
+			updated_at: updated,
+			last_accessed: updated,
+			access_count: 0,
+		},
+	});
+	const rows = new Map<Scope, NoteRow[]>([
+		["session", [note("session", "session.md", "session.md", "SESSION_POCKET_BODY")]],
+		["project", [note("project", "MAP.md", "@project/MAP.md", "PROJECT_MAP_BODY")]],
+		["human", [note("human", "human.md", "@human/human.md", "HUMAN_POCKET_BODY")]],
+		["agent", [note("agent", "MAP.md", "@agents/root/MAP.md", "AGENT_MAP_BODY")]],
+		["model", [note("model", "model.md", "@models/default/model.md", "MODEL_POCKET_BODY")]],
+	]);
+	const calls = new Map<Scope, number>();
+	const snapshot = loadBootNotesSnapshot(ctx, (_ctx, scope) => {
+		calls.set(scope, (calls.get(scope) ?? 0) + 1);
+		return rows.get(scope) ?? [];
+	});
+	assert.deepEqual([...calls.entries()], [["session", 1], ["project", 1], ["human", 1], ["agent", 1], ["model", 1]], "each selected home is loaded exactly once");
+	const renderData = {
+		agentName: "root",
+		modelName: "default",
+		firstWindowId: "pcw:test:root",
+		currentWindowId: "pcw:test:next",
+		previousWindowId: "pcw:test:root",
+		resetLine: true,
+		notes: snapshot,
+	};
+	const rendered = renderBootBlock(renderData);
+	assert.equal(renderBootBlock(renderData), rendered, "rendering the same boot data twice is deterministic");
+	assert.ok(rendered.includes("PROJECT_MAP_BODY") && rendered.includes("AGENT_MAP_BODY"), "MAP residency comes from the snapshot");
+	assert.ok(rendered.includes("session.md") && rendered.includes("@human/human.md"), "pocket rows come from the same snapshot");
+	assert.equal(rendered.includes("SESSION_POCKET_BODY"), false, "pocket bodies stay excluded");
+
+	const readFailure = (code: string): NodeJS.ErrnoException => Object.assign(new Error("scripted read failure"), { code });
+	const oneFailed = loadBootNotesSnapshot(ctx, (_ctx, scope) => {
+		if (scope === "human") throw readFailure("EIO");
+		return rows.get(scope) ?? [];
+	});
+	assert.deepEqual(oneFailed.unavailable.map((home) => home.label), ["@human"]);
+	const oneFailedText = renderBootBlock({
+		agentName: "root",
+		modelName: "default",
+		firstWindowId: "pcw:test:root",
+		currentWindowId: "pcw:test:next",
+		resetLine: true,
+		notes: oneFailed,
+	});
+	assert.ok(oneFailedText.includes("PROJECT_MAP_BODY") && oneFailedText.includes("notes_list can retry after recovery"), "healthy homes and the recovery notice survive one failure");
+	assert.equal(oneFailedText.includes("HUMAN_POCKET_BODY"), false, "the failed home's index is omitted");
+
+	const allFailed = loadBootNotesSnapshot(ctx, (_ctx, scope) => {
+		throw readFailure(scope === "session" ? "EACCES" : "EIO");
+	});
+	assert.equal(allFailed.unavailable.length, 5);
+	const allFailedText = renderBootBlock({
+		agentName: "root",
+		modelName: "default",
+		firstWindowId: "pcw:test:root",
+		currentWindowId: "pcw:test:next",
+		previousWindowId: "pcw:test:root",
+		resetLine: true,
+		notes: allFailed,
+	});
+	assert.ok(allFailedText.includes("pcw:test:root") && allFailedText.includes("pcw:test:next"), "identity survives an all-home failure");
+	assert.ok(allFailedText.includes("Your memory resets whenever the context window fills"), "protocol survives an all-home failure");
+	assert.equal(allFailedText.includes("scripted read failure"), false, "the model-facing notice does not expose OS/error details");
+	assert.throws(
+		() => loadBootNotesSnapshot(ctx, () => { throw new TypeError("programmer failure"); }),
+		(error: unknown) => error instanceof TypeError,
+		"unrelated TypeError construction failures remain visible",
+	);
+	assert.throws(
+		() => loadBootNotesSnapshot(ctx, () => { throw Object.assign(new Error("invalid argument"), { code: "ERR_INVALID_ARG_TYPE" }); }),
+		(error: unknown) => (error as NodeJS.ErrnoException).code === "ERR_INVALID_ARG_TYPE",
+		"Node ERR_* failures are not treated as filesystem errno failures",
+	);
+});
+
 test("the boot notes index excludes stale notes while list, read, and search still see them", async () => {
 	const sm = manager();
 	const captured = makeExtension(sm);
@@ -602,7 +722,7 @@ test("the boot notes index omits itself when every note is stale", async () => {
 
 test("the boot block gives awake agents the notes-home file layout", () => {
 	const session = manager();
-	const rendered = bootBlock(context(session), "pcw:test:root", undefined, false);
+	const rendered = explicitBoot(context(session), "pcw:test:root", undefined, false);
 	assert.equal(rendered.includes(process.env.PI_NOTES_HOME ?? ""), false, "the absolute notes home is never exposed");
 	assert.match(rendered, /bare <vpath>.*@project\/<vpath>.*@human\/<vpath>/);
 });
@@ -614,7 +734,7 @@ test("the boot block keeps fresh human and project maps resident, never a sessio
 	await call(captured, "notes_write", { address: "MAP.md", content: "MAP: session" }, ctx);
 	await call(captured, "notes_write", { address: "@project/MAP.md", content: "MAP: project" }, ctx);
 	await call(captured, "notes_write", { address: "@human/MAP.md", content: "MAP: human" }, ctx);
-	const rendered = bootBlock(ctx, "pcw:test:root", undefined, false);
+	const rendered = explicitBoot(ctx, "pcw:test:root", undefined, false);
 	assert.ok(rendered.includes("MAP: human"));
 	assert.ok(rendered.includes("MAP: project"));
 	assert.equal(rendered.includes("MAP: session"), false);
@@ -1260,6 +1380,58 @@ test("the boot notes index shows one metadata line per note and never a body", a
 	assert.equal(text.includes(shortText), false, "the short note's body never reaches boot");
 });
 
+test("a real reset still commits one paired boundary when every notes home read fails", async () => {
+	const notesRoot = process.env.PI_NOTES_HOME!;
+	const blockedRoot = join(notesRoot, "blocked-notes-root");
+	writeFileSync(blockedRoot, "not a directory");
+	process.env.PI_NOTES_HOME = blockedRoot;
+	const sessionManager = manager();
+	const captured = makeExtension(sessionManager);
+	const ctx = context(sessionManager);
+	appendText(sessionManager, "user", "RAW_HISTORY_SURVIVES_NOTES_FAILURE");
+
+	runHandlers(captured, "session_start", { reason: "startup" }, ctx);
+	const initialBoot = captured.sent[0];
+	assert.ok(initialBoot && typeof initialBoot.message.content === "string");
+	assert.ok(initialBoot.message.content.includes("Notes index incomplete"));
+	assert.equal(noticesOf(ctx).length, 1, "the human gets one notice for the root boot");
+	runHandlers(captured, "session_start", { reason: "reload" }, ctx);
+	assert.equal(noticesOf(ctx).length, 1, "reloading an existing boot does not repeat its notice");
+
+	await call(captured, "wipe_memory", {}, ctx);
+	const boundary = await commitTurnEndBoundary(captured, sessionManager, ctx);
+	assert.equal(boundary.continue, true, "notes failures do not cancel the reset continuation");
+	const entries = sessionManager.getBranch();
+	const markers = entries.filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
+	assert.equal(markers.length, 1);
+	const marker = markers[0];
+	assert.ok(marker && marker.type === "custom");
+	const windowId = (marker.data as { windowId: string }).windowId;
+	const boot = entries.find((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE && entry.details && typeof entry.details === "object" && (entry.details as { windowId?: unknown }).windowId === windowId);
+	assert.ok(boot && boot.type === "custom_message", "the reset boot is paired with its marker");
+	const bootText = typeof boot.content === "string" ? boot.content : JSON.stringify(boot.content);
+	assert.ok(bootText.includes(internal.RESET_SUMMARY));
+	assert.ok(bootText.includes("Notes index incomplete") && bootText.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG));
+	assert.equal(noticesOf(ctx).length, 2, "the human gets one notice for the new boot");
+	assert.ok(JSON.stringify(entries).includes("RAW_HISTORY_SURVIVES_NOTES_FAILURE"), "raw history remains durable");
+	const projected = await runContextWithSystemHook(captured, ctx, sessionManager.buildSessionProjection().messages);
+	assert.equal(JSON.stringify(projected?.messages ?? []).includes("RAW_HISTORY_SURVIVES_NOTES_FAILURE"), false, "the reset projection still excludes the old context");
+});
+
+test("/pi-context on routes missing-boot note warnings through the same notifier", async () => {
+	const notesRoot = process.env.PI_NOTES_HOME!;
+	const blockedRoot = join(notesRoot, "blocked-on-root");
+	writeFileSync(blockedRoot, "not a directory");
+	process.env.PI_NOTES_HOME = blockedRoot;
+	const sessionManager = manager();
+	const captured = makeExtension(sessionManager);
+	const ctx = context(sessionManager);
+	const notices = await runCommand(captured, "pi-context", "on", ctx);
+	assert.ok(notices.some((notice) => notice.type === "warning" && notice.message.includes("notes index incomplete")), "turning on repairs the boot with the incomplete-index warning");
+	const boot = captured.sent[0];
+	assert.ok(boot && typeof boot.message.content === "string" && boot.message.content.includes("notes_list can retry after recovery"));
+});
+
 test("the root boot and reset boot carry durable window identity", async () => {
 	const sessionManager = manager();
 	const captured = makeExtension(sessionManager);
@@ -1361,7 +1533,7 @@ test("marker window ids drive history_* lookups and provider projection", async 
 	appendText(sessionManager, "user", "task before reset");
 	const windowId = "pcw:test:marker";
 	const markerId = sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId });
-	sessionManager.appendCustomMessageEntry(internal.BOOT_TYPE, bootBlock(ctx, windowId, "pcw:test:root", true), false, { windowId });
+	sessionManager.appendCustomMessageEntry(internal.BOOT_TYPE, explicitBoot(ctx, windowId, "pcw:test:root", true), false, { windowId });
 	const currentId = appendText(sessionManager, "assistant", "message after reset");
 
 	// history_windows reports exactly the minted id carried in details.

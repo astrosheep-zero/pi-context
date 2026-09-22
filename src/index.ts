@@ -7,15 +7,29 @@ import { registerBudget } from "./budget.js";
 import { output } from "./tool-output.js";
 import { deriveThresholds, mergePiContextSettings } from "./thresholds.js";
 import { NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, WARNING_TYPE, RESET_MARKER_TYPE, CONTINUATION_TYPE, MAX_NOTE_BYTES, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, WARNING_RUNWAY_TOKENS, RESET_SUMMARY, CONTINUATION, WARNING_PROMPT } from "./protocol.js";
-import { currentReset, currentWindowId, isWindowMarker, rootWindowId, isWindowBoot, projectRootWindow, projectWindow } from "./context-window.js";
 import { assertVirtualPath } from "./notes/model.js";
-import { migrateLegacyHomes } from "./notes/paths.js";
-import { bootBlock } from "./prompts.js";
+import { agentSlug, migrateLegacyHomes, modelSlug } from "./notes/paths.js";
+import { loadBootNotesSnapshot, renderBootBlock, type BootNotesSnapshot } from "./prompts.js";
+import { currentReset, currentWindowId, isWindowBoot, isWindowMarker, projectRootWindow, projectWindow, rootWindowId } from "./context-window.js";
 import { registerResetLifecycle } from "./reset-lifecycle.js";
 export { historyFromSession } from "./history.js";
 export { notesFromSession } from "./notes/model.js";
 
-function buildResetDrafts(ctx: ExtensionContext) {
+type IncompleteNotesNotifier = (ctx: ExtensionContext, windowId: string, snapshot: BootNotesSnapshot) => void;
+
+function bootContent(ctx: ExtensionContext, currentId: string, previousId: string | undefined, resetLine: boolean, notes: BootNotesSnapshot): string {
+	return renderBootBlock({
+		agentName: agentSlug(ctx),
+		modelName: modelSlug(ctx),
+		firstWindowId: rootWindowId(ctx.sessionManager.getSessionId()),
+		currentWindowId: currentId,
+		previousWindowId: previousId,
+		resetLine,
+		notes,
+	});
+}
+
+function buildResetDrafts(ctx: ExtensionContext, notifyIncompleteNotes?: IncompleteNotesNotifier) {
 	const sessionPrefix = ctx.sessionManager.getSessionId().slice(0, 8);
 	const usedWindowIds = new Set(
 		ctx.sessionManager.getBranch().filter(isWindowMarker).map((entry) => entry.data.windowId),
@@ -24,12 +38,14 @@ function buildResetDrafts(ctx: ExtensionContext) {
 	do {
 		windowId = `pcw:${sessionPrefix}:${randomUUID().slice(0, 8)}`;
 	} while (usedWindowIds.has(windowId));
+	const notes = loadBootNotesSnapshot(ctx);
+	notifyIncompleteNotes?.(ctx, windowId, notes);
 	return [
 		{ type: "custom", customType: RESET_MARKER_TYPE, data: { windowId } },
 		{
 			type: "custom_message",
 			customType: BOOT_TYPE,
-			content: bootBlock(ctx, windowId, currentWindowId(ctx), true),
+			content: bootContent(ctx, windowId, currentWindowId(ctx), true, notes),
 			display: false,
 			details: { windowId },
 		},
@@ -42,7 +58,7 @@ function buildResetDrafts(ctx: ExtensionContext) {
 	] satisfies [SessionBoundaryDraft, SessionBoundaryDraft, SessionBoundaryDraft];
 }
 
-function ensureBoot(pi: ExtensionAPI, ctx: ExtensionContext): void {
+function ensureBoot(pi: ExtensionAPI, ctx: ExtensionContext, notifyIncompleteNotes?: IncompleteNotesNotifier): void {
 	const reset = currentReset(ctx);
 	const sessionId = ctx.sessionManager.getSessionId();
 	const windowId = reset?.data?.windowId ?? rootWindowId(sessionId);
@@ -55,8 +71,19 @@ function ensureBoot(pi: ExtensionAPI, ctx: ExtensionContext): void {
 			if (isWindowMarker(entry)) previousId = entry.data.windowId;
 		}
 	}
+	const notes = loadBootNotesSnapshot(ctx);
+	notifyIncompleteNotes?.(ctx, windowId, notes);
 	pi.sendMessage(
-		{ customType: BOOT_TYPE, content: bootBlock(ctx, windowId, previousId, reset !== undefined), display: false, details: { windowId } },
+		{ customType: BOOT_TYPE, content: bootContent(ctx, windowId, previousId, reset !== undefined, notes), display: false, details: { windowId } },
+		{ triggerTurn: false },
+	);
+}
+
+function persistManualReset(pi: ExtensionAPI, ctx: ExtensionContext, notifyIncompleteNotes?: IncompleteNotesNotifier): void {
+	const [marker, boot] = buildResetDrafts(ctx, notifyIncompleteNotes);
+	pi.appendEntry(marker.customType, marker.data);
+	pi.sendMessage(
+		{ customType: boot.customType, content: boot.content, display: boot.display, details: boot.details },
 		{ triggerTurn: false },
 	);
 }
@@ -81,15 +108,6 @@ function isWindowBootEntry(entry: ReturnType<ExtensionContext["sessionManager"][
 		(entry.details as { windowId: string }).windowId === windowId;
 }
 
-function persistManualReset(pi: ExtensionAPI, ctx: ExtensionContext): void {
-	const [marker, boot] = buildResetDrafts(ctx);
-	pi.appendEntry(marker.customType, marker.data);
-	pi.sendMessage(
-		{ customType: boot.customType, content: boot.content, display: boot.display, details: boot.details },
-		{ triggerTurn: false },
-	);
-}
-
 function branchHasWindowMarker(ctx: ExtensionContext, fromId?: string): boolean {
 	return ctx.sessionManager.getBranch(fromId).some((entry) => isWindowMarker(entry));
 }
@@ -97,6 +115,13 @@ function branchHasWindowMarker(ctx: ExtensionContext, fromId?: string): boolean 
 export default function piContext(pi: ExtensionAPI) {
 	let enabled = true;
 	let missingBootNotice: string | undefined;
+	const incompleteNotesNotified = new Set<string>();
+	const notifyIncompleteNotes: IncompleteNotesNotifier = (ctx, windowId, snapshot) => {
+		if (snapshot.unavailable.length === 0 || incompleteNotesNotified.has(windowId)) return;
+		incompleteNotesNotified.add(windowId);
+		const homes = snapshot.unavailable.map((home) => home.label).join(", ");
+		ctx.ui.notify(`pi-context: notes index incomplete for ${homes}; notes_list can retry after recovery.`, "warning");
+	};
 	const migrationWarning = migrateLegacyHomes();
 	if (migrationWarning) console.warn(`pi-context: ${migrationWarning}`);
 
@@ -105,11 +130,11 @@ export default function piContext(pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		if (!enabled) return;
 		missingBootNotice = undefined;
-		ensureBoot(pi, ctx);
+		ensureBoot(pi, ctx, notifyIncompleteNotes);
 	});
 	pi.on("session_tree", (_event, ctx) => {
 		missingBootNotice = undefined;
-		if (enabled) ensureBoot(pi, ctx);
+		if (enabled) ensureBoot(pi, ctx, notifyIncompleteNotes);
 	});
 
 	// Pi's branch summarizer receives raw entries and bypasses context_with_system. Do not
@@ -147,7 +172,7 @@ export default function piContext(pi: ExtensionAPI) {
 			const arg = args.trim().toLowerCase();
 			if (arg === "on") {
 				enabled = true;
-				ensureBoot(pi, cmdCtx);
+				ensureBoot(pi, cmdCtx, notifyIncompleteNotes);
 			} else if (arg === "off") {
 				enabled = false;
 				budget.clear();
@@ -170,7 +195,7 @@ export default function piContext(pi: ExtensionAPI) {
 			await cmdCtx.waitForIdle();
 			if (!enabled) return;
 			resets.clear();
-			persistManualReset(pi, cmdCtx);
+			persistManualReset(pi, cmdCtx, notifyIncompleteNotes);
 			cmdCtx.ui.notify("pi-context: context cleared; the next prompt starts in a fresh window.", "info");
 		},
 	});
@@ -191,8 +216,8 @@ export default function piContext(pi: ExtensionAPI) {
 
 	const resets = registerResetLifecycle(pi, {
 		isEnabled: () => enabled,
+		buildReset: (ctx) => buildResetDrafts(ctx, notifyIncompleteNotes),
 		budget,
-		buildReset: buildResetDrafts,
 	});
 }
 
