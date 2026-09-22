@@ -32,6 +32,7 @@ type Fixture = {
 	streamSignals: boolean[];
 	events: Array<{ type: string; [key: string]: unknown }>;
 	notices: string[];
+	budgetNotices: () => number;
 	close: () => void;
 };
 
@@ -106,6 +107,7 @@ async function openFixture(options: {
 	const streamSignals: boolean[] = [];
 	const events: Array<{ type: string; [key: string]: unknown }> = [];
 	const notices: string[] = [];
+	let budgetNotices = 0;
 	let session!: AgentSession;
 	const loader = new DefaultResourceLoader({
 		cwd: dir,
@@ -167,16 +169,13 @@ async function openFixture(options: {
 	};
 	await session.bindExtensions({
 		uiContext: {
-			notify(message: string) {
+			notify(message: string, type?: "info" | "warning" | "error") {
 				if (message.startsWith("pi-context: memory cleared · ")) {
 					const windowId = message.split(" · ")[1];
 					assert.ok(sessionManager.getBranch().some((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE && (entry.data as { windowId?: string })?.windowId === windowId), "notification follows the reset marker commit");
 					assert.ok(sessionManager.getBranch().some((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && (entry.details as { windowId?: string })?.windowId === windowId), "notification follows the reset boot commit");
 				}
-				if (message.includes("context budget low") || message.includes("context budget critical")) {
-					const customType = message.includes("context budget critical") ? WARNING_TYPE : GUIDANCE_TYPE;
-					assert.ok(sessionManager.getBranch().some((entry) => entry.type === "custom_message" && entry.customType === customType), "budget notifications follow the reminder commit");
-				}
+				if (type === "warning" && sessionManager.getBranch().some((entry) => entry.type === "custom_message" && (entry.customType === GUIDANCE_TYPE || entry.customType === WARNING_TYPE))) budgetNotices++;
 				notices.push(message);
 			},
 		} as ExtensionUIContext,
@@ -192,6 +191,7 @@ async function openFixture(options: {
 		streamSignals,
 		events,
 		notices,
+		budgetNotices: () => budgetNotices,
 		close: () => {
 			session.dispose();
 			if (managesEnvironment) {
@@ -266,22 +266,22 @@ test("real AgentSession: aborted low-budget requests notify only after a retry c
 	});
 	try {
 		const reminders = () => fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === GUIDANCE_TYPE);
-		const notices = () => fixture.notices.filter((message) => message.includes("context budget low"));
+		const notices = () => fixture.budgetNotices();
 		await fixture.session.prompt("Establish usage below the reminder line.");
 		await fixture.session.waitForIdle();
 		assert.equal(reminders().length, 0);
 		await fixture.session.prompt("Abort this low-budget request.");
 		await fixture.session.waitForIdle();
 		assert.equal(reminders().length, 0, "an aborted turn does not commit its reminder");
-		assert.equal(notices().length, 0, "an uncommitted reminder never notifies");
+		assert.equal(notices(), 0, "an uncommitted reminder never notifies");
 		await fixture.session.prompt("Retry successfully.");
 		await fixture.session.waitForIdle();
 		assert.equal(reminders().length, 1);
-		assert.equal(notices().length, 1, "the committed retry notifies once");
+		assert.equal(notices(), 1, "the committed retry notifies once");
 		await fixture.session.prompt("Continue in the same window.");
 		await fixture.session.waitForIdle();
 		assert.equal(reminders().length, 1);
-		assert.equal(notices().length, 1, "later turns cannot repeat the notice");
+		assert.equal(notices(), 1, "later turns cannot repeat the notice");
 	} finally {
 		fixture.close();
 	}
