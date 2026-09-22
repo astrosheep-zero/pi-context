@@ -86,17 +86,10 @@ export function inspectResetTail(ctx: ExtensionContext, markerId: string, window
 	return { boot, continuation };
 }
 
-/** True once the marker's tail already carries its boot and continuation in order. */
+/** True once the marker's tail already carries its boot and continuation in a valid order. */
 export function resetTailCommitted(ctx: ExtensionContext, markerId: string, windowId: string): boolean {
-	const branch = ctx.sessionManager.getBranch();
-	const markerIndex = branch.findIndex((entry) => entry.id === markerId);
-	if (markerIndex < 0) return false;
-	let boot = false;
-	for (const entry of branch.slice(markerIndex + 1)) {
-		if (isWindowBootEntry(entry, windowId)) boot = true;
-		else if (boot && isWindowContinuationEntry(entry)) return true;
-	}
-	return false;
+	const tail = inspectResetTail(ctx, markerId, windowId);
+	return tail?.boot === true && tail.continuation === true;
 }
 
 /** Emit only the reset artifacts an incomplete tail is missing, in the closed order. */
