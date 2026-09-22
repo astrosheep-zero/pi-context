@@ -14,7 +14,7 @@ import {
 	type AgentSession,
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import piContext from "../src/index.js";
+import piContext, { createPiContext } from "../src/index.js";
 import { BOOT_TYPE, CONTEXT_WINDOW_OPEN_TAG, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, RESET_MARKER_TYPE, WARNING_TYPE } from "../src/protocol.js";
 
 type StreamScript = (request: number, context: AgentContext) => AssistantMessage;
@@ -44,7 +44,11 @@ async function openFixture(options: {
 	agentDir?: string;
 	notesRoot?: string;
 	writeSettings?: boolean;
+	defaultCompactionEnabled?: boolean;
+	defaultReserveTokens?: number;
 	projectSettings?: Record<string, unknown>;
+	settingsManager?: SettingsManager | ((model: Fixture["model"]) => SettingsManager);
+	manageEnvironment?: boolean;
 	projectTrusted?: boolean;
 	seed?: (sessionManager: SessionManager) => void;
 	script: StreamScript;
@@ -55,14 +59,17 @@ async function openFixture(options: {
 	const notesRoot = options.notesRoot ?? mkdtempSync(join(tmpdir(), "pi-context-agent-loop-notes-"));
 	const ownsNotesRoot = options.notesRoot === undefined;
 	const agentDir = options.agentDir ?? dir;
+	const managesEnvironment = options.manageEnvironment ?? true;
+	const previousDir = managesEnvironment ? process.env.PI_CODING_AGENT_DIR : undefined;
+	const previousNotesRoot = managesEnvironment ? process.env.PI_NOTES_HOME : undefined;
+	if (managesEnvironment) {
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		process.env.PI_NOTES_HOME = notesRoot;
+	}
 	if (options.notesRootFile) {
 		rmSync(notesRoot, { recursive: true, force: true });
 		writeFileSync(notesRoot, "blocked notes root");
 	}
-	const previousDir = process.env.PI_CODING_AGENT_DIR;
-	const previousNotesRoot = process.env.PI_NOTES_HOME;
-	process.env.PI_CODING_AGENT_DIR = agentDir;
-	process.env.PI_NOTES_HOME = notesRoot;
 	const runtime = await ModelRuntime.create({
 		authPath: join(dir, "auth.json"),
 		modelsPath: null,
@@ -79,8 +86,8 @@ async function openFixture(options: {
 	runtime.completeSimple = (() => { throw new Error("unexpected native model request"); }) as typeof runtime.completeSimple;
 	if (options.writeSettings !== false) writeFileSync(join(agentDir, "settings.json"), JSON.stringify({
 		compaction: {
-			enabled: options.compactionEnabled ?? true,
-			reserveTokens: 32_768,
+			enabled: options.defaultCompactionEnabled ?? options.compactionEnabled ?? true,
+			reserveTokens: options.defaultReserveTokens ?? 32_768,
 			keepRecentTokens: options.keepRecentTokens ?? 200,
 		},
 		retry: { enabled: false },
@@ -89,7 +96,9 @@ async function openFixture(options: {
 		mkdirSync(join(dir, ".pi"), { recursive: true });
 		writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify(options.projectSettings));
 	}
-	const settingsManager = SettingsManager.create(dir, agentDir, { projectTrusted: options.projectTrusted ?? true });
+	const settingsManager = typeof options.settingsManager === "function"
+		? options.settingsManager(model)
+		: options.settingsManager ?? SettingsManager.create(dir, agentDir, { projectTrusted: options.projectTrusted ?? true });
 	const requests: AgentContext[] = [];
 	const streamContexts: AgentContext[] = [];
 	const streamSignals: boolean[] = [];
@@ -97,7 +106,7 @@ async function openFixture(options: {
 	let session!: AgentSession;
 	const loader = new DefaultResourceLoader({
 		cwd: dir,
-		agentDir: dir,
+		agentDir,
 		settingsManager,
 		noExtensions: true,
 		noSkills: true,
@@ -105,7 +114,7 @@ async function openFixture(options: {
 		noPromptTemplates: true,
 		systemPromptOverride: () => options.systemPrompt ?? "Use the tools as requested.",
 		agentsFilesOverride: () => ({ agentsFiles: [] }),
-		extensionFactories: [piContext, (pi) => {
+		extensionFactories: [options.settingsManager ? createPiContext({ settingsManager }) : piContext, (pi) => {
 		options.hook?.(pi, () => session, requests);
 	}],
 	});
@@ -114,7 +123,7 @@ async function openFixture(options: {
 	options.seed?.(sessionManager);
 	const created = await createAgentSession({
 		cwd: dir,
-		agentDir: dir,
+		agentDir,
 		modelRuntime: runtime,
 		model,
 		settingsManager,
@@ -166,10 +175,12 @@ async function openFixture(options: {
 		events,
 		close: () => {
 			session.dispose();
-			if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-			else process.env.PI_CODING_AGENT_DIR = previousDir;
-			if (previousNotesRoot === undefined) delete process.env.PI_NOTES_HOME;
-			else process.env.PI_NOTES_HOME = previousNotesRoot;
+			if (managesEnvironment) {
+				if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+				else process.env.PI_CODING_AGENT_DIR = previousDir;
+				if (previousNotesRoot === undefined) delete process.env.PI_NOTES_HOME;
+				else process.env.PI_NOTES_HOME = previousNotesRoot;
+			}
 			if (ownsDir) rmSync(dir, { recursive: true, force: true });
 			if (ownsNotesRoot) rmSync(notesRoot, { recursive: true, force: true });
 		},
@@ -207,6 +218,18 @@ function text(message: AgentContext | undefined): string {
 
 function resetMarkers(fixture: Fixture) {
 	return fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE);
+}
+
+function contextRemainingResults(fixture: Fixture): Array<number | null> {
+	const results: Array<number | null> = [];
+	for (const entry of fixture.sessionManager.getBranch()) {
+		if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "get_context_remaining") continue;
+		const content = (entry.message.content as Array<{ type?: string; text?: string }>).find((part) => part.type === "text")?.text;
+		if (content === undefined) continue;
+		const value = JSON.parse(content) as { remaining_tokens?: unknown };
+		if (typeof value.remaining_tokens === "number" || value.remaining_tokens === null) results.push(value.remaining_tokens);
+	}
+	return results;
 }
 
 function assertFreshRequest(fixture: Fixture, requestIndex: number, oldSentinel: string): void {
@@ -689,6 +712,192 @@ test("real AgentSession: concurrent trusted projects keep reserve and automatic 
 		rmSync(cwdAutomatic, { recursive: true, force: true });
 		rmSync(cwdModel, { recursive: true, force: true });
 		rmSync(cwdSession, { recursive: true, force: true });
+	}
+});
+
+test("real AgentSession: injected settings managers own live policy and ignore conflicting default files", { timeout: 20000 }, async () => {
+	const firstManager = SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens: 80_000 } });
+	const secondManager = SettingsManager.inMemory({ compaction: { enabled: false, reserveTokens: 20_000 } });
+	const defaultAgentDir = mkdtempSync(join(tmpdir(), "pi-context-injected-default-agent-"));
+	const notesRoot = mkdtempSync(join(tmpdir(), "pi-context-injected-notes-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const previousNotesRoot = process.env.PI_NOTES_HOME;
+	writeFileSync(join(defaultAgentDir, "settings.json"), JSON.stringify({ compaction: { enabled: false, reserveTokens: 1_000 } }));
+	process.env.PI_CODING_AGENT_DIR = defaultAgentDir;
+	process.env.PI_NOTES_HOME = notesRoot;
+	let first!: Fixture;
+	let second!: Fixture;
+	const firstHighUsage = { next: false };
+	const secondHighUsage = { next: false };
+	const script = (getFixture: () => Fixture, highUsage: { next: boolean }) => (request: number) => {
+		const fixture = getFixture();
+		if (request === 1) {
+			highUsage.next = false;
+			return assistant(fixture, [{ type: "toolCall", id: "remaining", name: "get_context_remaining", arguments: {} }], "toolUse", { usage: usage(20_000) });
+		}
+		const input = highUsage.next ? 85_000 : 100;
+		highUsage.next = false;
+		return assistant(fixture, [{ type: "text", text: "scripted policy response" }], "stop", { usage: usage(input) });
+	};
+	try {
+		first = await openFixture({
+			contextWindow: 100_000,
+			agentDir: defaultAgentDir,
+			notesRoot,
+			writeSettings: false,
+			defaultCompactionEnabled: false,
+			defaultReserveTokens: 1_000,
+			settingsManager: firstManager,
+			manageEnvironment: false,
+			tools: ["get_context_remaining"],
+			script: script(() => first, firstHighUsage),
+		});
+		second = await openFixture({
+			contextWindow: 100_000,
+			agentDir: defaultAgentDir,
+			notesRoot,
+			writeSettings: false,
+			defaultCompactionEnabled: true,
+			defaultReserveTokens: 95_000,
+			settingsManager: secondManager,
+			manageEnvironment: false,
+			tools: ["get_context_remaining"],
+			script: script(() => second, secondHighUsage),
+		});
+
+		await Promise.all([first.session.prompt("INJECTED_FIRST"), second.session.prompt("INJECTED_SECOND")]);
+		await Promise.all([first.session.waitForIdle(), second.session.waitForIdle()]);
+		assert.deepEqual(contextRemainingResults(first), [0], "the injected high reserve reaches the warning line in the real tool result");
+		assert.ok((contextRemainingResults(second)[0] ?? 0) > 0, "the second injected reserve produces a distinct real tool result");
+		assert.equal(resetMarkers(first).length, 1, "enabled injected policy resets at the first session's reserve");
+		assert.equal(resetMarkers(second).length, 0, "disabled injected policy does not inherit the first session's reset decision");
+
+		firstHighUsage.next = true;
+		firstManager.setCompactionEnabled(false);
+		firstManager.applyOverrides({ compaction: { reserveTokens: 90_000 } });
+		await first.session.prompt("INJECTED_LIVE_DISABLE");
+		await first.session.waitForIdle();
+		assert.equal(resetMarkers(first).length, 1, "a public setter disables the next turn without reload");
+		assert.equal(resetMarkers(second).length, 0, "the second live manager remains unchanged");
+
+		firstHighUsage.next = true;
+		firstManager.setCompactionEnabled(true);
+		firstManager.applyOverrides({ compaction: { reserveTokens: 1_000 } });
+		await first.session.prompt("INJECTED_LIVE_ENABLE_LOW_RESERVE");
+		await first.session.waitForIdle();
+		assert.equal(resetMarkers(first).length, 1, "live enablement and a lower reserve apply on the next turn");
+
+		firstHighUsage.next = true;
+		firstManager.applyOverrides({ compaction: { reserveTokens: 90_000 } });
+		await first.session.prompt("INJECTED_LIVE_HIGH_RESERVE");
+		await first.session.waitForIdle();
+		assert.equal(resetMarkers(first).length, 2, "a live reserve increase drives the next reset decision");
+	} finally {
+		second?.close();
+		first?.close();
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		if (previousNotesRoot === undefined) delete process.env.PI_NOTES_HOME;
+		else process.env.PI_NOTES_HOME = previousNotesRoot;
+		rmSync(defaultAgentDir, { recursive: true, force: true });
+		rmSync(notesRoot, { recursive: true, force: true });
+	}
+});
+
+test("real AgentSession: injected model overrides select the active model's reserve", { timeout: 20000 }, async () => {
+	let settingsManager!: SettingsManager;
+	let modelBId = "";
+	const notesRoot = mkdtempSync(join(tmpdir(), "pi-context-model-override-notes-"));
+	const previousNotesRoot = process.env.PI_NOTES_HOME;
+	process.env.PI_NOTES_HOME = notesRoot;
+	let fixture!: Fixture;
+	fixture = await openFixture({
+		contextWindow: 100_000,
+		notesRoot,
+		settingsManager: (model) => {
+			modelBId = `${model.id}-changed`;
+			settingsManager = SettingsManager.inMemory({
+				compaction: {
+					enabled: false,
+					reserveTokens: 10_000,
+					modelOverrides: {
+						[`${model.provider}/${model.id}`]: { reserveTokens: 70_000 },
+						[`${model.provider}/${modelBId}`]: { reserveTokens: 1_000 },
+					},
+				},
+			});
+			return settingsManager;
+		},
+		manageEnvironment: false,
+		tools: ["get_context_remaining"],
+		script: (request) => request === 1 || request === 3
+			? assistant(fixture, [{ type: "toolCall", id: `remaining-${request}`, name: "get_context_remaining", arguments: {} }], "toolUse", { usage: usage(30_000) })
+			: assistant(fixture, [{ type: "text", text: "scripted model override response" }], "stop", { usage: usage(1_000) }),
+	});
+	try {
+		await fixture.session.prompt("MODEL_OVERRIDE_A");
+		await fixture.session.waitForIdle();
+		assert.deepEqual(contextRemainingResults(fixture), [0], "model-a's high reserve reaches zero in the real tool result");
+
+		const changedModel = { ...fixture.model, id: modelBId };
+		fixture.model = changedModel;
+		await fixture.session.setModel(changedModel, { persist: false });
+		await fixture.session.prompt("MODEL_OVERRIDE_B");
+		await fixture.session.waitForIdle();
+		const results = contextRemainingResults(fixture);
+		assert.equal(results.length, 2);
+		assert.ok((results[1] ?? 0) > 0, "model-b's lower reserve is selected for the next real tool result");
+	} finally {
+		fixture.close();
+		if (previousNotesRoot === undefined) delete process.env.PI_NOTES_HOME;
+		else process.env.PI_NOTES_HOME = previousNotesRoot;
+		rmSync(notesRoot, { recursive: true, force: true });
+	}
+});
+
+test("real AgentSession: an injected manager loaded from custom agentDir beats conflicting defaults", { timeout: 20000 }, async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-context-custom-sdk-cwd-"));
+	const defaultAgentDir = mkdtempSync(join(tmpdir(), "pi-context-custom-sdk-default-"));
+	const authorityAgentDir = mkdtempSync(join(tmpdir(), "pi-context-custom-sdk-authority-"));
+	const notesRoot = mkdtempSync(join(tmpdir(), "pi-context-custom-sdk-notes-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const previousNotesRoot = process.env.PI_NOTES_HOME;
+	process.env.PI_CODING_AGENT_DIR = defaultAgentDir;
+	process.env.PI_NOTES_HOME = notesRoot;
+	writeFileSync(join(authorityAgentDir, "settings.json"), JSON.stringify({ compaction: { enabled: true, reserveTokens: 42_000 } }));
+	let fixture!: Fixture;
+	const highUsage = { next: true };
+	try {
+		fixture = await openFixture({
+			cwd,
+			agentDir: defaultAgentDir,
+			notesRoot,
+			manageEnvironment: false,
+			defaultCompactionEnabled: false,
+			defaultReserveTokens: 1_000,
+			settingsManager: () => SettingsManager.create(cwd, authorityAgentDir, { projectTrusted: true }),
+			tools: ["get_context_remaining"],
+			script: (request) => {
+				if (request === 1) return assistant(fixture, [{ type: "toolCall", id: "custom-authority", name: "get_context_remaining", arguments: {} }], "toolUse", { usage: usage(5_000) });
+				const input = highUsage.next ? 85_000 : 100;
+				highUsage.next = false;
+				return assistant(fixture, [{ type: "text", text: "scripted custom authority response" }], "stop", { usage: usage(input) });
+			},
+		});
+		await fixture.session.prompt("CUSTOM_AGENT_DIR_AUTHORITY");
+		await fixture.session.waitForIdle();
+		assert.ok((contextRemainingResults(fixture)[0] ?? 0) > 0, "the custom authority reserve reaches the real tool");
+		assert.equal(resetMarkers(fixture).length, 1, "the custom authority enablement drives the real reset");
+	} finally {
+		fixture?.close();
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(defaultAgentDir, { recursive: true, force: true });
+		rmSync(authorityAgentDir, { recursive: true, force: true });
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		if (previousNotesRoot === undefined) delete process.env.PI_NOTES_HOME;
+		else process.env.PI_NOTES_HOME = previousNotesRoot;
+		rmSync(notesRoot, { recursive: true, force: true });
 	}
 });
 

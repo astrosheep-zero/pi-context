@@ -1,6 +1,6 @@
 # Reset lifecycle
 
-`src/reset-lifecycle.ts` owns reset requests, turn-end batching, recovery, and continuation. It is the sole `turn_end` composer: incoming drafts, budget drafts, and reset drafts are ordered here. `src/budget.ts` owns one instance-local policy cache and stages guidance/warning drafts; `src/thresholds.ts` only reads settings and derives values. `src/index.ts` composes the features and constructs marker/boot boundaries; projections, tools, and prompt rendering have separate modules described in [Architecture](architecture.md).
+`src/reset-lifecycle.ts` owns reset requests, turn-end batching, recovery, and continuation. It is the sole `turn_end` composer: incoming drafts, budget drafts, and reset drafts are ordered here. `src/budget.ts` owns the default-path instance-local policy cache, resolves injected policy live, and stages guidance/warning drafts; `src/thresholds.ts` only reads settings and derives values. `src/index.ts` composes the features and constructs marker/boot boundaries; projections, tools, and prompt rendering have separate modules described in [Architecture](architecture.md).
 
 | Event | Transition / owner |
 | --- | --- |

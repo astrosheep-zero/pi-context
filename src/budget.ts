@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
-import { defineTool, type ExtensionAPI, type ExtensionContext, type SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionContext, type SessionBoundaryDraft, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { GUIDANCE_CLOSE_TAG, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, WARNING_PROMPT, WARNING_TYPE } from "./protocol.js";
-import { readThresholdSettings, type ResolvedThresholds } from "./thresholds.js";
+import { readThresholdSettings, type ResolvedThresholds, type ThresholdSettingsResolution } from "./thresholds.js";
 import { currentWindowId, hasWindowMessage, windowUsage } from "./context-window.js";
 import { tokenBudgetGuidance } from "./prompts.js";
 import { output } from "./tool-output.js";
@@ -12,15 +12,25 @@ export function remainingTokens(ctx: Pick<ExtensionContext, "sessionManager" | "
 	return !usage || usage.tokens === null ? null : Math.max(0, usage.contextWindow - usage.tokens);
 }
 
-export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean) {
+export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean, settingsManager?: SettingsManager) {
 	let cachedPolicy: { thresholds: ResolvedThresholds; automatic: boolean } | undefined;
+	const notifiedWarnings = new Set<string>();
+	const resolvePolicy = (ctx: ExtensionContext): ThresholdSettingsResolution => {
+		if (!settingsManager && cachedPolicy) return { ...cachedPolicy, warnings: [] };
+		const resolution = readThresholdSettings(ctx, settingsManager);
+		for (const warning of resolution.warnings) {
+			if (notifiedWarnings.has(warning)) continue;
+			notifiedWarnings.add(warning);
+			ctx.ui.notify(warning, "warning");
+		}
+		if (!settingsManager) cachedPolicy = { thresholds: resolution.thresholds, automatic: resolution.automatic };
+		return resolution;
+	};
 	const thresholdsFor = (ctx: ExtensionContext): ResolvedThresholds => {
-		if (!cachedPolicy) cachedPolicy = readThresholdSettings(ctx);
-		return cachedPolicy.thresholds;
+		return resolvePolicy(ctx).thresholds;
 	};
 	const automaticResetEnabled = (ctx: ExtensionContext): boolean => {
-		if (!cachedPolicy) cachedPolicy = readThresholdSettings(ctx);
-		return cachedPolicy.automatic;
+		return resolvePolicy(ctx).automatic;
 	};
 	const resetDue = (ctx: ExtensionContext): boolean => {
 		if (!automaticResetEnabled(ctx)) return false;
@@ -38,6 +48,7 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean) {
 	const resetForTransition = () => {
 		clearStaged();
 		invalidateThresholds();
+		notifiedWarnings.clear();
 	};
 
 	const consumeTurnEnd = (ctx: ExtensionContext): SessionBoundaryDraft[] => {
@@ -57,8 +68,8 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean) {
 
 	pi.on("session_start", (_event, ctx) => { resetForTransition(); thresholdsFor(ctx); });
 	pi.on("session_tree", resetForTransition);
-	pi.on("model_select", () => { clearStaged(); invalidateThresholds(); });
-	pi.on("session_shutdown", clearStaged);
+	pi.on("model_select", resetForTransition);
+	pi.on("session_shutdown", resetForTransition);
 	// A request can fail before Pi emits turn_end. agent_settled is the public
 	// lifecycle point that must discard an uncommitted draft before the next prompt.
 	pi.on("agent_settled", clearStaged);

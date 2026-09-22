@@ -17,7 +17,7 @@ import {
 	type ToolDefinition,
 	type TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
-import piContext, { historyFromSession, internal, notesFromSession } from "../src/index.js";
+import piContext, { createPiContext, historyFromSession, internal, notesFromSession } from "../src/index.js";
 import { loadBootNotesSnapshot, renderBootBlock } from "../src/prompts.js";
 import { localIso } from "../src/notes/model.js";
 import { agentSlug, modelSlug, physicalPath, scopeDir } from "../src/notes/paths.js";
@@ -111,7 +111,7 @@ export function manager(persisted = false): SessionManager {
 	return SessionManager.create("/private/tmp/pi-context-test", dir);
 }
 
-export function makeExtension(sessionManager: SessionManager): Captured {
+export function makeExtension(sessionManager: SessionManager, settingsManager?: SettingsManager): Captured {
 	const captured: Captured = { tools: new Map(), handlers: new Map(), commands: new Map(), sent: [], contextMessages: [], flags: [] };
 	const api = {
 		registerFlag(name: string) {
@@ -137,7 +137,7 @@ export function makeExtension(sessionManager: SessionManager): Captured {
 		},
 	};
 	// The harness implements only the ExtensionAPI members this extension uses.
-	piContext(api as unknown as ExtensionAPI);
+	(settingsManager ? createPiContext({ settingsManager }) : piContext)(api as unknown as ExtensionAPI);
 	return captured;
 }
 
@@ -160,13 +160,13 @@ export function context(
 	idle = true,
 	cwd = DEFAULT_CWD,
 	projectTrusted = true,
-	model?: string,
+	model?: string | { provider: string; id: string },
 ): ExtensionContext {
 	const notices: Notice[] = [];
 	const compactionRequests: Array<Parameters<ExtensionContext["compact"]>[0]> = [];
 	const fake: Pick<ExtensionContext, "sessionManager" | "getContextUsage" | "compact" | "isIdle" | "hasPendingMessages" | "cwd" | "isProjectTrusted" | "ui" | "model"> = {
 		sessionManager,
-		model: model ? ({ id: model } as unknown as ExtensionContext["model"]) : undefined,
+		model: typeof model === "string" ? ({ id: model } as unknown as ExtensionContext["model"]) : model as ExtensionContext["model"] | undefined,
 		getContextUsage: () => usage,
 		compact: (options) => { compactionRequests.push(options); compact?.(options); },
 		isIdle: () => idle,
@@ -1832,6 +1832,24 @@ test("an invalid reminder margin degrades to its default with one warning and ne
 	await commitTurnEndBoundary(captured, sm, crossing);
 	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1, "the degraded reminder is persisted once");
 	assert.equal(notices.length, 1, "warning stays one-time across handler calls");
+});
+
+test("injected invalid-margin diagnostics stay instance-owned and do not repeat per query", async () => {
+	const settingsManager = SettingsManager.inMemory({
+		compaction: { enabled: true, reserveTokens: 16_384 },
+		[internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 0 },
+	} as unknown as NonNullable<Parameters<typeof SettingsManager.inMemory>[0]>);
+	const sm = manager();
+	const captured = makeExtension(sm, settingsManager);
+	const ctx = context(sm, undefined, { tokens: 100, percent: 0.1, contextWindow: 100_000 }, true);
+	runHandlers(captured, "session_start", { reason: "startup" }, ctx);
+	const first = resultJson<{ remaining_tokens: unknown }>(await call(captured, "get_context_remaining", {}, ctx));
+	const second = resultJson<{ remaining_tokens: unknown }>(await call(captured, "get_context_remaining", {}, ctx));
+	assert.equal(typeof first.remaining_tokens, "number", "the first query resolves a usable context budget");
+	assert.equal(typeof second.remaining_tokens, "number", "the repeated query resolves a usable context budget");
+	const notices = noticesOf(ctx);
+	assert.equal(notices.length, 1, "the injected resolver is live but identical invalid warnings are deduplicated by budget");
+	assert.match(notices[0]?.message ?? "", /reminderMarginTokens/);
 });
 
 test("the old threshold flags are no longer registered", () => {

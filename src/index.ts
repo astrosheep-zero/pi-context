@@ -1,5 +1,5 @@
 import { getCurrentSystemMessage, Type } from "@earendil-works/pi-ai";
-import { defineTool, type ExtensionAPI, type ExtensionContext, type SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionContext, type ExtensionFactory, type SessionBoundaryDraft, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { registerHistoryTools } from "./history-tools.js";
 import { registerNotesTools } from "./notes/tools.js";
@@ -112,7 +112,7 @@ function branchHasWindowMarker(ctx: ExtensionContext, fromId?: string): boolean 
 	return ctx.sessionManager.getBranch(fromId).some((entry) => isWindowMarker(entry));
 }
 
-export default function piContext(pi: ExtensionAPI) {
+function registerPiContext(pi: ExtensionAPI, settingsManager?: SettingsManager): void {
 	let enabled = true;
 	let missingBootNotice: string | undefined;
 	const incompleteNotesNotified = new Set<string>();
@@ -125,7 +125,7 @@ export default function piContext(pi: ExtensionAPI) {
 	const migrationWarning = migrateLegacyHomes();
 	if (migrationWarning) console.warn(`pi-context: ${migrationWarning}`);
 
-	const budget = registerBudget(pi, () => enabled);
+	const budget = registerBudget(pi, () => enabled, settingsManager);
 
 	pi.on("session_start", (_event, ctx) => {
 		if (!enabled) return;
@@ -219,6 +219,19 @@ export default function piContext(pi: ExtensionAPI) {
 		buildReset: (ctx) => buildResetDrafts(ctx, notifyIncompleteNotes),
 		budget,
 	});
+}
+
+/**
+ * Create an extension factory bound to an SDK settings authority. The host must pass
+ * the same manager to createAgentSession and to this factory's resource loader.
+ */
+export function createPiContext(options: { settingsManager?: SettingsManager } = {}): ExtensionFactory {
+	return (pi) => registerPiContext(pi, options.settingsManager);
+}
+
+/** The Pi-discovered extension keeps the standard file-backed settings behavior. */
+export default function piContext(pi: ExtensionAPI): void {
+	registerPiContext(pi);
 }
 
 export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, WARNING_TYPE, CONTINUATION_TYPE, WARNING_PROMPT, WARNING_RUNWAY_TOKENS, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, deriveThresholds, mergePiContextSettings, assertVirtualPath };

@@ -67,6 +67,45 @@ The dreamer model is configured under the same key. `--dreamer <model pattern>` 
 }
 ```
 
+## SDK integration
+
+SDK hosts that create a session directly can bind pi-context to the exact same public `SettingsManager` authority as the session:
+
+```ts
+import {
+  createAgentSession,
+  DefaultResourceLoader,
+  SettingsManager,
+} from "@earendil-works/pi-coding-agent";
+// The package currently publishes source/dist files without a package main/exports entry.
+import { createPiContext } from "@astrosheep/pi-context/dist/src/index.js";
+
+const cwd = process.cwd();
+const agentDir = "/tmp/my-pi-agent";
+const settingsManager = SettingsManager.inMemory({
+  compaction: { enabled: true, reserveTokens: 16_384 },
+});
+const resourceLoader = new DefaultResourceLoader({
+  cwd,
+  agentDir,
+  settingsManager,
+  noExtensions: true,
+  extensionFactories: [createPiContext({ settingsManager })],
+});
+await resourceLoader.reload();
+
+const { session } = await createAgentSession({
+  cwd,
+  agentDir,
+  settingsManager,
+  resourceLoader,
+});
+```
+
+The manager must be shared by the resource loader's factory and `createAgentSession`. If the host replaces its settings authority, it must create and bind a new `createPiContext({ settingsManager })` factory together with the replacement manager; an existing factory remains bound to the manager it was created with.
+
+The default extension export is file-backed: it reads Pi's standard global settings directory plus the trusted project's `.pi/settings.json`, with project values winning per key. It cannot discover an arbitrary SDK session manager from `cwd`, environment variables, session IDs, or private SDK fields. For an injected manager, compaction settings come from the manager's public `getCompactionSettings(model)` getter, including the active model's `modelOverrides`; pi-context margins are read from the public `getGlobalSettings()` and `getProjectSettings()` scopes. Opaque runtime overrides that those public scope getters do not expose are intentionally not treated as pi-context configuration. Live public manager changes apply on the next policy query/turn, and the extension does not drain the manager's settings I/O diagnostics.
+
 ## Check the notes store
 
 Run `dream doctor` (or `dream doctor --notes-home <dir>`) to check home layout, note frontmatter, concrete backtick-quoted note addresses, MAP entries, and lock presence/format. It is read-only: no model, git commits, directory creation, or repairs. Exit status is 0 when clean and 1 when issues are found. References needing an unavailable project context are reported as unresolved; prose and example/glob addresses are not validated. A present lock is reported without inferring process liveness.

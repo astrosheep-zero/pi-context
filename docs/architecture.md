@@ -13,8 +13,8 @@ pi-context uses Pi's session branch as the durable source of truth. It does not 
 | `notes/store.ts` | Read and mutate the filesystem-backed homes; distinguish an absent home from a real read failure | Notes filesystem only; boot acquisition isolates one home at a time |
 | `history-tools.ts` | Public history schemas and tool results over branch projections | Pi tool API plus read projections |
 | `notes/tools.ts` | Filesystem note tool adapters; append validated note operations | Pi tool API plus notes filesystem |
-| `budget.ts` | Own the per-extension-instance settings cache, report usable budget, stage guidance/warning drafts, and resolve automatic reset decisions | Pi settings/context hooks |
-| `thresholds.ts` | Purely read settings and derive the reminder/reserve/warning lines from Pi's reserve plus the pi-context margins | Pi `SettingsManager`, read-only; no mutable cache |
+| `budget.ts` | Own the default-path per-extension-instance settings cache, read injected policy live, report usable budget, stage guidance/warning drafts, and resolve automatic reset decisions | Pi settings/context hooks |
+| `thresholds.ts` | Read the selected public settings authority and derive the reminder/reserve/warning lines from Pi's reserve plus the pi-context margins | Pi `SettingsManager`, read-only; no mutable cache or UI effects |
 | `prompts.ts` | Acquire the once-per-boot notes snapshot and render the static boot block, note index, reminder and warning | Explicit snapshot data and protocol text; rendering has no filesystem or UI effects |
 | `reset-lifecycle.ts` | Own reset requests, turn-end batching, recovery and continuation | Pi lifecycle hooks and injected boundary builder |
 | `protocol.ts` | Persisted entry tags, protocol text and defaults | No imports or effects |
@@ -38,7 +38,7 @@ The boot notes index is a closed snapshot: the current session, project, human, 
 
 Note replay accepts only supported operations, safe virtual paths, representable timestamps and results within the UTF-8 size limit. Invalid operations are ignored; they cannot replace a valid note. Notes remain in their filesystem-backed homes, unchanged by session branch navigation.
 
-The `/clear-context` command waits for idle, appends the marker and boot with Pi's public `appendEntry`/`sendMessage` APIs, and never calls a model. While enabled, `/compact` is cancelled with an actionable `/clear-context` notice. Disabling pi-context stops new automatic resets, but an existing marker still excludes earlier history and native compaction is still cancelled on that marked branch; a fresh root may use native Pi semantics. Threshold and warning accounting use active-window provider usage rather than pre-reset global usage. Budget policy and staged prompts are instance-owned, so concurrent sessions cannot share reserve/enablement or uncommitted drafts; model/session transitions invalidate that instance cache.
+The `/clear-context` command waits for idle, appends the marker and boot with Pi's public `appendEntry`/`sendMessage` APIs, and never calls a model. While enabled, `/compact` is cancelled with an actionable `/clear-context` notice. Disabling pi-context stops new automatic resets, but an existing marker still excludes earlier history and native compaction is still cancelled on that marked branch; a fresh root may use native Pi semantics. Threshold and warning accounting use active-window provider usage rather than pre-reset global usage. Budget policy and staged prompts are instance-owned, so concurrent sessions cannot share reserve/enablement or uncommitted drafts; default file-backed policy is cached per instance, while injected policy is resolved live on each decision and model/session transitions reset the diagnostic lifecycle.
 
 ## Evidence and limits
 
