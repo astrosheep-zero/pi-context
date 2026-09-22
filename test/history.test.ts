@@ -3,7 +3,8 @@ import test from "node:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { SessionReader } from "../src/session-reader.js";
 import { BOOT_TYPE, RESET_MARKER_TYPE } from "../src/protocol.js";
-import { contentText, currentReset, currentWindowId, hasWindowMessage, historyFromSession, isWindowMarker, rootWindowId, visibleItem } from "../src/history.js";
+import { contentText, historyFromSession, visibleItem } from "../src/history.js";
+import { currentReset, currentWindowId, hasWindowMessage, isWindowMarker, rootWindowId } from "../src/context-window.js";
 
 const timestamp = "2026-09-22T00:00:00.000Z";
 

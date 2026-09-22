@@ -2,10 +2,9 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext, type SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
 import { GUIDANCE_CLOSE_TAG, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, WARNING_PROMPT, WARNING_TYPE } from "./protocol.js";
 import { readThresholdSettings, type ResolvedThresholds } from "./thresholds.js";
-import { currentWindowId, hasWindowMessage } from "./history.js";
+import { currentWindowId, hasWindowMessage, windowUsage } from "./context-window.js";
 import { tokenBudgetGuidance } from "./prompts.js";
 import { output } from "./tool-output.js";
-import { windowUsage } from "./context-window.js";
 
 /** Remaining tokens in the provider's active window, or null without a usable estimate. */
 export function remainingTokens(ctx: Pick<ExtensionContext, "sessionManager" | "getContextUsage" | "model">): number | null {

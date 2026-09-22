@@ -1,8 +1,7 @@
 import type { TextContent, ToolCall } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { SessionReader } from "./session-reader.js";
-import type { CustomEntry, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { RESET_MARKER_TYPE } from "./protocol.js";
+import { isWindowMarker, rootWindowId } from "./context-window.js";
 import { HISTORY_PREVIEW_CHARS } from "./tool-output.js";
 
 type HistoryItem = {
@@ -93,30 +92,6 @@ function toolCallItems(windowId: string, entry: { id: string; timestamp?: string
 		});
 	}
 	return items;
-}
-
-export type WindowMarker = CustomEntry<{ windowId: string }> & { data: { windowId: string } };
-
-export function isWindowMarker(entry: SessionEntry): entry is WindowMarker {
-	return entry.type === "custom" && entry.customType === RESET_MARKER_TYPE &&
-		typeof entry.data === "object" && entry.data !== null &&
-		typeof (entry.data as { windowId?: unknown }).windowId === "string" &&
-		(entry.data as { windowId: string }).windowId.length > 0;
-}
-
-/** Only the active branch can supply a window boundary. */
-export function currentReset(ctx: SessionReader): WindowMarker | undefined {
-	const branch = ctx.sessionManager.getBranch();
-	for (let i = branch.length - 1; i >= 0; i--) {
-		const entry = branch[i];
-		if (entry && isWindowMarker(entry)) return entry;
-	}
-	return undefined;
-}
-
-/** Mint the durable identity of a session's root history window. */
-export function rootWindowId(sessionId: string): string {
-	return `pcw:${sessionId.slice(0, 8)}:root`;
 }
 
 /** Build durable, on-demand history directly from every entry on the current session branch. */
@@ -223,21 +198,4 @@ export function filteredItems(ctx: SessionReader, params: HistoryFilter): Histor
 	if (typeof params.tool_name === "string") items = items.filter((item) => item.toolName === params.tool_name);
 	if (params.recent_first !== false) items.reverse();
 	return items;
-}
-
-
-/** Persisted messages in the active window, excluding earlier windows on this branch. */
-export function hasWindowMessage(ctx: SessionReader, customType: string): boolean {
-	const branch = ctx.sessionManager.getBranch();
-	for (let i = branch.length - 1; i >= 0; i--) {
-		const entry = branch[i];
-		if (isWindowMarker(entry)) break;
-		if (entry.type === "custom_message" && entry.customType === customType) return true;
-	}
-	return false;
-}
-
-/** The root or latest durable marker on the active branch. */
-export function currentWindowId(ctx: SessionReader): string {
-	return currentReset(ctx)?.data.windowId ?? rootWindowId(ctx.sessionManager.getSessionId());
 }

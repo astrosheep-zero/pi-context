@@ -7,8 +7,8 @@ pi-context uses Pi's session branch as the durable source of truth. It does not 
 | Module | Responsibility | Boundary |
 | --- | --- | --- |
 | `index.ts` | Compose features, expose toggle/reset tools, construct marker/boot boundaries | Pi extension API |
-| `history.ts` | Project branch entries into windows/items; identify active window | `SessionReader`, read-only branch and session ID |
-| `context-window.ts` | Select the active boot, project provider context, and account for active-window usage | Pi context/system projection APIs |
+| `history.ts` | Project branch entries into windows/items using the shared window identity | `SessionReader`, read-only branch and session ID |
+| `context-window.ts` | Own durable window identity, select the active boot, project provider context, and account for active-window usage | `SessionReader` plus Pi context/system projection APIs |
 | `notes/model.ts` | Replay persisted note operations and validate virtual paths/timestamps | Filesystem-backed notes homes; no session-branch selection |
 | `history-tools.ts` | Public history schemas and tool results over branch projections | Pi tool API plus read projections |
 | `notes/tools.ts` | Filesystem note tool adapters; append validated note operations | Pi tool API plus notes filesystem |
@@ -25,7 +25,7 @@ Dependencies flow from the composition root and tool adapters to projections and
 
 `turn_end` has one composer in `reset-lifecycle.ts`: it accepts the incoming drafts, drains the budget instance's staged guidance/warning drafts, and only then appends reset drafts. Reset requests are committed after the complete tool batch with `continue: true`, so Pi owns queue scheduling. Repeated `wipe_memory` requests in one batch deduplicate; a later window may still request another reset. Aborts and reset-construction failures preserve already-built drafts without manufacturing a continuation. See [reset lifecycle](reset-lifecycle.md).
 
-The durable boundary is one `pi-context/reset-marker` custom entry with `{ windowId: string }`, followed by one hidden `pi-context/boot` custom message with `details.windowId` equal to the marker identity. The marker is the only window boundary. `history.ts` scans `getBranch()` for the latest well-formed marker; it never uses a global entry tail. Native compaction and branch-summary entries remain history items in the current window, so the old compaction-entry identity is not a window identity.
+The durable boundary is one `pi-context/reset-marker` custom entry with `{ windowId: string }`, followed by one hidden `pi-context/boot` custom message with `details.windowId` equal to the marker identity. The marker is the only window boundary. `context-window.ts` owns the marker predicate, active-branch scan, root/current IDs, and per-window message lookup; `history.ts` consumes those identity primitives while projecting entries. The scan never uses a global entry tail. Native compaction and branch-summary entries remain history items in the current window, so the old compaction-entry identity is not a window identity.
 
 The final context projection selects the active boot by `details.windowId` and folds only the dropped system prefix through Pi's `getCurrentSystemMessage`. Later prompt patches and new messages stay in order. A missing boot aborts the hook with a safe head and notice rather than silently sending raw history. Startup/tree handling repairs only a genuinely incomplete marker tail: a missing boot with no later raw message, custom message, compaction, branch summary, or authoritative raw boot. If later work exists, boot creation is refused and `/clear-context` is the explicit recovery path; it does not parse or migrate the legacy reset-v2 protocol.
 
