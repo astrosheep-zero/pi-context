@@ -1,6 +1,6 @@
 {
   "name": "@astrosheep/pi-context",
-  "version": "0.25.0",
+  "version": "0.25.1",
   "type": "module",
   "description": "Codex-style context windows for Pi: durable reset windows, session history tools, and persistent notes.",
   "license": "MIT",
