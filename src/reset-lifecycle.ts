@@ -1,172 +1,137 @@
-import type { ExtensionAPI, ExtensionContext, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { isContextOverflow, isRecoverableLength } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionContext, SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
+import { currentReset } from "./history.js";
+import { thresholdsFor } from "./thresholds.js";
+import { windowUsage } from "./context-window.js";
 
-type ResetResult = { cancel: true } | {
-	compaction: { summary: string; firstKeptEntryId: string; tokensBefore: number; details: unknown };
+type ResetOptions = {
+	isEnabled: () => boolean;
+	automaticResetEnabled: (ctx: ExtensionContext) => boolean;
+	buildReset: (ctx: ExtensionContext) => SessionBoundaryDraft[];
 };
 
-/** A reset request is session-local. Only this module schedules compaction/continuation. */
-export function registerResetLifecycle(pi: ExtensionAPI, options: {
-	isEnabled: () => boolean;
-	continuation: Parameters<ExtensionAPI["sendMessage"]>[0];
-	buildReset: (event: SessionBeforeCompactEvent, ctx: ExtensionContext, explicit: boolean) => ResetResult;
-	isCurrentReset: (entryId: string, ctx: ExtensionContext) => boolean;
-	onReset: (entryId: string) => void;
-}) {
-	type Attempt = {
-		completed: boolean;
-		explicit: boolean;
-		nextRequested: boolean;
-		continuationStarted: boolean;
-		sessionId: string;
-		settled: boolean;
-		wait: Promise<void>;
-		release: () => void;
-	};
-	type Request =
-		| { phase: "idle" }
-		| { phase: "requested" }
-		| { phase: "compacting"; attempt: Attempt };
-	let state: Request = { phase: "idle" };
-	let handledEntry: string | undefined;
+function isAbort(message: AgentMessage, outcome: string | undefined, ctx: ExtensionContext): boolean {
+	return outcome === "aborted" || (message.role === "assistant" && message.stopReason === "aborted") || ctx.signal?.aborted === true;
+}
+
+function isOverflowLike(message: AgentMessage, ctx: ExtensionContext): boolean {
+	if (message.role !== "assistant") return false;
+	return isContextOverflow(message, ctx.model?.contextWindow) ||
+		(ctx.model !== undefined && isRecoverableLength(message, ctx.model.maxTokens));
+}
+
+/**
+ * Own reset requests at Pi 0.87 boundaries. Persisted windows are custom entries, not
+ * compaction summaries: turn_end commits explicit/threshold resets after a complete tool
+ * batch, while agent_before_settle commits the one bounded overflow recovery after Pi's
+ * native recovery attempt has been cancelled.
+ */
+export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) {
+	let explicitRequested = false;
+	let overflowPending = false;
+	let overflowRecoveryUsed = false;
 	let active = true;
 
-	const release = (attempt: Attempt) => {
-		if (attempt.settled) return;
-		attempt.settled = true;
-		if (state.phase === "compacting" && state.attempt === attempt) {
-			state = { phase: "idle" };
-			handledEntry = undefined;
-		}
-		attempt.release();
-	};
 	const clear = () => {
-		if (state.phase === "compacting") release(state.attempt);
-		state = { phase: "idle" };
-		handledEntry = undefined;
+		explicitRequested = false;
+		overflowPending = false;
+		overflowRecoveryUsed = false;
 	};
-	const valid = (request: Attempt, ctx: ExtensionContext) =>
-		active && options.isEnabled() && state.phase === "compacting" && state.attempt === request && ctx.sessionManager.getSessionId() === request.sessionId;
 
-	const begin = (ctx: ExtensionContext) => {
-		let releaseWait!: () => void;
-		const request: Attempt = {
-			completed: false,
-			explicit: true,
-			nextRequested: false,
-			continuationStarted: false,
-			sessionId: ctx.sessionManager.getSessionId(),
-			settled: false,
-			wait: new Promise<void>((resolve) => { releaseWait = resolve; }),
-			release: () => releaseWait(),
-		};
-		state = { phase: "compacting", attempt: request };
-		const onError = (error: Error) => {
-			if (!valid(request, ctx)) return;
-			release(request);
-			// Do not retry from settled in a tight loop. A later prompt may trigger a
-			// native reset or explicitly request one.
-			ctx.ui.notify(`pi-context: reset did not complete (${error.message}). The conversation is retained; resume with another prompt.`, "warning");
-		};
+	const safeBuildReset = (ctx: ExtensionContext): SessionBoundaryDraft[] | undefined => {
 		try {
-			ctx.compact({
-				onComplete: () => {
-					if (!valid(request, ctx)) return;
-					// session_compact only confirms the boundary. onComplete runs after
-					// Pi clears compaction state; sending inside the hook starts too early.
-					// A queued user prompt may already have started at compaction_end.
-					if (request.completed && ctx.isIdle() && !ctx.hasPendingMessages()) {
-						// The SDK detaches sendMessage, so own the next settled event before
-						// starting it. The originating agent_settled handler awaits wait.
-						if (request.continuationStarted) return;
-						request.continuationStarted = true;
-						try {
-							pi.sendMessage(options.continuation, { triggerTurn: true });
-						} catch (error) {
-							onError(error instanceof Error ? error : new Error(String(error)));
-						}
-						return;
-					}
-					release(request);
-				},
-				onError,
-			});
+			return options.buildReset(ctx);
 		} catch (error) {
-			onError(error instanceof Error ? error : new Error(String(error)));
+			ctx.ui.notify(`pi-context: could not build reset (${String(error)}).`, "warning");
+			return undefined;
 		}
-		return request;
+	};
+	const thresholdDue = (ctx: ExtensionContext): boolean => {
+		const usage = windowUsage(ctx);
+		if (!usage || usage.tokens === null) return false;
+		return usage.contextWindow - usage.tokens <= thresholdsFor(ctx).reserve;
 	};
 
-	// State is intentionally not resumed from a pending request: a loaded session must
-	// not execute work from a tool that belonged to a previous runtime or tree branch.
-	pi.on("session_start", () => { clear(); active = true; });
-	pi.on("session_shutdown", () => { clear(); active = false; });
-	pi.on("session_tree", clear);
-
-	pi.on("agent_end", (_event, ctx) => {
-		if (!active || !options.isEnabled()) return;
-		if (ctx.signal?.aborted) {
-			// Esc cancels the user's run. Do not reset or resurrect it at settled.
-			clear();
+	pi.on("turn_end", (event, ctx) => {
+		if (!active) return undefined;
+		if (isAbort(event.message, event.outcome, ctx)) {
+			explicitRequested = false;
+			return undefined;
 		}
+		// Native overflow/length recovery is handled after turn_end through the bounded
+		// settle path; do not turn that failed response into a threshold reset.
+		if (isOverflowLike(event.message, ctx)) {
+			explicitRequested = false;
+			if (options.isEnabled() && options.automaticResetEnabled(ctx)) overflowPending = true;
+			return undefined;
+		}
+		if (event.outcome === "error") {
+			explicitRequested = false;
+			return undefined;
+		}
+		if (!options.isEnabled()) {
+			explicitRequested = false;
+			return undefined;
+		}
+		overflowRecoveryUsed = false;
+		// The completed response may be the first event whose persisted usage crosses the
+		// reserve, so a final assistant response does not defer the reset until another prompt.
+		const autoThreshold = options.automaticResetEnabled(ctx) && thresholdDue(ctx);
+		if (!explicitRequested && !autoThreshold) {
+			return undefined;
+		}
+		explicitRequested = false;
+		overflowPending = false;
+		const drafts = safeBuildReset(ctx);
+		if (!drafts) return undefined;
+		return { entries: [...(event.entries ?? []), ...drafts], continue: true };
 	});
 
-	pi.on("agent_settled", (_event, ctx) => {
-		if (!active || !options.isEnabled() || !ctx.isIdle()) return;
-		if (state.phase === "compacting" && state.attempt.continuationStarted) {
-			const preceding = state.attempt;
-			if (!preceding.nextRequested) {
-				release(preceding);
-				return;
-			}
-			// This settled event belongs to the continuation started by preceding.
-			// If it requested another reset, retain preceding until that reset's own
-			// continuation settles. Its eventual nested handler only releases its own
-			// waiter, so it never awaits itself.
-			const next = begin(ctx);
-			return next.wait.then(() => release(preceding));
-		}
-		if (state.phase !== "requested") return;
-		// One owner for requested resets. Consume the request before any external call;
-		// repeated settled events and reentrant callbacks are harmless.
-		return begin(ctx).wait;
+	pi.on("agent_before_settle", (event, ctx) => {
+		if (!active || !overflowPending) return undefined;
+		overflowPending = false;
+		if (!options.isEnabled() || !options.automaticResetEnabled(ctx) || event.outcome === "aborted" || ctx.signal?.aborted) return undefined;
+		if (overflowRecoveryUsed) return undefined;
+		overflowRecoveryUsed = true;
+		const drafts = safeBuildReset(ctx);
+		if (!drafts) return undefined;
+		return { entries: [...(event.entries ?? []), ...drafts], continue: true };
 	});
 
 	pi.on("session_before_compact", (event, ctx) => {
-		if (!active || !options.isEnabled()) return undefined;
+		if (!active) return undefined;
 		if (event.signal.aborted) return { cancel: true };
-		// Automatic threshold/overflow compactions reset on the spot — no model turn.
-		// The warning steer fired earlier (see warning.ts); what crosses the reserve
-		// line now is the wipe itself.
-		try {
-			return options.buildReset(event, ctx, state.phase === "requested");
-		} catch (error) {
-			ctx.ui.notify(`pi-context: could not build reset (${String(error)}).`, "warning");
-			return { cancel: true }; // Never fall through to a generated default summary.
+		const markerExists = currentReset(ctx) !== undefined;
+		if (options.isEnabled() || markerExists) {
+			if (event.reason === "manual") {
+				ctx.ui.notify("pi-context: /compact is disabled while context windows are active; use /clear-context to start a fresh window.", "warning");
+			}
+			// Native compaction is cancelled here. Threshold resets are decided solely from
+			// completed-turn usage at turn_end, never from canonical pre-request history.
+			return { cancel: true };
 		}
+		return undefined;
 	});
 
-	pi.on("session_compact", (event, ctx) => {
-		if (!active || !options.isEnabled() || handledEntry === event.compactionEntry.id) return;
-		if (!options.isCurrentReset(event.compactionEntry.id, ctx)) return;
-		handledEntry = event.compactionEntry.id;
-		if (state.phase === "compacting") state.attempt.completed = !event.willRetry;
-		else state = { phase: "idle" };
-		// A native compaction (including overflow retry) owns its own scheduling.
-		// Only a reset we requested gets a continuation from our onComplete callback.
-		options.onReset(event.compactionEntry.id);
+	pi.on("agent_end", (_event, ctx) => {
+		if (ctx.signal?.aborted) clear();
 	});
+	pi.on("agent_settled", () => {
+		// A failed recovery chain is bounded to one reset/retry. Once Pi settles, a later
+		// user prompt starts a new chain; successful continuations clear this earlier.
+		overflowPending = false;
+		overflowRecoveryUsed = false;
+	});
+	pi.on("session_start", () => { clear(); active = true; });
+	pi.on("session_tree", clear);
+	pi.on("session_shutdown", () => { clear(); active = false; });
 
 	return {
 		request() {
-			if (state.phase === "idle") {
-				state = { phase: "requested" };
-				return "rollover_requested";
-			}
-			if (state.phase === "compacting" && state.attempt.continuationStarted && !state.attempt.nextRequested) {
-				state.attempt.nextRequested = true;
-				return "rollover_requested";
-			}
-			return "rollover_already_pending";
+			if (explicitRequested) return "rollover_already_pending";
+			explicitRequested = true;
+			return "rollover_requested";
 		},
 		clear,
 	};

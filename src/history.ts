@@ -1,7 +1,8 @@
 import type { TextContent, ToolCall } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { SessionReader } from "./session-reader.js";
-import { RESET_V2 } from "./protocol.js";
+import type { CustomEntry, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { RESET_MARKER_TYPE } from "./protocol.js";
 import { HISTORY_PREVIEW_CHARS } from "./tool-output.js";
 
 type HistoryItem = {
@@ -94,17 +95,23 @@ function toolCallItems(windowId: string, entry: { id: string; timestamp?: string
 	return items;
 }
 
-/** The extension-owned window id baked onto a reset-v2 compaction entry, if present. */
-export function resetV2WindowId(details: unknown): string | undefined {
-	if (typeof details !== "object" || details === null) return undefined;
-	const candidate = details as { piContext?: unknown; windowId?: unknown };
-	if (candidate.piContext !== RESET_V2 || typeof candidate.windowId !== "string") return undefined;
-	return candidate.windowId;
+export type WindowMarker = CustomEntry<{ windowId: string }> & { data: { windowId: string } };
+
+export function isWindowMarker(entry: SessionEntry): entry is WindowMarker {
+	return entry.type === "custom" && entry.customType === RESET_MARKER_TYPE &&
+		typeof entry.data === "object" && entry.data !== null &&
+		typeof (entry.data as { windowId?: unknown }).windowId === "string" &&
+		(entry.data as { windowId: string }).windowId.length > 0;
 }
 
-/** A compaction entry's window id: the extension-minted id for reset-v2, else Pi's entry id. */
-export function windowIdOf(sessionId: string, entry: { id: string; details?: unknown }): string {
-	return resetV2WindowId(entry.details) ?? `pcw:${sessionId.slice(0, 8)}:${entry.id}`;
+/** Only the active branch can supply a window boundary. */
+export function currentReset(ctx: SessionReader): WindowMarker | undefined {
+	const branch = ctx.sessionManager.getBranch();
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i];
+		if (entry && isWindowMarker(entry)) return entry;
+	}
+	return undefined;
 }
 
 /** Mint the durable identity of a session's root history window. */
@@ -118,14 +125,16 @@ export function historyFromSession(ctx: SessionReader): HistoryWindow[] {
 	let window: HistoryWindow = { windowId: rootWindowId(sessionId), items: [] };
 	const windows = [window];
 	for (const entry of ctx.sessionManager.getBranch()) {
-		if (entry.type === "compaction") {
-			window = { windowId: windowIdOf(sessionId, entry), createdAt: entry.timestamp, items: [] };
+		if (isWindowMarker(entry)) {
+			window = { windowId: entry.data.windowId, createdAt: entry.timestamp, items: [] };
 			windows.push(window);
+			continue;
+		}
+		if (entry.type === "compaction" || entry.type === "branch_summary") {
 			window.items.push({
 				windowId: window.windowId,
 				itemId: entry.id,
-				// A reset-v2 compaction is authored by this extension; a native Pi compaction is not.
-				role: resetV2WindowId(entry.details) === undefined ? "system" : "developer",
+				role: "system",
 				content: entry.summary,
 				createdAt: entry.timestamp,
 			});
@@ -222,19 +231,13 @@ export function hasWindowMessage(ctx: SessionReader, customType: string): boolea
 	const branch = ctx.sessionManager.getBranch();
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const entry = branch[i];
-		if (entry.type === "compaction") break;
+		if (isWindowMarker(entry)) break;
 		if (entry.type === "custom_message" && entry.customType === customType) return true;
 	}
 	return false;
 }
 
-/** Cheap current-window lookup: scan the branch tail for the latest compaction entry. */
+/** The root or latest durable marker on the active branch. */
 export function currentWindowId(ctx: SessionReader): string {
-	const sessionId = ctx.sessionManager.getSessionId();
-	const branch = ctx.sessionManager.getBranch();
-	for (let i = branch.length - 1; i >= 0; i--) {
-		const entry = branch[i];
-		if (entry?.type === "compaction") return windowIdOf(sessionId, entry);
-	}
-	return rootWindowId(sessionId);
+	return currentReset(ctx)?.data.windowId ?? rootWindowId(ctx.sessionManager.getSessionId());
 }

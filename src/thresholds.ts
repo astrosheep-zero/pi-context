@@ -30,8 +30,9 @@ function validMargin(raw: unknown): number | undefined {
 /**
  * Pure derivation of the thresholds from Pi's reserve: the reminder fires at reserve
  * plus the pi-context margin, the warning steer at reserve plus WARNING_RUNWAY_TOKENS.
- * An invalid margin degrades to the default and reports one warning. Pi's automatic
- * threshold/overflow compaction itself resets immediately, with no model turn.
+ * An invalid margin degrades to the default and reports one warning. Automatic
+ * threshold/overflow handling is represented by reset lifecycle boundary drafts;
+ * no compaction summary is generated.
  */
 export function deriveThresholds(reserveTokens: number, margins: PiContextSettings): { thresholds: ResolvedThresholds; warnings: string[] } {
 	const warnings: string[] = [];
@@ -78,6 +79,12 @@ export function readDreamerSettings(cwd = process.cwd()): DreamerSetting {
 }
 
 let cached: ResolvedThresholds | undefined;
+let automatic = true;
+
+export function automaticResetEnabled(ctx: ExtensionContext): boolean {
+	thresholdsFor(ctx);
+	return automatic;
+}
 
 /**
  * Session-level threshold resolution: Pi's compaction reserve plus the settings.json
@@ -89,11 +96,12 @@ export function thresholdsFor(ctx: ExtensionContext): ResolvedThresholds {
 	if (cached) return cached;
 	try {
 		const settingsManager = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
-		// Pass the active model so per-model compaction.modelOverrides resolve (SDK 0.86);
-		// on older runtimes the extra argument is ignored and the ordinary setting wins.
+		// Resolve the active provider/model override from the public settings API.
 		const model = ctx.model;
+		const compaction = settingsManager.getCompactionSettings(model ? { provider: model.provider, id: model.id } : undefined);
+		automatic = compaction.enabled;
 		const derived = deriveThresholds(
-			settingsManager.getCompactionSettings(model ? { provider: model.provider, id: model.id } : undefined).reserveTokens,
+			compaction.reserveTokens,
 			mergePiContextSettings(settingsManager.getGlobalSettings(), settingsManager.getProjectSettings()),
 		);
 		for (const warning of derived.warnings) ctx.ui.notify(warning, "warning");
@@ -107,4 +115,5 @@ export function thresholdsFor(ctx: ExtensionContext): ResolvedThresholds {
 
 export function resetThresholds(): void {
 	cached = undefined;
+	automatic = true;
 }

@@ -5,18 +5,28 @@ import { thresholdsFor, resetThresholds } from "./thresholds.js";
 import { currentWindowId, hasWindowMessage } from "./history.js";
 import { tokenBudgetGuidance } from "./prompts.js";
 import { output } from "./tool-output.js";
+import { windowUsage } from "./context-window.js";
 
-/** Remaining tokens in the current context window, or null when Pi has no usage estimate. */
-export function remainingTokens(ctx: Pick<ExtensionContext, "getContextUsage">): number | null {
-	const usage = ctx.getContextUsage();
+/** Remaining tokens in the provider's active window, or null without a usable estimate. */
+export function remainingTokens(ctx: Pick<ExtensionContext, "sessionManager" | "getContextUsage" | "model">): number | null {
+	const usage = windowUsage(ctx);
 	return !usage || usage.tokens === null ? null : Math.max(0, usage.contextWindow - usage.tokens);
 }
 
 export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean) {
 	let guidancePersistedInWindow: string | undefined;
+	let pending: { windowId: string; content: string } | undefined;
 
-	pi.on("session_start", (_event, ctx) => { guidancePersistedInWindow = undefined; resetThresholds(); thresholdsFor(ctx); });
-	pi.on("session_tree", () => { guidancePersistedInWindow = undefined; resetThresholds(); });
+	pi.on("session_start", (_event, ctx) => { guidancePersistedInWindow = undefined; pending = undefined; resetThresholds(); thresholdsFor(ctx); });
+	pi.on("session_tree", () => { guidancePersistedInWindow = undefined; pending = undefined; resetThresholds(); });
+	pi.on("model_select", resetThresholds);
+	pi.on("agent_end", () => { pending = undefined; });
+	pi.on("turn_end", (event, ctx) => {
+		const reminder = pending;
+		pending = undefined;
+		if (!isEnabled() || !reminder || reminder.windowId !== currentWindowId(ctx)) return;
+		return { entries: [...(event.entries ?? []), { type: "custom_message", customType: GUIDANCE_TYPE, content: reminder.content, display: false }] };
+	});
 	pi.on("context", (_event, ctx) => {
 		if (!isEnabled() || hasWindowMessage(ctx, GUIDANCE_TYPE)) return undefined;
 		// The early reminder persists once per window the first time remaining crosses
@@ -31,22 +41,11 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean) {
 		if (remaining <= warning || hasWindowMessage(ctx, WARNING_TYPE)) return undefined;
 		if (remaining <= reminder && guidancePersistedInWindow !== windowId) {
 			guidancePersistedInWindow = windowId;
-			// Persist once per window — no transient copy. A transient bridge would
-			// cover the crossing request, but history would record the reminder after
-			// that request's assistant reply, so across the boundary the model would
-			// meet the same text twice at shifted positions. The reminder is an early
-			// warning, not a per-request instruction: arriving from the next request
-			// on (sendMessage defers safely to end of turn while streaming, queueing
-			// instead of splitting a tool call/result pair) costs nothing, and the
-			// model's view stays identical to recorded history, Codex-style.
-			// The persisted copy stays out of the TUI (display: false); one ephemeral
-			// notify tells the user instead — visible to the human, invisible to the
-			// model, and never recorded, so history and the model's view don't diverge.
-			// The model-facing count ends at the warning line: what lies below is the
-			// runway, invisible by design. The human's notify keeps the honest count.
+			// Persist at turn_end, before any reset drafts. A queued sendMessage could
+			// otherwise cross the marker and leak the old window's reminder forward.
 			const left = Math.max(0, remaining - warning);
-			pi.sendMessage({ customType: GUIDANCE_TYPE, content: tokenBudgetGuidance(left), display: false }, { triggerTurn: false });
-			ctx.ui.notify(`pi-context: context budget low (${Math.max(0, remaining - reserve)} tokens before reserve) — checkpoint reminder recorded for the model, kept out of the chat view.`, "warning");
+			pending = { windowId, content: tokenBudgetGuidance(left) };
+			ctx.ui.notify("pi-context: context budget low — checkpoint reminder recorded for the model, kept out of the chat view.", "warning");
 		}
 		return undefined;
 	});

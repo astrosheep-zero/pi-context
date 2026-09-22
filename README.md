@@ -1,6 +1,6 @@
 # pi-context
 
-Codex-style context windows for [Pi](https://github.com/earendil-works/pi-mono): reset-style compaction, durable session-history tools, and persistent notes — implemented entirely with public extension APIs. No Pi core modification required.
+Codex-style context windows for [Pi](https://github.com/earendil-works/pi-mono): durable reset windows, session-history tools, and persistent notes — implemented entirely with public extension APIs. No Pi core modification required.
 
 ## Install
 
@@ -16,7 +16,7 @@ pi -e npm:@astrosheep/pi-context
 
 ## What you get
 
-- **`wipe_memory`** — the model can start a fresh context window. The old conversation leaves the provider context but stays in the session, readable through history_*. Call it on its own, not inside a parallel tool batch.
+- **`wipe_memory`** — the model can request a fresh context window. The request commits after the complete tool batch; the old conversation stays in the session and remains readable through history_*, but is excluded from the next provider context.
 - **A boot block at every window head** — static once-per-window content (cache-stable) carrying the window identity, the recent-notes index, and a short protocol that teaches the model how to recover: notes for its own bookkeeping, history tools for everything before the reset.
 - **Low-budget guidance** — one persisted early warning per window when the estimated remaining budget crosses the reminder line, so the model checkpoints before the lights go out.
 - **`get_context_remaining`** — the live, reserve-adjusted estimate of the context budget left before Pi's compaction reserve.
@@ -36,7 +36,15 @@ pi -e npm:@astrosheep/pi-context
 
 The tool descriptions the model sees are the behavioral documentation: note results use `address` as the sole home identity; search is case-sensitive literal substring; both `notes_read` and `history_read` are character windows prefixed with the same `READ WINDOW` block, whose cursors reconstruct the source exactly when only the content after each block is concatenated; anything a response does not deliver is named by an explicit field.
 
-- **Runtime toggle** — `/pi-context off` restores Pi's default compaction (including `keepRecentTokens`); `/pi-context on` re-enables; bare `/pi-context` reports the current state.
+- **Runtime toggle** — `/pi-context off` disables new automatic resets; `/pi-context on` re-enables them; bare `/pi-context` reports the current state. A durable reset marker remains in force when off, so disabling the extension does not resurrect history from an already-reset window.
+
+## Context-window protocol
+
+Each reset appends one `pi-context/reset-marker` custom entry with `{ "windowId": "..." }`, followed by one hidden `pi-context/boot` custom message whose details carry the same `windowId`. The marker is the window boundary and the UUID-like window identity is independent of Pi entry IDs. Native compaction and branch-summary entries are history items inside the current window; they do not create windows.
+
+`/clear-context` is the manual reset command. It waits for idle, appends the marker and boot through Pi's public session APIs, and does not call a model. While pi-context is enabled, `/compact` is cancelled with an actionable `/clear-context` notice. Automatic resets use the active provider-window usage; mixed tool batches finish before the boundary, and queued steering/follow-up messages are delivered exactly once in the new window. An aborted turn does not manufacture a continuation.
+
+History remains available after reset, including earlier windows and raw JSONL. Branch navigation also remains available. If either the source or destination branch contains a reset marker, generated `/tree` summaries are suppressed with a notice because Pi's raw summary generator bypasses the context projection and could reintroduce erased history. Navigation itself is not suppressed; branches without markers retain native summaries.
 
 ## Configuration
 

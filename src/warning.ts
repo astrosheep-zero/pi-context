@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { WARNING_TYPE, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG, WARNING_PROMPT } from "./protocol.js";
 import { thresholdsFor, resetThresholds, type ResolvedThresholds } from "./thresholds.js";
@@ -15,20 +16,27 @@ export function warningDue(remaining: number, thresholds: ResolvedThresholds): b
 	return remaining <= thresholds.warning;
 }
 
-/** Delivery: what happens when it fires. */
-export function steerWarning(pi: ExtensionAPI, ctx: ExtensionContext, thresholds: ResolvedThresholds, remaining: number): void {
-	pi.sendMessage({ customType: WARNING_TYPE, content: `${GUIDANCE_OPEN_TAG}\n${WARNING_PROMPT}\n${GUIDANCE_CLOSE_TAG}`, display: false }, { triggerTurn: true });
-	ctx.ui.notify(`pi-context: context budget critical (${Math.max(0, remaining - thresholds.reserve)} tokens before reserve) — final checkpoint warning steered to the model.`, "warning");
-}
-
 /** Registration: once-per-window guard plus trigger+delivery on the context hook. */
 export function registerWarning(pi: ExtensionAPI, isEnabled: () => boolean): void {
 	let firedInWindow: string | undefined;
+	let pendingBoundaryWarning: { windowId: string; content: string } | undefined;
 	// Threshold resolution is owned by budget.ts; this module only consumes the shared
 	// cache (lazily on the context hook) so session_start never warns twice.
-	pi.on("session_start", () => { firedInWindow = undefined; });
-	pi.on("session_tree", () => { firedInWindow = undefined; resetThresholds(); });
-	pi.on("context", (_event, ctx) => {
+	pi.on("session_start", () => { firedInWindow = undefined; pendingBoundaryWarning = undefined; });
+	pi.on("session_tree", () => { firedInWindow = undefined; pendingBoundaryWarning = undefined; resetThresholds(); });
+	pi.on("agent_end", () => { pendingBoundaryWarning = undefined; });
+	pi.on("turn_end", (event, ctx) => {
+		const pending = pendingBoundaryWarning;
+		if (!pending || pending.windowId !== currentWindowId(ctx)) return undefined;
+		pendingBoundaryWarning = undefined;
+		return {
+			entries: [
+				...(event.entries ?? []),
+				{ type: "custom_message", customType: WARNING_TYPE, content: pending.content, display: false },
+			],
+		};
+	});
+	pi.on("context", (event, ctx) => {
 		const windowId = currentWindowId(ctx);
 		if (!isEnabled() || firedInWindow === windowId || hasWindowMessage(ctx, WARNING_TYPE)) return undefined;
 		const remaining = remainingTokens(ctx);
@@ -36,11 +44,18 @@ export function registerWarning(pi: ExtensionAPI, isEnabled: () => boolean): voi
 		const thresholds = thresholdsFor(ctx);
 		if (!warningDue(remaining, thresholds)) return undefined;
 		firedInWindow = windowId;
-		// The steer reaches the model at the next sampling step with at most the runway
-		// of invisible budget left. After it, the model decides for itself: end the
-		// window, or ride it into Pi's automatic compaction, which resets on the spot
-		// with no turn (see reset-lifecycle).
-		steerWarning(pi, ctx, thresholds, remaining);
-		return undefined;
+		// Keep the warning visible in this provider request, but defer its durable
+		// session entry to turn_end so it is ordered with the lifecycle's reset drafts.
+		const content = `${GUIDANCE_OPEN_TAG}\n${WARNING_PROMPT}\n${GUIDANCE_CLOSE_TAG}`;
+		pendingBoundaryWarning = { windowId, content };
+		const warningMessage = {
+			role: "custom" as const,
+			customType: WARNING_TYPE,
+			content,
+			display: false,
+			timestamp: Date.now(),
+		} satisfies AgentMessage;
+		ctx.ui.notify("pi-context: context budget critical — final checkpoint warning steered to the model.", "warning");
+		return { messages: [...event.messages, warningMessage] };
 	});
 }

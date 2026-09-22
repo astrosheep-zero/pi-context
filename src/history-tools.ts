@@ -46,7 +46,7 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "history_list",
 		label: "History list items",
-		description: "List durable session items, including items before compaction, using opaque item and window IDs; the role parameter's description enumerates the six roles. Every item carries truncated and total_chars: when truncated is true, truncated_content is a plain prefix of the item's content with no marker, and total_chars is its full code-point length. max_chars_per_item: 1 therefore yields pure addresses you can resolve with history_read.",
+		description: "List durable session items, including items from earlier reset windows, using opaque item and window IDs; native compaction and branch summaries remain history items in their current window. The role parameter's description enumerates the six roles. Every item carries truncated and total_chars: when truncated is true, truncated_content is a plain prefix of the item's content with no marker, and total_chars is its full code-point length. max_chars_per_item: 1 therefore yields pure addresses you can resolve with history_read.",
 		parameters: Type.Object({ limit: positiveInteger(), cursor: cursor(), recent_first: recentFirst(), role: Type.Optional(role), tool_name: nullableString(), window_id: nullableString(), max_chars_per_item: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const invalid = vacuousRoleToolCombo(params);

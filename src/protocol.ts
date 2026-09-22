@@ -1,11 +1,9 @@
-export const STATE_TYPE = "pi-context/state";
 export const NOTE_TYPE = "pi-context/note";
 export const BOOT_TYPE = "pi-context/boot";
 export const GUIDANCE_TYPE = "pi-context/guidance";
 export const WARNING_TYPE = "pi-context/warning";
 export const RESET_MARKER_TYPE = "pi-context/reset-marker";
 export const CONTINUATION_TYPE = "pi-context/continuation";
-export const RESET_V2 = "reset-v2";
 export const MAX_NOTE_BYTES = 1_000_000;
 export const POCKET_SESSION_LIMIT = 5;
 export const POCKET_PROJECT_LIMIT = 2;

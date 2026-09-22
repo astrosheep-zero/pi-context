@@ -1,53 +1,159 @@
+import { getCurrentSystemMessage, Type } from "@earendil-works/pi-ai";
+import { defineTool, type ExtensionAPI, type ExtensionContext, type SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 import { registerHistoryTools } from "./history-tools.js";
 import { registerNotesTools } from "./notes/tools.js";
 import { registerBudget } from "./budget.js";
 import { output } from "./tool-output.js";
-import { deriveThresholds, mergePiContextSettings } from "./thresholds.js";
-import { STATE_TYPE, NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, WARNING_TYPE, RESET_MARKER_TYPE, CONTINUATION_TYPE, RESET_V2, MAX_NOTE_BYTES, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, WARNING_RUNWAY_TOKENS, RESET_SUMMARY, CONTINUATION, WARNING_PROMPT } from "./protocol.js";
-import { historyFromSession, hasWindowMessage, currentWindowId, resetV2WindowId, rootWindowId, windowIdOf } from "./history.js";
+import { automaticResetEnabled, deriveThresholds, mergePiContextSettings } from "./thresholds.js";
+import { NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, WARNING_TYPE, RESET_MARKER_TYPE, CONTINUATION_TYPE, MAX_NOTE_BYTES, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, WARNING_RUNWAY_TOKENS, RESET_SUMMARY, CONTINUATION, WARNING_PROMPT } from "./protocol.js";
+import { currentReset, currentWindowId, isWindowMarker, rootWindowId } from "./history.js";
 import { assertVirtualPath } from "./notes/model.js";
 import { migrateLegacyHomes } from "./notes/paths.js";
 import { bootBlock } from "./prompts.js";
-export { historyFromSession } from "./history.js";
-export { notesFromSession } from "./notes/model.js";
+import { isWindowBoot, projectRootWindow, projectWindow } from "./context-window.js";
 import { registerResetLifecycle } from "./reset-lifecycle.js";
 import { registerWarning } from "./warning.js";
-import { randomUUID } from "node:crypto";
-import { Type } from "@earendil-works/pi-ai";
-import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+export { historyFromSession } from "./history.js";
+export { notesFromSession } from "./notes/model.js";
+
+function buildResetDrafts(ctx: ExtensionContext) {
+	const sessionPrefix = ctx.sessionManager.getSessionId().slice(0, 8);
+	const usedWindowIds = new Set(
+		ctx.sessionManager.getBranch().filter(isWindowMarker).map((entry) => entry.data.windowId),
+	);
+	let windowId: string;
+	do {
+		windowId = `pcw:${sessionPrefix}:${randomUUID().slice(0, 8)}`;
+	} while (usedWindowIds.has(windowId));
+	return [
+		{ type: "custom", customType: RESET_MARKER_TYPE, data: { windowId } },
+		{
+			type: "custom_message",
+			customType: BOOT_TYPE,
+			content: bootBlock(ctx, windowId, currentWindowId(ctx), true),
+			display: false,
+			details: { windowId },
+		},
+		{
+			type: "custom_message",
+			customType: CONTINUATION_TYPE,
+			content: CONTINUATION,
+			display: false,
+		},
+	] satisfies [SessionBoundaryDraft, SessionBoundaryDraft, SessionBoundaryDraft];
+}
+
+function ensureBoot(pi: ExtensionAPI, ctx: ExtensionContext): void {
+	const reset = currentReset(ctx);
+	const sessionId = ctx.sessionManager.getSessionId();
+	const windowId = reset?.data?.windowId ?? rootWindowId(sessionId);
+	if (ctx.sessionManager.buildSessionProjection().messages.some((message) => isWindowBoot(message, windowId))) return;
+	let previousId: string | undefined = reset ? rootWindowId(sessionId) : undefined;
+	if (reset) {
+		for (const entry of ctx.sessionManager.getBranch()) {
+			if (entry.id === reset.id) break;
+			if (isWindowMarker(entry)) previousId = entry.data.windowId;
+		}
+	}
+	pi.sendMessage(
+		{ customType: BOOT_TYPE, content: bootBlock(ctx, windowId, previousId, reset !== undefined), display: false, details: { windowId } },
+		{ triggerTurn: false },
+	);
+}
+
+function persistManualReset(pi: ExtensionAPI, ctx: ExtensionContext): void {
+	const [marker, boot] = buildResetDrafts(ctx);
+	pi.appendEntry(marker.customType, marker.data);
+	pi.sendMessage(
+		{ customType: boot.customType, content: boot.content, display: boot.display, details: boot.details },
+		{ triggerTurn: false },
+	);
+}
+
+function branchHasWindowMarker(ctx: ExtensionContext, fromId?: string): boolean {
+	return ctx.sessionManager.getBranch(fromId).some((entry) => isWindowMarker(entry));
+}
 
 export default function piContext(pi: ExtensionAPI) {
 	let enabled = true;
-	// One-time layout migration (pre-v0.25 personal/ → human/); a conflict warning goes to
-	// the debug log, never into a prompt, so the boot head stays cache-stable.
+	let missingBootNotice: string | undefined;
 	const migrationWarning = migrateLegacyHomes();
 	if (migrationWarning) console.warn(`pi-context: ${migrationWarning}`);
+
 	registerBudget(pi, () => enabled);
 	registerWarning(pi, () => enabled);
 
 	pi.on("session_start", (_event, ctx) => {
 		if (!enabled) return;
-		// The root window has no compaction entry to carry the boot block, so persist
-		// it once as a hidden custom message. Reset windows already carry theirs at
-		// position 0 in the compaction summary, so a resumed session adds nothing.
-		const rootId = rootWindowId(ctx.sessionManager.getSessionId());
-		if (currentWindowId(ctx) !== rootId || hasWindowMessage(ctx, BOOT_TYPE)) return;
-		pi.sendMessage({ customType: BOOT_TYPE, content: bootBlock(ctx, rootId, undefined, false), display: false }, { triggerTurn: false });
+		missingBootNotice = undefined;
+		ensureBoot(pi, ctx);
+	});
+	pi.on("session_tree", (_event, ctx) => {
+		missingBootNotice = undefined;
+		if (enabled) ensureBoot(pi, ctx);
+	});
+
+	// Pi's branch summarizer receives raw entries and bypasses context_with_system. Do not
+	// let a summary of a reset branch smuggle erased history back into the destination.
+	pi.on("session_before_tree", (event, ctx) => {
+		if (!event.preparation.userWantsSummary) return undefined;
+		if (!branchHasWindowMarker(ctx) && !branchHasWindowMarker(ctx, event.preparation.targetId)) return undefined;
+		ctx.ui.notify("pi-context: skipped branch summary across a reset window; navigation continues without erased history.", "info");
+		return { summary: { summary: "" } };
+	});
+
+	// This is the final provider-facing projection. Reset windows cut at their matching boot;
+	// root windows only refresh a forked boot identity and retain the copied root transcript.
+	pi.on("context_with_system", (event, ctx) => {
+		const reset = currentReset(ctx);
+		const windowId = reset?.data?.windowId ?? rootWindowId(ctx.sessionManager.getSessionId());
+		try {
+			const activeWindowId = reset?.data?.windowId;
+			return { messages: activeWindowId ? projectWindow(event.messages, activeWindowId) : projectRootWindow(event.messages, windowId) };
+		} catch (error) {
+			if (missingBootNotice !== windowId) {
+				missingBootNotice = windowId;
+				ctx.ui.notify(`pi-context: missing boot for active context window ${windowId}; request cancelled until startup/tree repair completes.`, "error");
+			}
+			ctx.abort();
+			const safeHead = getCurrentSystemMessage(event.messages);
+			return { messages: safeHead ? [safeHead] : [] };
+		}
 	});
 
 	pi.registerCommand("pi-context", {
-		description: "Toggle pi-context: context_window boot block, low-budget guidance, and reset-style compaction",
+		description: "Toggle pi-context: context_window boot block, low-budget guidance, and reset-style context windows",
 		getArgumentCompletions: (prefix) =>
 			["on", "off"].filter((a) => a.startsWith(prefix)).map((a) => ({ value: a, label: a })),
 		handler: async (args, cmdCtx) => {
 			const arg = args.trim().toLowerCase();
-			if (arg === "on") enabled = true;
-			else if (arg === "off") { enabled = false; resets.clear(); }
-			else if (arg !== "") {
+			if (arg === "on") {
+				enabled = true;
+				ensureBoot(pi, cmdCtx);
+			} else if (arg === "off") {
+				enabled = false;
+				resets.clear();
+			} else if (arg !== "") {
 				cmdCtx.ui.notify("Usage: /pi-context [on|off]", "error");
 				return;
 			}
 			cmdCtx.ui.notify(`pi-context: ${enabled ? "on" : "off"}`, "info");
+		},
+	});
+
+	pi.registerCommand("clear-context", {
+		description: "Persist a fresh context window without calling the model",
+		handler: async (_args, cmdCtx) => {
+			if (!enabled) {
+				cmdCtx.ui.notify("pi-context: /clear-context requires /pi-context on.", "error");
+				return;
+			}
+			await cmdCtx.waitForIdle();
+			if (!enabled) return;
+			resets.clear();
+			persistManualReset(pi, cmdCtx);
+			cmdCtx.ui.notify("pi-context: context cleared; the next prompt starts in a fresh window.", "info");
 		},
 	});
 
@@ -67,36 +173,9 @@ export default function piContext(pi: ExtensionAPI) {
 
 	const resets = registerResetLifecycle(pi, {
 		isEnabled: () => enabled,
-		continuation: { customType: CONTINUATION_TYPE, content: CONTINUATION, display: false },
-		isCurrentReset: (entryId, ctx) => {
-			const entry = ctx.sessionManager.getEntry(entryId);
-			return entry?.type === "compaction" && resetV2WindowId(entry.details) === currentWindowId(ctx);
-		},
-		onReset: (entryId) => pi.appendEntry(STATE_TYPE, { version: 1, lastResetEntryId: entryId }),
-		buildReset: (event, ctx, explicit) => {
-			const sessionId = ctx.sessionManager.getSessionId();
-			// Window IDs are independent of Pi entry IDs. Avoid reusing a window
-			// identity already present on this branch.
-			const windows = historyFromSession(ctx);
-			const usedIds = new Set(windows.map((window) => window.windowId));
-			let minted = { id: randomUUID().slice(0, 8) };
-			while (usedIds.has(windowIdOf(sessionId, minted))) minted = { id: randomUUID().slice(0, 8) };
-			const windowId = windowIdOf(sessionId, minted);
-			const previousId = windows[windows.length - 1]?.windowId ?? rootWindowId(sessionId);
-			// The reset marker stays as firstKeptEntryId; it no longer names the window.
-			pi.appendEntry(RESET_MARKER_TYPE, { version: 1, reason: event.reason, requested: explicit });
-			const markerId = ctx.sessionManager.getLeafId();
-			if (!markerId) return { cancel: true };
-			return {
-				compaction: {
-					summary: bootBlock(ctx, windowId, previousId, true),
-					firstKeptEntryId: markerId,
-					tokensBefore: event.preparation.tokensBefore,
-					details: { piContext: RESET_V2, windowId },
-				},
-			};
-		},
+		automaticResetEnabled,
+		buildReset: buildResetDrafts,
 	});
 }
 
-export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, WARNING_TYPE, WARNING_PROMPT, WARNING_RUNWAY_TOKENS, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, deriveThresholds, mergePiContextSettings, assertVirtualPath };
+export const internal = { MAX_NOTE_BYTES, NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, WARNING_TYPE, CONTINUATION_TYPE, WARNING_PROMPT, WARNING_RUNWAY_TOKENS, RESET_MARKER_TYPE, RESET_SUMMARY, CONTINUATION, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, deriveThresholds, mergePiContextSettings, assertVirtualPath };

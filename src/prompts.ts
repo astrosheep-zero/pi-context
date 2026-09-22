@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { historyFromSession } from "./history.js";
+import { rootWindowId } from "./history.js";
 import { listNotes } from "./notes/store.js";
 import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, POCKET_AGENT_LIMIT, POCKET_HUMAN_LIMIT, POCKET_MODEL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "./protocol.js";
 import { agentSlug, modelSlug } from "./notes/paths.js";
@@ -74,7 +74,7 @@ function notesHomeBlock(): string {
  * head of the window stays cache-stable.
  */
 export function bootBlock(ctx: ExtensionContext, currentId: string, previousId: string | undefined, resetLine: boolean): string {
-	const firstId = historyFromSession(ctx)[0]?.windowId ?? currentId;
+	const firstId = rootWindowId(ctx.sessionManager.getSessionId());
 	const parts: string[] = [];
 	if (resetLine) parts.push(RESET_SUMMARY);
 	parts.push(identityBlock(ctx, firstId, currentId, previousId));

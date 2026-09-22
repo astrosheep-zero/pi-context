@@ -3,7 +3,8 @@
  * STATUS: tracked acceptance spec for the history and notes read/search tools. No skip.
  * CLAIM: following the cursors these tools return must reconstruct the original text exactly,
  *   or the result must name the skipped range. Both read tools are one character window over two
- *   stores (notes_read and history_read share the cursor walk below). In v2 this failed
+ *   stores (notes_read and history_read share the cursor walk below). The previous
+ *   implementation failed
  *   at 13 sites; the rows that demanded an over-budget line in a single call are rebuilt as
  *   cursor-walking rows below (the CLAIM explicitly licenses that: reconstruct exactly by
  *   following cursors, or name the skipped range).

@@ -25,7 +25,7 @@ import type { ExtensionContext, SessionManager } from "@earendil-works/pi-coding
 import { historyFromSession } from "../src/index.js";
 import { listNotes, searchNotes, type NoteRow, type NoteSearchRow } from "../src/notes/store.js";
 import { TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
-import { MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
+import { MAX_NOTE_PATH_BYTES, RESET_MARKER_TYPE } from "../src/protocol.js";
 import { appendText, call, context, makeExtension, manager, resultJson, type Captured } from "./integration.test.js";
 
 const NEEDLE = "PAGE_NEEDLE";
@@ -71,6 +71,7 @@ type HistoryRole = "user" | "assistant" | "toolResult";
 type HistoryEntryPlan =
 	| { kind: "message"; role: HistoryRole; toolName: string; content: string }
 	| { kind: "custom_message"; content: string }
+	| { kind: "marker"; windowId: string }
 	| { kind: "compaction"; summary: string };
 
 type HistoryFilterName = "user" | "assistant" | "tool_call" | "tool" | "system" | "developer";
@@ -117,9 +118,11 @@ function historyPlan(seed: number): HistoryPlan {
 	const entries: HistoryEntryPlan[] = [];
 	let compactions = 0;
 	for (let index = 0; index < count; index++) {
-		// A compaction entry splits the branch into a new window.
+		// A marker splits the branch into a new window; the following native compaction
+		// remains an ordinary system item inside that window.
 		if (index > 0 && rng.bool(0.12)) {
 			compactions++;
+			entries.push({ kind: "marker", windowId: `pcw:property:${compactions}` });
 			entries.push({ kind: "compaction", summary: makeContent(rng, rng.bool(0.2)) });
 		}
 		const roll = rng.next();
@@ -166,6 +169,7 @@ function materializeHistory(session: SessionManager, plan: HistoryPlan): void {
 	for (const entry of plan.entries) {
 		if (entry.kind === "message") appendText(session, entry.role, entry.content, entry.toolName);
 		else if (entry.kind === "custom_message") session.appendCustomMessageEntry("pi-context/property", entry.content, false);
+		else if (entry.kind === "marker") session.appendCustomEntry(RESET_MARKER_TYPE, { windowId: entry.windowId });
 		else session.appendCompaction(entry.summary, session.getLeafId() ?? "property-root", 1000);
 	}
 }

@@ -3,18 +3,19 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
 	type ContextUsage,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	type ExtensionContext,
 	type RegisteredCommand,
-	AgentSession,
 	SessionManager,
 	SettingsManager,
-	type SessionCompactEvent,
+	type SessionBoundaryDraft,
+	type SessionBeforeCompactEvent,
 	type ToolDefinition,
+	type TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import piContext, { historyFromSession, internal, notesFromSession } from "../src/index.js";
 import { bootBlock } from "../src/prompts.js";
@@ -22,7 +23,7 @@ import { localIso } from "../src/notes/model.js";
 import { physicalPath } from "../src/notes/paths.js";
 import { listNotes } from "../src/notes/store.js";
 import { middleTruncate, page, TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
-import { NOTE_TYPE, MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
+import { CONTINUATION_TYPE, NOTE_TYPE, MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
 
 // Settings fixtures live in temp directories. PI_CODING_AGENT_DIR is redirected for the
 // whole test process so the extension's SettingsManager.create(ctx.cwd, undefined, ...)
@@ -87,6 +88,7 @@ export type Captured = {
 	handlers: Map<string, EventHandler[]>;
 	commands: Map<string, CommandOptions>;
 	sent: SentMessage[];
+	contextMessages: unknown[];
 	flags: string[];
 };
 
@@ -94,7 +96,7 @@ type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
 
 type CompactionHookResult =
 	| { cancel: true }
-	| { compaction: { summary: string; firstKeptEntryId: string; tokensBefore: number; details?: unknown } }
+	| { compaction: { summary: string; firstKeptEntryId: string | null; tokensBefore: number; details?: unknown } }
 	| undefined;
 
 /** TypeBox's TSchema does not expose `type`/`required` statically; read them structurally. */
@@ -109,7 +111,7 @@ export function manager(persisted = false): SessionManager {
 }
 
 export function makeExtension(sessionManager: SessionManager): Captured {
-	const captured: Captured = { tools: new Map(), handlers: new Map(), commands: new Map(), sent: [], flags: [] };
+	const captured: Captured = { tools: new Map(), handlers: new Map(), commands: new Map(), sent: [], contextMessages: [], flags: [] };
 	const api = {
 		registerFlag(name: string) {
 			captured.flags.push(name);
@@ -166,6 +168,10 @@ export function context(
 
 function noticesOf(ctx: ExtensionContext): Notice[] {
 	return (ctx as ExtensionContext & { notices: Notice[] }).notices;
+}
+
+function sentOf(captured: Captured, customType: string): SentMessage[] {
+	return captured.sent.filter((sent) => sent.message.customType === customType);
 }
 
 export async function call(
@@ -272,15 +278,25 @@ function assertTruncationOf(original: string, actual: string): void {
 	assert.ok(head.length + tail.length < original.length, "truncation actually removes characters");
 }
 
-async function runBeforeCompact(
-	captured: Captured,
-	ctx: ExtensionContext,
-	tokensBefore: number,
-	reason: "manual" | "threshold" | "overflow" = "manual",
-): Promise<CompactionHookResult> {
+async function runManualCompact(captured: Captured, ctx: ExtensionContext): Promise<CompactionHookResult> {
 	const handler = captured.handlers.get("session_before_compact")?.[0];
 	assert.ok(handler, "session_before_compact handler registered");
-	const event = { reason, willRetry: reason === "overflow", signal: new AbortController().signal, preparation: { tokensBefore } };
+	const event: SessionBeforeCompactEvent = {
+		type: "session_before_compact",
+		reason: "manual",
+		willRetry: false,
+		signal: new AbortController().signal,
+		branchEntries: ctx.sessionManager.getBranch(),
+		preparation: {
+			firstKeptEntryId: "",
+			messagesToSummarize: [],
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 0,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { enabled: true, reserveTokens: 0, keepRecentTokens: 0 },
+		},
+	};
 	return (await handler(event as never, ctx)) as CompactionHookResult;
 }
 
@@ -290,6 +306,12 @@ export function runHandlers(captured: Captured, name: string, event: unknown, ct
 	try {
 		for (const handler of captured.handlers.get(name) ?? []) handler(event as never, ctx);
 	} finally { ctx.isIdle = isIdle; }
+}
+
+export async function runHandlersAsync(captured: Captured, name: string, event: unknown, ctx: ExtensionContext): Promise<unknown[]> {
+	const results: unknown[] = [];
+	for (const handler of captured.handlers.get(name) ?? []) results.push(await handler(event as never, ctx));
+	return results;
 }
 
 function completeRequestedCompaction(ctx: ExtensionContext): void {
@@ -307,6 +329,7 @@ async function runCommand(captured: Captured, name: string, args: string, ctx: E
 	assert.ok(command, `${name} command registered`);
 	const notices: Notice[] = [];
 	const cmdCtx = Object.assign({}, ctx, {
+		waitForIdle: async () => {},
 		ui: { notify: (message: string, type?: Notice["type"]) => notices.push({ message, type }) },
 	}) as unknown as ExtensionCommandContext;
 	await command.handler(args, cmdCtx);
@@ -322,9 +345,70 @@ async function runContextHook(captured: Captured, ctx: ExtensionContext, eventOv
 	let result: ContextHookResult;
 	for (const handler of handlers) {
 		const returned = (await handler({ type: "context", messages: [], ...eventOverride } as never, ctx)) as ContextHookResult;
-		if (returned !== undefined) result = result ? { messages: [...result.messages, ...returned.messages] } : returned;
+		if (returned !== undefined) {
+			captured.contextMessages.push(...returned.messages);
+			result = result ? { messages: [...result.messages, ...returned.messages] } : returned;
+		}
 	}
 	return result;
+}
+
+export async function runContextWithSystemHook(
+	captured: Captured,
+	ctx: ExtensionContext,
+	messages: unknown[],
+): Promise<ContextHookResult> {
+	const handlers = captured.handlers.get("context_with_system") ?? [];
+	assert.ok(handlers.length > 0, "context_with_system handler registered");
+	let result: ContextHookResult;
+	for (const handler of handlers) {
+		const returned = (await handler({ type: "context_with_system", messages } as never, ctx)) as ContextHookResult;
+		if (returned !== undefined) {
+			captured.contextMessages.push(...returned.messages);
+			result = result ? { messages: [...result.messages, ...returned.messages] } : returned;
+		}
+	}
+	return result;
+}
+
+async function commitTurnEndBoundary(captured: Captured, sessionManager: SessionManager, ctx: ExtensionContext): Promise<{ entries: SessionBoundaryDraft[]; continue: boolean }> {
+	let entries: SessionBoundaryDraft[] = [];
+	let shouldContinue = false;
+	const event: TurnEndEvent = {
+		type: "turn_end",
+		entries,
+		continue: false,
+		context: { contextEntries: [], contextMessages: [], llmMessages: [], pendingMessages: [], canContinue: true },
+		outcome: "completed",
+		turnIndex: 0,
+		message: { role: "assistant", content: [], stopReason: "stop", timestamp: Date.now() } as unknown as AgentMessage,
+		toolResults: [],
+		messageEntryId: "assistant-entry",
+		toolResultEntryIds: [],
+	};
+	for (const handler of captured.handlers.get("turn_end") ?? []) {
+		event.entries = entries;
+		const result = (await handler(event as never, ctx)) as { entries?: SessionBoundaryDraft[]; continue?: boolean } | undefined;
+		if (result?.entries !== undefined) entries = result.entries;
+		if (result?.continue !== undefined) shouldContinue = result.continue;
+	}
+	for (const entry of entries) {
+		switch (entry.type) {
+			case "custom":
+				sessionManager.appendCustomEntry(entry.customType, entry.data);
+				break;
+			case "custom_message":
+				sessionManager.appendCustomMessageEntry(entry.customType, entry.content, entry.display, entry.details);
+				break;
+			case "compaction":
+				sessionManager.appendCompaction(entry.summary, entry.firstKeptEntryId, 0, entry.details, true, entry.usage);
+				break;
+			case "context_edit":
+				sessionManager.appendContextEdit(entry.targetId, entry.replacement);
+				break;
+		}
+	}
+	return { entries, continue: shouldContinue };
 }
 
 export function appendText(sessionManager: SessionManager, role: "user" | "assistant" | "toolResult", text: string, toolName = "bash"): string {
@@ -771,9 +855,7 @@ test("history multi-query search composes with role, tool_name, and window filte
 	const assistantId = appendText(session, "assistant", "beta assistant message");
 	const toolId = appendText(session, "toolResult", "alpha beta bash output");
 	const rootWindow = historyFromSession(ctx)[0]!.windowId;
-	const leaf = session.getLeafId();
-	assert.ok(leaf);
-	session.appendCompaction("window summary without needles", leaf, 100, { piContext: "reset-v2", windowId: "pcw:test:second" }, true);
+	session.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId: "pcw:test:second" });
 	const nextId = appendText(session, "user", "alpha next window");
 
 	const searchIds = async (params: Record<string, unknown>) =>
@@ -1055,16 +1137,15 @@ test("developer re-role names this extension's entries and leaves native compact
 	const ctx = context(session);
 	const foreignId = session.appendCustomMessageEntry("other/extension", "foreign custom body", false);
 	const extensionId = session.appendCustomMessageEntry(internal.BOOT_TYPE, "extension boot body", false);
-	const leaf = session.getLeafId();
-	assert.ok(leaf);
-	const resetId = session.appendCompaction("reset v2 summary", leaf, 100, { piContext: "reset-v2", windowId: "pcw:test:dev" }, true);
+	session.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId: "pcw:test:dev" });
+	const resetBootId = session.appendCustomMessageEntry(internal.BOOT_TYPE, "reset boot body", false, { windowId: "pcw:test:dev" });
 	const nextLeaf = session.getLeafId();
 	assert.ok(nextLeaf);
 	const nativeId = session.appendCompaction("native summary", nextLeaf, 100, { readFiles: [], modifiedFiles: [] }, true);
 	const byRole = async (role: string) => resultJson<{ items: Array<{ item_id: string; role: string }> }>(
 		await call(captured, "history_list", { role, recent_first: false }, ctx),
 	).items;
-	assert.deepEqual((await byRole("developer")).map((item) => item.item_id), [extensionId, resetId], "developer names exactly this extension's entries");
+	assert.deepEqual((await byRole("developer")).map((item) => item.item_id), [extensionId, resetBootId], "developer names exactly this extension's entries");
 	assert.deepEqual((await byRole("system")).map((item) => item.item_id), [nativeId], "system stays native Pi compactions only");
 	assert.deepEqual((await byRole("user")).map((item) => item.item_id), [foreignId], "foreign custom messages stay user turns");
 });
@@ -1127,46 +1208,36 @@ test("note write/edit tools run sequentially so a parallel batch cannot race the
 	assert.equal(captured.tools.get("notes_read")?.executionMode, undefined, "read-only note tools keep the default mode");
 });
 
-test("custom reset boundary removes old provider context but history remains searchable", async () => {
+test("custom reset marker removes old provider context while history remains searchable", async () => {
 	const sessionManager = manager();
 	const captured = makeExtension(sessionManager);
 	const ctx = context(sessionManager);
 	const oldUserId = appendText(sessionManager, "user", "OLD-UNIQUE-TRANSCRIPT needle");
 	appendText(sessionManager, "assistant", "I will use a tool");
 	const toolResultId = appendText(sessionManager, "toolResult", "tool result safely recorded");
-
-	const before = await runBeforeCompact(captured, ctx, 123);
-	assert.ok(before && "compaction" in before);
-	const markerId = sessionManager.getLeafId();
-	assert.ok(markerId);
-	const marker = sessionManager.getEntry(markerId);
-	assert.ok(marker);
+	await call(captured, "wipe_memory", {}, ctx);
+	const boundary = await commitTurnEndBoundary(captured, sessionManager, ctx);
+	assert.equal(boundary.continue, true);
+	const branch = sessionManager.getBranch();
+	const marker = branch.find((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
+	assert.ok(marker && marker.type === "custom");
 	assert.equal(marker.parentId, toolResultId, "marker follows the completed tool result");
-	const compactionId = sessionManager.appendCompaction(
-		before.compaction.summary,
-		before.compaction.firstKeptEntryId,
-		before.compaction.tokensBefore,
-		before.compaction.details,
-		true,
-	);
-	const providerText = JSON.stringify(sessionManager.buildSessionContext().messages);
+	assert.deepEqual(Object.keys(marker.data as object), ["windowId"]);
+	const projected = await runContextWithSystemHook(captured, ctx, sessionManager.buildSessionContext().messages);
+	const providerText = JSON.stringify(projected?.messages ?? []);
 	assert.equal(providerText.includes("OLD-UNIQUE-TRANSCRIPT"), false);
 	assert.equal(providerText.includes(internal.CONTEXT_WINDOW_OPEN_TAG), true);
+	assert.equal(providerText.includes(internal.RESET_MARKER_TYPE), false, "plain reset state never reaches the provider");
 
 	const windows = historyFromSession(ctx);
 	assert.equal(windows.length, 2);
 	const oldWindow = windows[0]?.windowId;
 	assert.ok(oldWindow);
-	const read = resultRead(
-		await call(captured, "history_read", { window_id: oldWindow, item_id: oldUserId }, ctx),
-	);
+	const read = resultRead(await call(captured, "history_read", { window_id: oldWindow, item_id: oldUserId }, ctx));
 	assert.match(read.content, /OLD-UNIQUE-TRANSCRIPT/);
-	const found = resultJson<{ items: Array<{ item_id: string }> }>(
-		await call(captured, "history_search", { query: "needle" }, ctx),
-	);
+	const found = resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_search", { query: "needle" }, ctx));
 	assert.equal(found.items.length, 1);
 	assert.equal(found.items[0]?.item_id, oldUserId);
-	assert.ok(sessionManager.getEntry(compactionId));
 });
 
 test("the boot notes index shows one metadata line per note and never a body", async () => {
@@ -1189,7 +1260,7 @@ test("the boot notes index shows one metadata line per note and never a body", a
 	assert.equal(text.includes(shortText), false, "the short note's body never reaches boot");
 });
 
-test("the boot block is persisted at the root and baked into every reset summary", async () => {
+test("the root boot and reset boot carry durable window identity", async () => {
 	const sessionManager = manager();
 	const captured = makeExtension(sessionManager);
 	const ctx = context(sessionManager);
@@ -1204,6 +1275,7 @@ test("the boot block is persisted at the root and baked into every reset summary
 	assert.equal(rootBoot?.message.customType, internal.BOOT_TYPE);
 	assert.equal(rootBoot?.message.display, false, "boot block stays out of the TUI");
 	assert.equal(rootBoot?.options?.triggerTurn, false);
+	assert.deepEqual(rootBoot?.message.details, { windowId: `pcw:${sessionManager.getSessionId().slice(0, 8)}:root` });
 	const rootText = typeof rootBoot?.message.content === "string" ? rootBoot.message.content : "";
 	assert.ok(rootText.startsWith(internal.CONTEXT_WINDOW_OPEN_TAG), "root block omits the reset line");
 	assert.equal(rootText.includes("Previous context window id:"), false, "root block omits the previous-id line");
@@ -1215,66 +1287,48 @@ test("the boot block is persisted at the root and baked into every reset summary
 	assert.match(rootText, /updated \d+s ago\)/, "boot note metadata carries a relative update time");
 	assert.ok(rootText.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG));
 
-	// Reset: the boot block IS the compaction summary; no separate boot/hint is persisted.
+	// Reset: the marker and boot are committed together at the turn boundary.
 	await call(captured, "wipe_memory", {}, ctx);
-	runHandlers(captured, "agent_end", {}, ctx);
-	runHandlers(captured, "agent_settled", {}, ctx);
-	const before = await runBeforeCompact(captured, ctx, 9);
-	assert.ok(before && "compaction" in before);
-	const details = before.compaction.details as { piContext: string; windowId: string };
-	assert.equal(details.piContext, "reset-v2");
-	assert.match(details.windowId, new RegExp(`^pcw:${sessionManager.getSessionId().slice(0, 8)}:[0-9a-f]{8}$`));
-	assert.equal(before.compaction.summary.startsWith(internal.CONTEXT_WINDOW_OPEN_TAG), false, "a reset line precedes the identity block");
-	assert.match(before.compaction.summary, new RegExp(`Current context window id: ${details.windowId}`));
-	assert.ok(before.compaction.summary.includes("decisions.md"));
-	assert.match(before.compaction.summary, /updated \d+s ago\)/, "reset summary carries a relative update time");
-	assert.equal(listNotes(ctx, { scope: "session" }).find((row) => row.path === "decisions.md")?.meta.updated_at, decisionsMeta.updated_at, "rendering relative time preserves the stored timestamp");
-	assert.ok(before.compaction.summary.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG));
-	const windows = historyFromSession(ctx);
-	assert.ok(before.compaction.summary.includes(`Previous context window id: ${windows[windows.length - 1]?.windowId}`));
-
-	const compactionId = sessionManager.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 9, details, true);
-	const compactionEntry = sessionManager.getEntry(compactionId);
-	assert.ok(compactionEntry && compactionEntry.type === "compaction");
-	runHandlers(captured, "session_compact", { willRetry: false, compactionEntry }, ctx);
-	completeRequestedCompaction(ctx);
-
-	// Only the hidden continuation follows a reset; no pi-context/boot message is written.
-	assert.equal(captured.sent.length, 2);
-	assert.equal(captured.sent[1]?.message.display, false);
-	assert.equal(captured.sent[1]?.options?.triggerTurn, true);
-	assert.equal(await runContextHook(captured, ctx), undefined, "context hook never injects");
+	const boundary = await commitTurnEndBoundary(captured, sessionManager, ctx);
+	assert.equal(boundary.continue, true);
+	const entries = sessionManager.getBranch();
+	const marker = entries.find((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
+	assert.ok(marker && marker.type === "custom");
+	const resetWindowId = (marker.data as { windowId: string }).windowId;
+	const resetBoot = entries.find((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE && entry.details && typeof entry.details === "object" && (entry.details as { windowId?: unknown }).windowId === resetWindowId);
+	assert.ok(resetBoot && resetBoot.type === "custom_message");
+	assert.equal((resetBoot.details as { windowId: string }).windowId, (marker.data as { windowId: string }).windowId);
+	const continuation = entries.find((entry) => entry.type === "custom_message" && entry.customType === CONTINUATION_TYPE);
+	assert.ok(continuation && continuation.type === "custom_message" && continuation.display === false, "the resumed run is represented by one hidden continuation");
 });
 
-test("reset window ids are extension-minted and drive history_* lookups", async () => {
+test("marker window ids drive history_* lookups and provider projection", async () => {
 	const sessionManager = manager();
 	const captured = makeExtension(sessionManager);
 	const ctx = context(sessionManager);
 	appendText(sessionManager, "user", "task before reset");
-	const before = await runBeforeCompact(captured, ctx, 100);
-	assert.ok(before && "compaction" in before);
-	const details = before.compaction.details as { piContext: string; windowId: string };
-
-	const compactionId = sessionManager.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 100, details, true);
-	const compactionEntry = sessionManager.getEntry(compactionId);
-	assert.ok(compactionEntry && compactionEntry.type === "compaction");
+	const windowId = "pcw:test:marker";
+	const markerId = sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId });
+	sessionManager.appendCustomMessageEntry(internal.BOOT_TYPE, bootBlock(ctx, windowId, "pcw:test:root", true), false, { windowId });
+	const currentId = appendText(sessionManager, "assistant", "message after reset");
 
 	// history_windows reports exactly the minted id carried in details.
 	// The default is newest-first, so the current window is listed first.
 	const windows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_windows", {}, ctx));
 	assert.equal(windows.windows.length, 2);
-	assert.equal(windows.windows[0]?.window_id, details.windowId, "recent_first defaults to newest-first");
+	assert.equal(windows.windows[0]?.window_id, windowId, "recent_first defaults to newest-first");
 	// Only an explicit false restores oldest-first window order.
 	const oldestWindows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_windows", { recent_first: false }, ctx));
 	assert.equal(oldestWindows.windows[0]?.window_id, `pcw:${sessionManager.getSessionId().slice(0, 8)}:root`, "explicit false keeps the oldest window first");
-	assert.equal(oldestWindows.windows[1]?.window_id, details.windowId);
-	// The minted id is Pi's 8-hex entry-id shape, but the window id is ours.
-	assert.match(details.windowId, new RegExp(`^pcw:${sessionManager.getSessionId().slice(0, 8)}:[0-9a-f]{8}$`));
+	assert.equal(oldestWindows.windows[1]?.window_id, windowId);
 
 	// history_* accepts the minted window id and resolves the baked summary item.
-	const listed = resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_list", { window_id: details.windowId }, ctx));
-	assert.equal(listed.items.length, 1);
-	assert.equal(listed.items[0]?.item_id, compactionEntry.id);
+	const listed = resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_list", { window_id: windowId }, ctx));
+	assert.equal(listed.items.some((item) => item.item_id === markerId), false, "plain marker entries stay out of history items");
+	assert.ok(listed.items.some((item) => item.item_id === currentId));
+	const projected = await runContextWithSystemHook(captured, ctx, sessionManager.buildSessionContext().messages);
+	assert.equal(JSON.stringify(projected?.messages ?? []).includes("task before reset"), false);
+	assert.ok(JSON.stringify(projected?.messages ?? []).includes("message after reset"));
 });
 
 test("recent_first defaults to newest-first for items and search; only false is oldest-first", async () => {
@@ -1297,178 +1351,97 @@ test("recent_first defaults to newest-first for items and search; only false is 
 	assert.deepEqual(await searchOrder({ recent_first: false }), [firstId, secondId, thirdId], "search honours an explicit false");
 });
 
-test("a Pi-native compaction with the extension off keeps entry.id as the window id", async () => {
+test("off preserves an existing marker window and still cancels native compaction", async () => {
 	const sessionManager = manager();
 	const captured = makeExtension(sessionManager);
 	const ctx = context(sessionManager);
-	appendText(sessionManager, "user", "native compaction");
+	appendText(sessionManager, "user", "old context must stay hidden");
+	const windowId = "pcw:test:existing";
+	sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId });
+	sessionManager.appendCustomMessageEntry(internal.BOOT_TYPE, "fresh boot", false, { windowId });
 	await runCommand(captured, "pi-context", "off", ctx);
-
-	const compactionId = sessionManager.appendCompaction("Pi native summary", sessionManager.getLeafId() as string, 100, { readFiles: [], modifiedFiles: [] }, true);
+	const before = await runManualCompact(captured, ctx);
+	assert.deepEqual(before, { cancel: true });
+	const projected = await runContextWithSystemHook(captured, ctx, sessionManager.buildSessionContext().messages);
+	assert.equal(JSON.stringify(projected?.messages ?? []).includes("old context must stay hidden"), false);
 	const windows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_windows", {}, ctx));
-	assert.equal(windows.windows[0]?.window_id, `pcw:${sessionManager.getSessionId().slice(0, 8)}:${compactionId}`, "native compactions fall back to entry.id");
+	assert.equal(windows.windows[0]?.window_id, windowId);
 });
 
-test("a reset window baked under the older full-session id still projects and resolves opaquely", async () => {
+test("low-budget guidance and warning persist at turn_end, once per active window", async () => {
 	const sessionManager = manager();
 	const captured = makeExtension(sessionManager);
-	const ctx = context(sessionManager);
-	const sessionId = sessionManager.getSessionId();
-	const projectedRoot = `pcw:${sessionId.slice(0, 8)}:root`;
-	// A window id baked by the pre-shortening extension: the full session id is part of the opaque string.
-	const oldWindowId = `pcw:${sessionId}:deadbeef`;
-
-	const rootItemId = appendText(sessionManager, "user", "message before the old reset");
-	const markerId = sessionManager.getLeafId();
-	assert.ok(markerId);
-	const compactionId = sessionManager.appendCompaction("old reset summary", markerId, 100, { piContext: "reset-v2", windowId: oldWindowId }, true);
-	const currentItemId = appendText(sessionManager, "assistant", "message after the old reset");
-
-	// The old session still projects both windows: the computed short root and the opaque baked window.
-	const windows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_windows", { recent_first: false }, ctx));
-	assert.deepEqual(windows.windows.map((window) => window.window_id), [projectedRoot, oldWindowId], "both the short root and the older opaque id project");
-
-	// history_read resolves items by the older opaque window id, and by the computed root.
-	const oldRead = resultRead(await call(captured, "history_read", { window_id: oldWindowId, item_id: compactionId }, ctx));
-	assert.equal(oldRead.content, "old reset summary");
-	const oldCurrent = resultRead(await call(captured, "history_read", { window_id: oldWindowId, item_id: currentItemId }, ctx));
-	assert.equal(oldCurrent.content, "message after the old reset");
-	const rootRead = resultRead(await call(captured, "history_read", { window_id: projectedRoot, item_id: rootItemId }, ctx));
-	assert.equal(rootRead.content, "message before the old reset");
-
-	// No normalization: the read path matches window ids exactly and never rewrites an older spelling.
-	const unrewritten = resultJson<{ error?: string }>(await call(captured, "history_read", { window_id: `pcw:${sessionId}:root`, item_id: rootItemId }, ctx));
-	assert.match(unrewritten.error ?? "", /unknown item_id or window_id/);
-});
-
-test("low-budget guidance persists once per window with no transient copy", async () => {
-	const sessionManager = manager();
-	const captured = makeExtension(sessionManager);
-
-	// Comfortable usage: the hook injects nothing and persists nothing.
-	const comfortable = context(sessionManager, undefined, { tokens: 10_000, percent: 5, contextWindow: 200_000 });
-	assert.equal(await runContextHook(captured, comfortable), undefined, "nothing injected above the reminder");
-	assert.equal(captured.sent.length, 0);
-
-	// Unknown usage (right after compaction): stay silent.
-	const unknown = context(sessionManager, undefined, { tokens: null, percent: null, contextWindow: 200_000 });
-	assert.equal(await runContextHook(captured, unknown), undefined);
-
-	// Below threshold: persist once (hidden from the TUI; the user gets one ephemeral
-	// notify instead, no turn triggered) and return no transient copy — history and
-	// the model's view never diverge on position.
 	const low = context(sessionManager, undefined, { tokens: 170_000, percent: 85, contextWindow: 200_000 });
-	assert.equal(await runContextHook(captured, low), undefined, "the context hook injects nothing");
-	assert.equal(captured.sent.length, 1, "persisted exactly once");
-	assert.equal(captured.sent[0]?.message.customType, internal.GUIDANCE_TYPE);
-	assert.equal(captured.sent[0]?.message.display, false, "guidance stays out of the TUI");
-	assert.equal(captured.sent[0]?.options?.triggerTurn, false, "never triggers an extra turn");
-	assert.ok(
-		noticesOf(low).some((notice) => notice.type === "warning"),
-		"the user gets one model-invisible notify instead",
-	);
-	const text = captured.sent[0]?.message.content;
-	assert.ok(typeof text === "string" && text.startsWith(internal.GUIDANCE_OPEN_TAG));
+	assert.equal(await runContextHook(captured, low), undefined, "guidance is staged, not injected into this request");
+	assert.equal(captured.sent.length, 0, "guidance does not trigger a detached turn");
+	const guidanceBoundary = await commitTurnEndBoundary(captured, sessionManager, low);
+	assert.equal(guidanceBoundary.entries.filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1);
+	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1);
+	assert.equal(await runContextHook(captured, low), undefined, "the same window does not repeat guidance");
 
-	// Same window: no duplicate persist.
-	assert.equal(await runContextHook(captured, low), undefined);
-	assert.equal(captured.sent.length, 1, "no duplicate persist, so no re-render");
-
-	// A reset boundary creates a new window: the reminder re-arms and carries its own measured count.
-	const before = await runBeforeCompact(captured, low, 190_000);
-	assert.ok(before && "compaction" in before);
-	sessionManager.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 190_000, before.compaction.details, true);
-	const newWindow = context(sessionManager, undefined, { tokens: 168_000, percent: 84, contextWindow: 200_000 });
-	assert.equal(await runContextHook(captured, newWindow), undefined, "still no injection in the fresh window");
-	assert.equal(captured.sent.length, 2);
-	const newWindowText = captured.sent[1]?.message.content;
-	assert.ok(typeof newWindowText === "string" && newWindowText.startsWith(internal.GUIDANCE_OPEN_TAG));
+	const warningContext = context(sessionManager, undefined, { tokens: 199_000, percent: 99.5, contextWindow: 200_000 });
+	const warning = await runContextHook(captured, warningContext);
+	assert.equal(warning?.messages.length, 1, "the warning is visible in the current provider request");
+	assert.equal((warning?.messages[0] as { customType?: string }).customType, internal.WARNING_TYPE);
+	const warningBoundary = await commitTurnEndBoundary(captured, sessionManager, warningContext);
+	assert.equal(warningBoundary.entries.filter((entry) => entry.type === "custom_message" && entry.customType === internal.WARNING_TYPE).length, 1);
+	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.WARNING_TYPE).length, 1);
 });
 
-test("wipe_memory continues exactly once and cancellation/failure does not fall back or loop", async () => {
+test("an ignored warning never repeats or creates a durable checkpoint", async () => {
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const ctx = context(sm, undefined, { tokens: 199_000, percent: 99.5, contextWindow: 200_000 });
+	const first = await runContextHook(captured, ctx);
+	assert.equal(first?.messages.length, 1);
+	runHandlers(captured, "agent_end", {}, ctx);
+	assert.equal(await runContextHook(captured, ctx), undefined, "the fired-in-window guard ignores a warning the model did not act on");
+	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.WARNING_TYPE).length, 0);
+});
+
+test("wipe_memory uses one turn boundary and never calls ctx.compact", async () => {
 	const sessionManager = manager();
 	const captured = makeExtension(sessionManager);
-	let requestedCompact: Parameters<NonNullable<ExtensionContext["compact"]>>[0] | undefined;
-	const ctx = context(sessionManager, (options) => {
-		requestedCompact = options;
-	});
-	appendText(sessionManager, "user", "enough history for the hook test");
-	const newContext = await call(captured, "wipe_memory", {}, ctx);
-	assert.equal(newContext.terminate, true);
-	runHandlers(captured, "agent_end", {}, ctx);
-	assert.equal(requestedCompact, undefined, "agent_end does not request compaction while the run is active");
-	runHandlers(captured, "agent_settled", {}, ctx);
-	assert.ok(requestedCompact, "manual compaction is deferred until agent_settled");
-
-	const before = await runBeforeCompact(captured, ctx, 7);
-	assert.ok(before && "compaction" in before);
-	const compactionId = sessionManager.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 7, before.compaction.details, true);
-	const compactionEntry = sessionManager.getEntry(compactionId);
-	assert.ok(compactionEntry && compactionEntry.type === "compaction");
-	const compactEvent: Pick<SessionCompactEvent, "willRetry" | "compactionEntry"> = { willRetry: false, compactionEntry };
-	runHandlers(captured, "session_compact", compactEvent, ctx);
-	runHandlers(captured, "session_compact", compactEvent, ctx);
-	assert.equal(captured.sent.length, 0, "the hook never starts a run while compaction is active");
-	completeRequestedCompaction(ctx);
-	assert.equal(captured.sent.length, 1, "exactly one hidden continuation and no hint");
-	assert.equal(captured.sent[0]?.message.display, false);
-	assert.equal(captured.sent[0]?.options?.triggerTurn, true);
-
-	const failedManager = manager();
-	const failed = makeExtension(failedManager);
-	let failureOptions: Parameters<NonNullable<ExtensionContext["compact"]>>[0] | undefined;
-	const failedCtx = context(failedManager, (options) => {
-		failureOptions = options;
-	});
-	await call(failed, "wipe_memory", {}, failedCtx);
-	runHandlers(failed, "agent_end", {}, failedCtx);
-	runHandlers(failed, "agent_settled", {}, failedCtx);
-	assert.ok(failureOptions?.onError);
-	failureOptions.onError(new Error("not compactable"));
-	runHandlers(failed, "session_compact", compactEvent, failedCtx);
-	assert.equal(failed.sent.length, 0, "failure does not send an accidental continuation");
-
-	const aborted = await runBeforeCompactAborted(failed, failedCtx);
-	assert.deepEqual(aborted, { cancel: true }, "aborted custom compaction cannot fall through to Pi default summary");
-	runHandlers(failed, "session_compact", { ...compactEvent, willRetry: true }, failedCtx);
-	assert.equal(failed.sent.length, 0, "native overflow retry is left to Pi core, not doubled by the extension");
+	const ctx = context(sessionManager, () => assert.fail("ctx.compact must not be used"));
+	appendText(sessionManager, "user", "enough history for the boundary test");
+	const result = resultJson<{ status?: string }>(await call(captured, "wipe_memory", {}, ctx));
+	assert.ok(result.status);
+	const boundary = await commitTurnEndBoundary(captured, sessionManager, ctx);
+	assert.equal(boundary.continue, true);
+	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE).length, 1);
+	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE && entry.details && typeof entry.details === "object" && "windowId" in entry.details).length, 1);
 });
 
-async function runBeforeCompactAborted(captured: Captured, ctx: ExtensionContext): Promise<CompactionHookResult> {
-	const handler = captured.handlers.get("session_before_compact")?.[0];
-	assert.ok(handler);
-	const event = { reason: "manual", willRetry: false, signal: AbortSignal.abort(), preparation: { tokensBefore: 7 } };
-	return (await handler(event as never, ctx)) as CompactionHookResult;
-}
-
-test("pi-context command toggles the boot block, guidance, and reset compaction at runtime", async () => {
+test("pi-context command toggles future work, /clear-context is the manual path, and active markers cancel /compact", async () => {
 	const sessionManager = manager();
 	appendText(sessionManager, "user", "hello");
 	const captured = makeExtension(sessionManager);
 	const low = context(sessionManager, undefined, { tokens: 170_000, contextWindow: 200_000, percent: 85 });
 
-	// On by default: session_start persists the root boot block; the low budget persists guidance.
+	// On by default: session_start persists the root boot block.
 	runHandlers(captured, "session_start", { reason: "startup" }, low);
 	assert.equal(captured.sent.length, 1);
 	assert.equal(captured.sent[0]?.message.customType, internal.BOOT_TYPE);
-	assert.equal(await runContextHook(captured, low), undefined, "the context hook never injects");
-	assert.equal(captured.sent.length, 2, "guidance persisted");
-	assert.equal(captured.sent[1]?.message.customType, internal.GUIDANCE_TYPE);
 
 	let notices = await runCommand(captured, "pi-context", "off", low);
 	assert.match(notices[0]?.message ?? "", /off/);
 	assert.equal(await runContextHook(captured, low), undefined, "no guidance while off");
-	assert.equal(captured.sent.length, 2, "no guidance persisted while off");
+	assert.equal(sentOf(captured, internal.GUIDANCE_TYPE).length, 0, "no guidance persisted while off");
 	runHandlers(captured, "session_start", { reason: "startup" }, low);
-	assert.equal(captured.sent.length, 2, "no boot block persisted while off");
-	assert.equal(await runBeforeCompact(captured, low, 123), undefined, "default Pi compaction applies while off");
+	assert.equal(captured.sent.length, 1, "no new boot block is persisted while off");
 	const offResult = resultJson<{ error?: string }>(await call(captured, "wipe_memory", {}, low));
 	assert.match(offResult.error ?? "", /off/, "wipe_memory refuses while off");
 
 	notices = await runCommand(captured, "pi-context", "on", low);
 	assert.match(notices[0]?.message ?? "", /on/);
-	runHandlers(captured, "session_start", { reason: "startup" }, low);
-	assert.equal(captured.sent.length, 2, "re-enable preserves the existing boot block without duplication");
+	await runCommand(captured, "clear-context", "", low);
+	assert.equal(captured.sent.length, 2, "/clear-context writes one hidden boot without triggering a model turn");
+	assert.equal(captured.sent[1]?.options?.triggerTurn, false);
+	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE).length, 1);
+	const markerContext = await runManualCompact(captured, low);
+	assert.deepEqual(markerContext, { cancel: true }, "/compact is canceled while a marker is active");
+	const projected = await runContextWithSystemHook(captured, low, sessionManager.buildSessionContext().messages);
+	assert.equal(JSON.stringify(projected?.messages ?? []).includes("hello"), false, "off keeps the existing wipe in force");
 
 	notices = await runCommand(captured, "pi-context", "maybe", low);
 	assert.equal(notices[0]?.type, "error", "unknown argument rejected");
@@ -1476,121 +1449,6 @@ test("pi-context command toggles the boot block, guidance, and reset compaction 
 	// Bare command reports current state without changing it.
 	notices = await runCommand(captured, "pi-context", "", low);
 	assert.match(notices[0]?.message ?? "", /on/);
-});
-
-test("every compaction path resets instantly for every reason, idle or streaming", async () => {
-	for (const reason of ["manual", "threshold", "overflow"] as const) {
-		for (const idle of [false, true]) {
-			const sm = manager();
-			appendText(sm, "user", "long task history");
-			const captured = makeExtension(sm);
-			let compactions = 0;
-			const ctx = context(sm, () => { compactions++; }, undefined, idle);
-			assert.equal(captured.handlers.has("input"), false, "no user-input interception");
-			for (let window = 0; window < 2; window++) {
-				// The warning steer already fired from the context hook, so the compaction
-				// request itself is the wipe: every reason, idle or mid-run, resets on the
-				// spot with no model turn in between and nothing sent.
-				const before = await runBeforeCompact(captured, ctx, 100, reason);
-				assert.ok(before && "compaction" in before, `${reason}, idle=${idle}: resets directly`);
-				assert.equal(captured.sent.length, 0, `${reason}, idle=${idle}: no steer, no continuation`);
-				const details = before.compaction.details as { piContext: string; windowId: string };
-				assert.equal(details.piContext, "reset-v2");
-				assert.match(before.compaction.summary, new RegExp(`Current context window id: ${details.windowId}`));
-				const id = sm.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 100, details, true);
-				const compactionEntry = sm.getEntry(id);
-				assert.ok(compactionEntry && compactionEntry.type === "compaction");
-				const event = { reason, willRetry: idle && reason === "overflow", compactionEntry };
-				runHandlers(captured, "session_compact", event, ctx);
-				runHandlers(captured, "session_compact", event, ctx);
-				assert.equal(compactions, 0, `${reason}, idle=${idle}: an instant reset never asks ctx.compact()`);
-				runHandlers(captured, "agent_end", {}, ctx);
-				runHandlers(captured, "agent_settled", {}, ctx);
-				assert.equal(compactions, 0, `${reason}, idle=${idle}: settling after an instant reset is a no-op`);
-				assert.equal(captured.sent.length, 0, `${reason}, idle=${idle}: nothing is ever sent`);
-			}
-		}
-	}
-});
-
-test("the warning steer fires once per window at the reserve-plus-warning line, then crossings reset instantly", async () => {
-	const sm = manager();
-	appendText(sm, "user", "long task history");
-	const captured = makeExtension(sm);
-	let compactions = 0;
-	// Default thresholds: reserve 16384, the shallow reminder at remaining 40960 and the
-	// warning steer at remaining 28672 (= reserve + 12288).
-	const window = 200_000;
-	const at = (remaining: number, idle = false) => context(sm, () => { compactions++; }, { tokens: window - remaining, percent: 0, contextWindow: window }, idle);
-	const warnings = () => captured.sent.filter((entry) => entry.message.customType === internal.WARNING_TYPE);
-	const reminders = () => captured.sent.filter((entry) => entry.message.customType === internal.GUIDANCE_TYPE);
-
-	// Above the line the shallow reminder owns the band; no warning is steered.
-	assert.equal(await runContextHook(captured, at(28_673)), undefined);
-	assert.equal(warnings().length, 0, "no warning above the warning line");
-	assert.equal(reminders().length, 1, "the shallow reminder persists instead");
-	// Crossing the line: exactly one warning steer, triggered, hidden from the TUI.
-	const onLine = at(28_672);
-	assert.equal(await runContextHook(captured, onLine), undefined);
-	assert.equal(warnings().length, 1);
-	assert.equal(warnings()[0]?.message.customType, internal.WARNING_TYPE);
-	assert.equal(warnings()[0]?.options?.triggerTurn, true, "the steer reaches the model mid-run");
-	assert.equal(warnings()[0]?.message.display, false, "steer text is model-facing only");
-	assert.ok(
-		noticesOf(onLine).some((notice) => notice.type === "warning"),
-		"the user gets one model-invisible notify for the steer",
-	);
-	// Once per window: deeper sampling does not repeat it.
-	assert.equal(await runContextHook(captured, at(4_000)), undefined);
-	assert.equal(warnings().length, 1, "one warning per window, never an unbounded loop");
-
-	// The model rode on: Pi's automatic crossing resets on the spot — no cancel, no turn.
-	const crossing = await runBeforeCompact(captured, at(1_000), 100, "threshold");
-	assert.ok(crossing && "compaction" in crossing, "the threshold crossing resets for real");
-	assert.equal(warnings().length, 1, "no second steer at the crossing");
-	assert.equal(compactions, 0, "an instant reset never asks ctx.compact()");
-	runHandlers(captured, "agent_end", {}, at(1_000));
-	runHandlers(captured, "agent_settled", {}, at(1_000));
-	runHandlers(captured, "agent_settled", {}, at(1_000));
-	assert.equal(compactions, 0, "agent_end/settled never request a reset for an instant one");
-
-	// A completed reset re-arms the warning for the next window, not before.
-	const details = crossing.compaction.details as { windowId: string };
-	sm.appendCompaction(crossing.compaction.summary, crossing.compaction.firstKeptEntryId, 100, details, true);
-	assert.equal(await runContextHook(captured, at(30_000)), undefined, "fresh window above the warning line steers no warning");
-	assert.equal(warnings().length, 1);
-	assert.equal(await runContextHook(captured, at(20_000)), undefined, "the fresh window crosses the line again");
-	assert.equal(warnings().length, 2, "the warning re-arms per window");
-	assert.equal(warnings()[1]?.message.customType, internal.WARNING_TYPE);
-});
-
-test("overflow resets on the spot, and manual/wipe_memory never cancel", async () => {
-	const sm = manager();
-	appendText(sm, "user", "long task history");
-	const captured = makeExtension(sm);
-	let compactions = 0;
-	const ctx = context(sm, () => { compactions++; }, undefined, false);
-
-	// Overflow resets immediately, exactly like the threshold crossing.
-	const overflow = await runBeforeCompact(captured, ctx, 100, "overflow");
-	assert.ok(overflow && "compaction" in overflow, "overflow resets on the spot");
-	assert.equal(captured.sent.length, 0, "no steer at the crossing");
-
-	// User /compact resets directly.
-	const manual = await runBeforeCompact(captured, ctx, 100, "manual");
-	assert.ok(manual && "compaction" in manual, "manual compaction is never intercepted");
-	assert.equal(captured.sent.length, 0, "manual compaction sends nothing");
-
-	// wipe_memory requests its reset after the run settles.
-	await call(captured, "wipe_memory", {}, ctx);
-	runHandlers(captured, "agent_end", {}, ctx);
-	assert.equal(compactions, 0, "wipe_memory waits for settled");
-	runHandlers(captured, "agent_settled", {}, ctx);
-	runHandlers(captured, "agent_settled", {}, ctx);
-	assert.equal(compactions, 1, "wipe_memory still compacts through ctx.compact()");
-	const explicit = await runBeforeCompact(captured, ctx, 100, "manual");
-	assert.ok(explicit && "compaction" in explicit, "wipe_memory reset is allowed");
-	assert.equal(captured.sent.length, 0, "wipe_memory never cancels or emits a steer");
 });
 
 test("the visible countdown ends at the warning line, clamps at zero, and preserves unknown usage", async () => {
@@ -1632,9 +1490,11 @@ test("the reminder threshold derives from compaction.reserveTokens plus the pi-c
 
 	// reminder = 100000 + 30000.
 	assert.equal(await runContextHook(captured, at(130_001)), undefined, "nothing injected above the derived reminder");
-	assert.equal(captured.sent.length, 0, "no guidance above the derived reminder");
-	assert.equal(await runContextHook(captured, at(130_000)), undefined, "derived reminder crossing persists only");
-	assert.equal(captured.sent.length, 1, "derived reminder fires");
+	assert.equal(sentOf(captured, internal.GUIDANCE_TYPE).length, 0, "no guidance above the derived reminder");
+	const crossing = at(130_000);
+	assert.equal(await runContextHook(captured, crossing), undefined, "derived reminder crossing persists only");
+	await commitTurnEndBoundary(captured, sm, crossing);
+	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1, "derived reminder fires");
 });
 
 test("absent pi-context key or margins reproduce the default reminder threshold at Pi's default reserve", async () => {
@@ -1655,9 +1515,11 @@ test("absent pi-context key or margins reproduce the default reminder threshold 
 		const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
 		const first = at(40_961);
 		assert.equal(await runContextHook(captured, first), undefined, `${label}: nothing injected above the default reminder`);
-		assert.equal(captured.sent.length, 0, `${label}: no guidance above the default reminder`);
-		assert.equal(await runContextHook(captured, at(40_960)), undefined, `${label}: default reminder crossing persists only`);
-		assert.equal(captured.sent.length, 1, `${label}: default reminder fires`);
+		assert.equal(sentOf(captured, internal.GUIDANCE_TYPE).length, 0, `${label}: no guidance above the default reminder`);
+		const crossing = at(40_960);
+		assert.equal(await runContextHook(captured, crossing), undefined, `${label}: default reminder crossing persists only`);
+		await commitTurnEndBoundary(captured, sm, crossing);
+		assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1, `${label}: default reminder fires`);
 		assert.equal(noticesOf(first).length, 0, `${label}: valid defaults warn nobody`);
 	}
 });
@@ -1675,9 +1537,11 @@ test("project pi-context reminder margin and reserve override global per key", a
 	const window = 300_000;
 	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
 	assert.equal(await runContextHook(captured, at(90_001)), undefined, "nothing injected above the project-derived reminder");
-	assert.equal(captured.sent.length, 0);
-	assert.equal(await runContextHook(captured, at(90_000)), undefined, "project-derived reminder crossing persists only");
-	assert.equal(captured.sent.length, 1, "project reminder margin wins");
+	assert.equal(sentOf(captured, internal.GUIDANCE_TYPE).length, 0);
+	const crossing = at(90_000);
+	assert.equal(await runContextHook(captured, crossing), undefined, "project-derived reminder crossing persists only");
+	await commitTurnEndBoundary(captured, sm, crossing);
+	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1, "project reminder margin wins");
 });
 
 test("an untrusted project is ignored, so global pi-context margins apply", async () => {
@@ -1692,9 +1556,11 @@ test("an untrusted project is ignored, so global pi-context margins apply", asyn
 	// Global reminder = 16384 + 30000 = 46384, not the project's 56384.
 	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd, false);
 	assert.equal(await runContextHook(captured, at(56_000)), undefined, "untrusted project margin ignored; nothing injected");
-	assert.equal(captured.sent.length, 0, "no guidance from the untrusted project margin");
-	assert.equal(await runContextHook(captured, at(46_384)), undefined, "global margin fires instead");
-	assert.equal(captured.sent.length, 1);
+	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 0, "no guidance from the untrusted project margin");
+	const crossing = at(46_384);
+	assert.equal(await runContextHook(captured, crossing), undefined, "global margin fires instead");
+	await commitTurnEndBoundary(captured, sm, crossing);
+	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1);
 });
 
 test("the reminder margin is re-read from settings.json on session_start", async () => {
@@ -1712,8 +1578,10 @@ test("the reminder margin is re-read from settings.json on session_start", async
 	writeJson(join(fixture.agentDir, "settings.json"), { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 40_000 } });
 	runHandlers(captured, "session_start", { reason: "startup" }, at(0));
 	// New reminder = 16384 + 40000 = 56384; 35000 is now below it.
-	assert.equal(await runContextHook(captured, at(35_000)), undefined, "the crossing persists only");
-	assert.equal(guidance().length, 1, "reminder margin re-read on session_start");
+	const crossing = at(35_000);
+	assert.equal(await runContextHook(captured, crossing), undefined, "the crossing persists only");
+	await commitTurnEndBoundary(captured, sm, crossing);
+	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1, "reminder margin re-read on session_start");
 });
 
 test("an invalid reminder margin degrades to its default with one warning and never throws", async () => {
@@ -1732,8 +1600,10 @@ test("an invalid reminder margin degrades to its default with one warning and ne
 	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
 	// The degraded reminder is Pi's default reserve + default margin = 40960.
 	assert.equal(await runContextHook(captured, at(40_961)), undefined, "nothing injected above the degraded reminder");
-	assert.equal(await runContextHook(captured, at(40_960)), undefined, "degraded reminder uses its default");
-	assert.equal(captured.sent.length, 2, "root boot plus degraded reminder");
+	const crossing = at(40_960);
+	assert.equal(await runContextHook(captured, crossing), undefined, "degraded reminder uses its default");
+	await commitTurnEndBoundary(captured, sm, crossing);
+	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1, "the degraded reminder is persisted once");
 	assert.equal(notices.length, 1, "warning stays one-time across handler calls");
 });
 
@@ -1742,124 +1612,28 @@ test("the old threshold flags are no longer registered", () => {
 	assert.deepEqual(captured.flags, []);
 });
 
-test("the removed pre-prompt/turn_end hooks stay gone; the context hook owns the only steer", async () => {
-	const sm = manager();
-	const captured = makeExtension(sm);
-	// The old pre-prompt/turn_end paths registered hooks and fired on a token threshold
-	// of their own. They are gone: nothing fires outside the context hook and
-	// session_before_compact.
-	assert.equal(captured.handlers.has("before_agent_start"), false, "before_agent_start hook removed");
-	assert.equal(captured.handlers.has("turn_end"), false, "turn_end hook removed");
-	assert.equal(captured.handlers.has("input"), false, "no input copy/replay special case");
-	assert.equal(captured.handlers.has("session_before_compact"), true, "session_before_compact is the sole compaction entry point");
-
-	// Deep in the warning band the context hook steers the warning; the shallow
-	// guidance is superseded, not stacked on top of it.
-	const window = 200_000;
-	const ctx = context(sm, undefined, { tokens: window - 24_576, percent: 0, contextWindow: window }, false);
-	assert.equal(captured.sent.length, 0, "nothing before the hook runs");
-	assert.equal(await runContextHook(captured, ctx), undefined);
-	assert.equal(captured.sent.length, 1);
-	assert.equal(captured.sent[0]?.message.customType, internal.WARNING_TYPE);
-	assert.equal(captured.sent[0]?.options?.triggerTurn, true);
-
-	// The compaction request that follows is the wipe itself: instant reset, no cancel.
-	const before = await runBeforeCompact(captured, ctx, 100, "threshold");
-	assert.ok(before && "compaction" in before, "the crossing resets for real");
-	assert.equal(captured.sent.length, 1, "one steer, one real compaction");
-});
-
-test("ordinary wipe_memory after an automatic crossing still requests one reset and starts a fresh run", async () => {
-	for (const reason of [undefined, "threshold", "overflow"] as const) {
-		const sm = manager();
-		appendText(sm, "user", "work to continue after reset");
-		const captured = makeExtension(sm);
-		let compactions = 0;
-		const ctx = context(sm, () => { compactions++; }, undefined, false);
-		if (reason) {
-			const crossing = await runBeforeCompact(captured, ctx, 100, reason);
-			assert.ok(crossing && "compaction" in crossing, `${reason}: the crossing already reset on the spot`);
-		}
-		const request = await call(captured, "wipe_memory", {}, ctx);
-		assert.equal(request.terminate, true, "end the current tool loop before reset");
-		runHandlers(captured, "agent_end", {}, ctx);
-		assert.equal(compactions, 0, "no request before settled");
-		runHandlers(captured, "agent_settled", {}, ctx);
-		runHandlers(captured, "agent_settled", {}, ctx);
-		assert.equal(compactions, 1, "explicit reset consumes the request");
-		const before = await runBeforeCompact(captured, ctx, 100, "manual");
-		assert.ok(before && "compaction" in before);
-		const id = sm.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 100, before.compaction.details, true);
-		const event = { willRetry: false, compactionEntry: sm.getEntry(id) };
-		runHandlers(captured, "session_compact", event, ctx);
-		runHandlers(captured, "session_compact", event, ctx);
-		runHandlers(captured, "agent_settled", {}, ctx);
-		assert.equal(compactions, 1, "no second reset after success");
-		completeRequestedCompaction(ctx);
-		assert.equal(captured.sent.length, 1, "explicit request still owns exactly one continuation");
-		const continuation = captured.sent[0]!;
-		assert.equal(continuation.options?.triggerTurn, true);
-		// Exercise Pi's real custom-message routing after the old run has settled.
-		// The prompt endpoint is stubbed; no provider request is made.
-		const prompts: unknown[] = [];
-		const runtime = {
-			isStreaming: false,
-			_runAgentPrompt: async (message: unknown) => { prompts.push(message); },
-			agent: { steer: () => assert.fail("continuation must start a run, not wait in a steer queue") },
-		};
-		await AgentSession.prototype.sendCustomMessage.call(runtime as unknown as AgentSession, continuation.message, continuation.options);
-		assert.equal(prompts.length, 1, "Pi starts a fresh prompt without another user message");
-	}
-});
-
-test("wipe_memory can reset successive windows without duplicate compactions or continuations", async () => {
-	const sm = manager();
-	const captured = makeExtension(sm);
-	let compactions = 0;
-	const ctx = context(sm, () => { compactions++; });
-	for (let window = 0; window < 2; window++) {
-		appendText(sm, "user", `window ${window}`);
-		const request = resultJson<{ status: string }>(await call(captured, "wipe_memory", {}, ctx));
-		assert.equal(request.status, "rollover_requested");
-		runHandlers(captured, "agent_end", {}, ctx);
-		runHandlers(captured, "agent_end", {}, ctx);
-		assert.equal(compactions, window, "agent_end only arms the reset");
-		runHandlers(captured, "agent_settled", {}, ctx);
-		runHandlers(captured, "agent_settled", {}, ctx);
-		assert.equal(compactions, window + 1);
-		const before = await runBeforeCompact(captured, ctx, 100);
-		assert.ok(before && "compaction" in before);
-		const id = sm.appendCompaction(before.compaction.summary, before.compaction.firstKeptEntryId, 100, before.compaction.details, true);
-		const event = { willRetry: false, compactionEntry: sm.getEntry(id) };
-		runHandlers(captured, "session_compact", event, ctx);
-		runHandlers(captured, "session_compact", event, ctx);
-		completeRequestedCompaction(ctx);
-		assert.equal(captured.sent.length, window + 1, "one continuation per explicit reset, and no hint");
-	}
-});
-
-
-test("boot and guidance deduplicate across extension reload while a new branch can receive them", () => {
+test("boot and staged guidance deduplicate across extension reload while a new branch can receive them", async () => {
 	const sm = manager();
 	appendText(sm, "user", "branch anchor");
 	const anchor = sm.getLeafId()!;
 	const ctx = context(sm, undefined, { tokens: 170_000, percent: 85, contextWindow: 200_000 });
 	const first = makeExtension(sm);
 	runHandlers(first, "session_start", {}, ctx);
-	runHandlers(first, "context", {}, ctx);
-	assert.equal(first.sent.length, 2);
+	await runContextHook(first, ctx);
+	await commitTurnEndBoundary(first, sm, ctx);
+	assert.equal(first.sent.length, 1);
 	const reloaded = makeExtension(sm);
 	runHandlers(reloaded, "session_start", {}, ctx);
-	runHandlers(reloaded, "context", {}, ctx);
+	await runContextHook(reloaded, ctx);
 	assert.equal(reloaded.sent.length, 0, "persisted messages survive runtime replacement");
 	sm.branch(anchor);
 	runHandlers(first, "session_tree", {}, ctx);
-	runHandlers(first, "context", {}, ctx);
-	assert.equal(first.sent.length, 3, "same runtime releases the previous branch's reminder reservation");
+	await runContextHook(first, ctx);
+	assert.equal(first.sent.length, 2, "same runtime releases the previous branch's boot reservation");
 	const fork = makeExtension(sm);
 	runHandlers(fork, "session_start", {}, ctx);
-	runHandlers(fork, "context", {}, ctx);
-	assert.equal(fork.sent.length, 1, "sibling boot is created; this branch's reminder already exists");
+	await runContextHook(fork, ctx);
+	assert.equal(fork.sent.length, 0, "a persisted sibling boot is not duplicated");
 });
 
 test("malformed frontmatter timestamps degrade to a finite fallback without poisoning valid notes or boot rendering", async () => {
@@ -1881,13 +1655,14 @@ test("malformed frontmatter timestamps degrade to a finite fallback without pois
 });
 
 
-test("JSONL reload retains once-per-window boot and reminder without runtime memory", () => {
+test("JSONL reload retains once-per-window boot and reminder without runtime memory", async () => {
 	const sm = manager(true);
 	const first = makeExtension(sm);
 	const usage = { tokens: 170_000, percent: 85, contextWindow: 200_000 };
 	const ctx = context(sm, undefined, usage);
 	runHandlers(first, "session_start", {}, ctx);
-	runHandlers(first, "context", {}, ctx);
+	await runContextHook(first, ctx);
+	await commitTurnEndBoundary(first, sm, ctx);
 	appendText(sm, "assistant", "flush the persisted session");
 	const path = sm.getSessionFile();
 	assert.ok(path);
@@ -1896,7 +1671,7 @@ test("JSONL reload retains once-per-window boot and reminder without runtime mem
 	const loaded = makeExtension(restored);
 	const loadedCtx = context(restored, undefined, usage);
 	runHandlers(loaded, "session_start", {}, loadedCtx);
-	runHandlers(loaded, "context", {}, loadedCtx);
+	await runContextHook(loaded, loadedCtx);
 	assert.equal(loaded.sent.length, 0);
 	const messages = restored.getBranch().filter((entry) => entry.type === "custom_message");
 	assert.equal(messages.filter((entry) => entry.customType === internal.BOOT_TYPE).length, 1);
@@ -1909,8 +1684,9 @@ test("the warning supersedes the early reminder when usage jumps across both thr
 	appendText(sm, "user", "ongoing work");
 	const captured = makeExtension(sm);
 	const ctx = context(sm, undefined, { tokens: 199_000, percent: 99.5, contextWindow: 200_000 }, false);
-	assert.equal(await runContextHook(captured, ctx), undefined);
-	assert.deepEqual(captured.sent.map((entry) => entry.message.customType), [internal.WARNING_TYPE]);
+	const warningResult = await runContextHook(captured, ctx);
+	assert.deepEqual(warningResult?.messages.map((message) => (message as { customType?: string }).customType), [internal.WARNING_TYPE]);
+	await commitTurnEndBoundary(captured, sm, ctx);
 	const reloaded = makeExtension(sm);
 	runHandlers(reloaded, "context", {}, ctx);
 	assert.equal(reloaded.sent.length, 0, "persisted warning also suppresses a late reminder after reload");
@@ -1924,21 +1700,22 @@ test("warning suppression is branch-local and survives toggling without becoming
 	const captured = makeExtension(sm);
 	const ctx = context(sm, undefined, { tokens: 199_000, percent: 99.5, contextWindow: 200_000 }, false);
 	await runContextHook(captured, ctx);
-	assert.equal(captured.sent.length, 1);
+	await commitTurnEndBoundary(captured, sm, ctx);
+	assert.equal(captured.contextMessages.length, 1);
 	const warnedLeaf = sm.getLeafId()!;
 	await runCommand(captured, "pi-context", "off", ctx);
 	await runCommand(captured, "pi-context", "on", ctx);
-	runHandlers(captured, "context", {}, ctx);
-	assert.equal(captured.sent.length, 1, "toggle does not revive the steer");
+	await runContextHook(captured, ctx);
+	assert.equal(captured.contextMessages.length, 1, "toggle does not revive the warning");
 	sm.branch(anchor);
 	runHandlers(captured, "session_tree", {}, ctx);
-	runHandlers(captured, "context", {}, ctx);
-	assert.equal(captured.sent.length, 2);
-	assert.equal(captured.sent[1].message.customType, internal.WARNING_TYPE, "sibling without the warning still gets its own steer");
+	await runContextHook(captured, ctx);
+	assert.equal(captured.contextMessages.length, 2);
+	assert.equal((captured.contextMessages[1] as { customType?: string }).customType, internal.WARNING_TYPE, "sibling without the warning gets its own injection");
 	sm.branch(warnedLeaf);
 	runHandlers(captured, "session_tree", {}, ctx);
-	runHandlers(captured, "context", {}, ctx);
-	assert.equal(captured.sent.length, 2, "returning to the warned branch stays suppressed");
+	await runContextHook(captured, ctx);
+	assert.equal(captured.contextMessages.length, 2, "returning to the warned branch stays suppressed");
 });
 
 test("argument footguns die loudly and tool-run metadata surfaces (A1/A2/A3/B4/B5)", async () => {

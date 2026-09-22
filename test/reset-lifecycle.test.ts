@@ -1,198 +1,197 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { registerResetLifecycle } from "../src/reset-lifecycle.js";
+import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+	SessionBoundaryDraft,
+	SessionManager,
+	ToolDefinition,
+	TurnEndEvent,
+} from "@earendil-works/pi-coding-agent";
+import { SessionManager as Manager } from "@earendil-works/pi-coding-agent";
+import piContext, { internal } from "../src/index.js";
 
-type CompactOptions = NonNullable<Parameters<ExtensionContext["compact"]>[0]>;
+const previousNotesHome = process.env.PI_NOTES_HOME;
+const testNotesHome = mkdtempSync(join(tmpdir(), "pi-context-lifecycle-notes-"));
+process.env.PI_NOTES_HOME = testNotesHome;
+test.after(() => {
+	if (previousNotesHome === undefined) delete process.env.PI_NOTES_HOME;
+	else process.env.PI_NOTES_HOME = previousNotesHome;
+	rmSync(testNotesHome, { recursive: true, force: true });
+});
+
+type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
+type Command = { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> };
+
 function harness() {
-	const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
-	const messages: string[] = [];
-	const notices: string[] = [];
-	const requests: CompactOptions[] = [];
-	let sessionId = "first", currentReset = "", enabled = true, idle = true, pending = false;
-	let signal: AbortSignal | undefined;
-	let throwOnCompact = false;
-	const ctx = {
-		sessionManager: { getSessionId: () => sessionId },
-		isIdle: () => idle,
-		hasPendingMessages: () => pending,
-		get signal() { return signal; },
-		compact: (options: CompactOptions) => {
-			if (throwOnCompact) throw new Error("synchronous failure");
-			requests.push(options);
+	const sessionManager = Manager.inMemory("/private/tmp/pi-context-lifecycle-test");
+	const handlers = new Map<string, Handler[]>();
+	const tools = new Map<string, ToolDefinition>();
+	const commands = new Map<string, Command>();
+	const sent: Array<{ customType: string; details?: unknown; triggerTurn?: boolean }> = [];
+	const notices: Array<{ message: string; type?: string }> = [];
+	const api = {
+		on(name: string, handler: Handler) {
+			const list = handlers.get(name) ?? [];
+			list.push(handler);
+			handlers.set(name, list);
+			return () => {};
 		},
-		ui: { notify: (message: string) => notices.push(message) },
-	} as unknown as ExtensionContext;
-	const lifecycle = registerResetLifecycle({
-		on: (name: string, fn: (event: any, ctx: ExtensionContext) => unknown) => handlers.set(name, fn),
-		sendMessage: (message: { customType: string }) => messages.push(message.customType),
-	} as unknown as ExtensionAPI, {
-		isEnabled: () => enabled,
-		continuation: { customType: "continue", content: "resume", display: false },
-		buildReset: () => ({ compaction: { summary: "reset", firstKeptEntryId: "marker", tokensBefore: 100, details: {} } }),
-		isCurrentReset: (id) => id === currentReset,
-		onReset: () => {},
-	});
-	const emit = (name: string, event: any = {}) => handlers.get(name)?.(event, ctx);
-	return {
-		ctx, lifecycle, emit, messages, notices, requests,
-		setIdle: (value: boolean) => { idle = value; },
-		setPending: (value: boolean) => { pending = value; },
-		setSignal: (value: AbortSignal | undefined) => { signal = value; },
-		setSession: (value: string) => { sessionId = value; },
-		setThrow: () => { throwOnCompact = true; },
-		disable: () => { enabled = false; lifecycle.clear(); },
-		enable: () => { enabled = true; },
-		before: (reason = "threshold") => emit("session_before_compact", { reason, signal: new AbortController().signal }),
-		// Do not await this result until after the manually driven compact callbacks:
-		// real Pi awaits the originating handler while the continuation can emit its
-		// own nested agent_settled event.
-		settle: () => { emit("agent_end"); idle = true; return emit("agent_settled"); },
-		success: (id = "reset", willRetry = false) => {
-			currentReset = id;
-			emit("session_compact", { compactionEntry: { id }, willRetry });
+		registerTool(tool: ToolDefinition) { tools.set(tool.name, tool); },
+		registerCommand(name: string, command: Command) { commands.set(name, command); },
+		registerFlag() {},
+		appendEntry(customType: string, data?: unknown) { sessionManager.appendCustomEntry(customType, data); },
+		sendMessage(message: { customType: string; content: string; display: boolean; details?: unknown }, options?: { triggerTurn?: boolean }) {
+			sent.push({ customType: message.customType, details: message.details, triggerTurn: options?.triggerTurn });
+			sessionManager.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
 		},
-		complete: (index = 0) => requests[index]!.onComplete!({} as Parameters<NonNullable<CompactOptions["onComplete"]>>[0]),
 	};
+	piContext(api as unknown as ExtensionAPI);
+	const ctx = {
+		sessionManager,
+		cwd: "/private/tmp",
+		model: undefined,
+		isIdle: () => true,
+		hasPendingMessages: () => false,
+		signal: undefined,
+		getContextUsage: () => undefined,
+		compact: () => assert.fail("the reset path must not call ctx.compact()"),
+		abort: () => {},
+		isProjectTrusted: () => true,
+		ui: { notify: (message: string, type?: string) => notices.push({ message, type }) },
+	} as unknown as ExtensionContext;
+	const emit = async (name: string, event: unknown): Promise<unknown[]> => {
+		const results: unknown[] = [];
+		for (const handler of handlers.get(name) ?? []) results.push(await handler(event, ctx));
+		return results;
+	};
+	const runCommand = async (name: string, args = "") => {
+		const command = commands.get(name);
+		assert.ok(command, `${name} command is registered`);
+		const commandCtx = Object.assign({}, ctx, {
+			waitForIdle: async () => {},
+			ui: { notify: (message: string, type?: string) => notices.push({ message, type }) },
+		}) as unknown as ExtensionCommandContext;
+		await command.handler(args, commandCtx);
+	};
+	const callTool = async (name: string): Promise<AgentToolResult<unknown>> => {
+		const tool = tools.get(name);
+		assert.ok(tool, `${name} is registered`);
+		return tool.execute("call", {}, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
+	};
+	return { sessionManager, handlers, sent, notices, emit, runCommand, callTool };
 }
 
-test("the originating settled handler waits for its continuation's nested settlement", async () => {
-	const h = harness();
-	assert.equal(h.lifecycle.request(), "rollover_requested");
-	assert.equal(h.lifecycle.request(), "rollover_already_pending");
-	const outer = h.settle();
-	assert.equal(h.requests.length, 1);
-	h.success();
-	h.success();
-	h.complete();
-	h.complete();
-	assert.deepEqual(h.messages, ["continue"], "one continuation starts after compaction completion");
-
-	let released = false;
-	void Promise.resolve(outer).then(() => { released = true; });
-	await Promise.resolve();
-	assert.equal(released, false, "sending the continuation does not release the original handler");
-	await h.settle();
-	await outer;
-	assert.equal(released, true, "only the continuation's settled event releases its owner");
-	assert.equal(h.requests.length, 1, "duplicate compact and settled callbacks do not restart reset work");
-});
-
-test("a reset requested by a continuation completes before its predecessor releases", async () => {
-	const h = harness();
-	h.lifecycle.request();
-	const first = h.settle();
-	h.success("first"); h.complete();
-	assert.deepEqual(h.messages, ["continue"]);
-
-	// This models wipe_memory being called during the first continuation run.
-	assert.equal(h.lifecycle.request(), "rollover_requested");
-	const second = h.settle();
-	assert.equal(h.requests.length, 2, "the continuation's settled handler starts its requested reset");
-	h.success("second"); h.complete(1);
-	assert.deepEqual(h.messages, ["continue", "continue"]);
-
-	let firstReleased = false;
-	void Promise.resolve(first).then(() => { firstReleased = true; });
-	await Promise.resolve();
-	assert.equal(firstReleased, false, "the predecessor remains owned while the second continuation runs");
-	await h.settle();
-	await second;
-	await first;
-	assert.equal(firstReleased, true);
-	assert.equal(h.lifecycle.request(), "rollover_requested", "a later window can request another reset");
-});
-
-test("automatic compactions reset on the spot, with no continuation", () => {
-	const h = harness();
-	assert.ok((h.before() as { compaction?: unknown }).compaction, "the native attempt becomes our reset immediately");
-	assert.deepEqual(h.messages, []);
-});
-
-test("failure, synchronous scheduling errors, and cancellation release their owners without retry", async () => {
-	const failed = harness();
-	failed.lifecycle.request();
-	const outer = failed.settle();
-	failed.requests[0]!.onError!(new Error("Nothing to compact"));
-	failed.requests[0]!.onError!(new Error("duplicate callback"));
-	failed.complete();
-	await outer;
-	assert.equal(failed.notices.length, 1);
-	assert.deepEqual(failed.messages, []);
-	assert.equal(failed.lifecycle.request(), "rollover_requested", "a later explicit request is possible");
-
-	const synchronous = harness();
-	synchronous.setThrow();
-	synchronous.lifecycle.request();
-	await synchronous.settle();
-	assert.equal(synchronous.notices.length, 1);
-	assert.equal(synchronous.lifecycle.request(), "rollover_requested");
-
-	const aborted = harness();
-	aborted.lifecycle.request();
-	aborted.setSignal(AbortSignal.abort());
-	await aborted.settle();
-	assert.equal(aborted.requests.length, 0);
-	assert.deepEqual(aborted.messages, []);
-});
-
-test("shutdown, tree invalidation, toggling off, and stale sessions release waiters safely", async () => {
-	for (const boundary of ["session_shutdown", "session_start", "session_tree", "off", "session-change"] as const) {
-		const h = harness();
-		h.lifecycle.request();
-		const outer = h.settle();
-		h.success(); h.complete();
-		if (boundary === "off") { h.disable(); h.enable(); }
-		else if (boundary === "session-change") { h.setSession("second"); h.complete(); h.emit("session_tree"); }
-		else h.emit(boundary);
-		h.complete();
-		h.requests[0]!.onError!(new Error("late error"));
-		await outer;
-		assert.deepEqual(h.notices, [], boundary);
-		assert.deepEqual(h.messages, ["continue"], boundary);
-		if (boundary === "session_shutdown") h.emit("session_start");
-		if (boundary === "session-change") h.emit("session_tree");
-		assert.equal(h.lifecycle.request(), "rollover_requested", `${boundary}: a fresh request still works`);
+function resultEntries(results: unknown[]): { entries: SessionBoundaryDraft[]; continue: boolean } {
+	let entries: SessionBoundaryDraft[] = [];
+	let shouldContinue = false;
+	for (const result of results) {
+		if (!result || typeof result !== "object") continue;
+		const value = result as { entries?: SessionBoundaryDraft[]; continue?: boolean };
+		if (value.entries) entries = value.entries;
+		if (value.continue !== undefined) shouldContinue = value.continue;
 	}
-});
+	return { entries, continue: shouldContinue };
+}
 
-test("queued or competing work is not duplicated and releases an unneeded continuation owner", async () => {
-	const competing = harness();
-	competing.lifecycle.request();
-	competing.setIdle(false);
-	assert.equal(competing.emit("agent_settled"), undefined, "another run owns the first settled event");
-	competing.setIdle(true);
-	const outer = competing.settle();
-	competing.success();
-	competing.setIdle(false);
-	competing.complete();
-	await outer;
-	assert.deepEqual(competing.messages, [], "an active prompt owns continuation");
+function appendDrafts(sessionManager: SessionManager, entries: SessionBoundaryDraft[]): void {
+	for (const entry of entries) {
+		switch (entry.type) {
+			case "custom": sessionManager.appendCustomEntry(entry.customType, entry.data); break;
+			case "custom_message": sessionManager.appendCustomMessageEntry(entry.customType, entry.content, entry.display, entry.details); break;
+			case "context_edit": sessionManager.appendContextEdit(entry.targetId, entry.replacement); break;
+			case "compaction": sessionManager.appendCompaction(entry.summary, entry.firstKeptEntryId, 0, entry.details, true, entry.usage); break;
+		}
+	}
+}
 
-	const queued = harness();
-	queued.lifecycle.request();
-	const queuedOuter = queued.settle();
-	queued.success();
-	queued.setPending(true); queued.complete();
-	await queuedOuter;
-	assert.deepEqual(queued.messages, [], "queued user work is never duplicated");
-});
+function fakeBoundaryEvent(entries: SessionBoundaryDraft[] = []): TurnEndEvent {
+	return {
+		type: "turn_end",
+		entries,
+		continue: false,
+		context: { contextEntries: [], contextMessages: [], llmMessages: [], pendingMessages: [], canContinue: true },
+		outcome: "completed",
+		turnIndex: 0,
+		message: { role: "assistant", content: [], timestamp: Date.now() } as unknown as AgentMessage,
+		toolResults: [],
+		messageEntryId: "assistant-entry",
+		toolResultEntryIds: [],
+	} as TurnEndEvent;
+}
 
-test("foreign boundaries and native compactions do not manufacture a continuation", async () => {
+test("public reset boundary drafts one marker, one boot, and one continuation after a tool batch", async () => {
 	const h = harness();
-	h.lifecycle.request();
-	const outer = h.settle();
-	h.emit("session_compact", { compactionEntry: { id: "foreign" }, willRetry: false });
-	h.emit("session_compact", { compactionEntry: { id: "foreign" }, willRetry: false });
-	assert.equal(h.lifecycle.request(), "rollover_already_pending");
-	h.complete();
-	await outer;
-	assert.deepEqual(h.messages, []);
+	h.sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "before reset" }], timestamp: Date.now() });
+	const first = await h.callTool("wipe_memory");
+	const second = await h.callTool("wipe_memory");
+	assert.ok(first.content.length > 0 && second.content.length > 0, "both tool calls return normally");
 
-	const native = harness();
-	native.lifecycle.request();
-	native.success("native", false);
-	await native.settle();
-	assert.equal(native.requests.length, 0);
-	assert.deepEqual(native.messages, []);
+	const toolBatch: SessionBoundaryDraft[] = [{ type: "custom_message", customType: "foreign/tool-batch", content: "tool finished", display: false }];
+	const boundary = resultEntries(await h.emit("turn_end", fakeBoundaryEvent(toolBatch)));
+	assert.equal(boundary.continue, true, "the whole tool batch continues only after the boundary is committed");
+	const markerDrafts = boundary.entries.filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
+	const bootDrafts = boundary.entries.filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE);
+	assert.equal(markerDrafts.length, 1, "duplicate wipe requests in one turn dedupe");
+	assert.equal(bootDrafts.length, 1);
+	assert.equal(boundary.entries[0]?.type, "custom_message", "ordinary tool-batch entries precede the reset drafts");
+	assert.equal(boundary.entries[1]?.type, "custom");
+	assert.equal(boundary.entries[2]?.type, "custom_message");
+	const windowId = (markerDrafts[0] as { data: { windowId: string } }).data.windowId;
+	assert.match(windowId, /^pcw:/);
+	assert.equal((bootDrafts[0] as { details: { windowId: string } }).details.windowId, windowId);
+	appendDrafts(h.sessionManager, boundary.entries);
+	const branch = h.sessionManager.getBranch();
+	assert.deepEqual(branch.filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE).map((entry) => entry.type === "custom" ? entry.data : undefined), [{ windowId }]);
+	assert.equal(branch.filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE).length, 1);
+});
+
+test("off stops future automatic/manual reset requests while an existing marker remains authoritative", async () => {
+	const h = harness();
+	await h.callTool("wipe_memory");
+	const first = resultEntries(await h.emit("turn_end", fakeBoundaryEvent()));
+	assert.ok(first.entries.some((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE));
+	appendDrafts(h.sessionManager, first.entries);
+	await h.runCommand("pi-context", "off");
+	const before = await h.emit("session_before_compact", {
+		type: "session_before_compact",
+		reason: "manual",
+		willRetry: false,
+		branchEntries: h.sessionManager.getBranch(),
+		preparation: { tokensBefore: 100, firstKeptEntryId: null, keptMessages: [], droppedMessages: [] },
+		signal: new AbortController().signal,
+	});
+	assert.deepEqual(before.at(-1), { cancel: true }, "/compact is canceled when an existing marker would expose old canonical history");
+	const afterOff = resultEntries(await h.emit("turn_end", fakeBoundaryEvent()));
+	assert.equal(afterOff.entries.length, 0, "off does not create another reset");
+	await h.runCommand("pi-context", "on");
+	await h.runCommand("clear-context");
+	assert.equal(h.sent.length, 1, "/clear-context writes one hidden boot without a model turn");
+	assert.equal(h.sent[0]?.triggerTurn, false);
+	const markers = h.sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
+	assert.equal(markers.length, 2, "off does not resurrect history; re-enabled clear-context creates the explicit new marker");
+});
+
+test("tree navigation with a marker returns an empty extension summary and never delegates old history to a model", async () => {
+	const h = harness();
+	const marker = h.sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId: "pcw:test:one" });
+	h.sessionManager.appendCustomMessageEntry(internal.BOOT_TYPE, "fresh boot", false, { windowId: "pcw:test:one" });
+	const result = await h.emit("session_before_tree", {
+		type: "session_before_tree",
+		preparation: {
+			targetId: marker,
+			oldLeafId: marker,
+			commonAncestorId: null,
+			entriesToSummarize: h.sessionManager.getBranch(),
+			userWantsSummary: true,
+		},
+		signal: new AbortController().signal,
+	});
+	assert.deepEqual(result.at(-1), { summary: { summary: "" } }, "an empty extension summary prevents SDK summarization");
+	assert.equal(h.sessionManager.getEntries().filter((entry) => entry.type === "branch_summary").length, 0, "the hook itself does not write a summary");
 });

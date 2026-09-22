@@ -1,24 +1,24 @@
 # Reset lifecycle
 
-`src/reset-lifecycle.ts` owns reset requests, compaction attempts, and continuation. `src/index.ts` composes the features and constructs reset boundaries; projections, tools, budget policy, and prompt rendering have separate modules described in [Architecture](architecture.md).
+`src/reset-lifecycle.ts` owns reset requests, turn-end batching, recovery, and continuation. `src/index.ts` composes the features and constructs marker/boot boundaries; projections, tools, budget policy, and prompt rendering have separate modules described in [Architecture](architecture.md).
 
 | Event | Transition / owner |
 | --- | --- |
-| `wipe_memory` | Mark explicit request; repeated calls report already pending. Tool returns terminal output. |
-| Manual, threshold or overflow `session_before_compact`, idle or streaming | Build the reset boundary immediately and return it. Never cancel and never take a model turn; an aborted signal returns `{ cancel: true }`. |
-| `agent_end` | No-op for an instant reset. |
-| `agent_settled` | If idle and an explicit request is pending, create one identified attempt and request `ctx.compact`. The originating handler owns and awaits that attempt through its continuation's settlement. |
-| Matching `session_compact` | Confirm boundary, persist window state. Native compaction retains its own scheduling. |
-| Attempt `onComplete` | Consume attempt; for a confirmed boundary when idle with no queued messages, register continuation ownership before sending it. Its nested `agent_settled` settles that owner; a reset requested by the continuation completes its own handoff before releasing its predecessor. |
-| Attempt `onError` or synchronous throw | Clear attempt/request, warn, retain history. No automatic retry loop. |
-| Shutdown / start / tree / toggle off | Invalidate outstanding attempt. Identity checks reject callbacks from older attempts. |
+| `wipe_memory` | Record an explicit reset request. Repeated calls in one tool batch deduplicate; the tool returns terminal output. |
+| `turn_end` | After the entire tool batch, append the event entries followed by the reset drafts: one `pi-context/reset-marker` with `{ windowId }`, then one hidden boot message with matching `details.windowId`; continue the turn through Pi's public queue. |
+| Abort before the boundary | Drop the pending boundary. Never manufacture a continuation for an aborted turn. |
+| Threshold / provider overflow | Request the same marker/boot boundary for the active provider window. Actual overflow/length recovery retries at most once per failure chain; ordinary retryable provider errors stay Pi-owned. |
+| `/clear-context` | Wait for idle, append marker and boot through public session APIs, and do not call a model. |
+| `/compact` while enabled | Cancel with an actionable `/clear-context` notice so native compaction cannot summarize erased canonical history back into the active window. |
+| Startup / tree / partial append | Inspect the active branch. Repair a marker whose boot was not persisted; do not interpret legacy reset-v2 details. |
+| `/pi-context off` | Stop new automatic resets, but retain the boundary of an existing marker. Marked branches still cancel native compaction; a fresh root may use Pi's native semantics. |
 
-The final checkpoint warning is steered earlier from the context hook (`warning.ts`) once per window at reserve+12288 tokens remaining. After it, the model either ends the window itself with `wipe_memory` or rides into Pi's automatic compaction, which resets on the spot with no turn.
+The final checkpoint warning is steered earlier from the context hook (`warning.ts`) once per active provider window at reserve+12288 tokens remaining. After it, the model either writes its note and calls `wipe_memory`, or runtime recovery requests the same marker/boot boundary. The warning and guidance drafts precede reset drafts so stale reminders cannot be queued into the new window.
 
-The completion callback is the scheduling boundary: `session_compact` fires before Pi clears manual compaction state. Sending a prompt inside that hook is too early. An explicit reset uses the manual `ctx.compact` route and therefore needs this completion logic; an automatic compaction is already the reset and resumes through Pi's own caller.
+The turn-end commit is the scheduling boundary: Pi receives the finished tool batch and then the marker/boot drafts as one append operation. Pi owns queue scheduling and deduplication of the next request; the extension does not run a parallel compaction state machine or use a compaction completion callback.
 
-`sendMessage(..., { triggerTurn: true })` starts its run detached from the extension API. The explicit attempt therefore retains an attempt-owned waiter before sending it, and its originating `agent_settled` handler awaits that waiter. The continuation's `agent_settled` releases the waiter without awaiting itself. If that continuation calls `wipe_memory`, its settled handler starts and awaits the next attempt before it releases the prior waiter, forming a bounded reset chain. Failure, cancellation, shutdown, tree navigation, and toggling off release the relevant waiter exactly once.
+The hidden boot is selected by its durable `details.windowId`, not by timestamp or content equality. The context hook folds only the dropped system prefix before that boot and preserves later prompt patches and messages in order. If the boot is missing, the hook aborts with a safe head and notice rather than sending raw history. A fork/clone creates a new session ID while copying branch entries, so startup must treat a copied root boot with the old session's root ID as missing and repair it.
 
-Public APIs cannot guarantee immediate reset inside mixed tool batches or before queued steering/follow-up messages finish. `terminate` ends the tool-followup path; `agent_settled` remains the safe point to request compaction. The scheduler does not manipulate user queues. Pi also determines compaction eligibility before the extension hook; an uncompactable session produces a warning and waits for a new prompt.
+Public APIs let a mixed tool batch finish before the marker/boot boundary. Queued steering/follow-up messages are delivered exactly once in the new window, neither dropped nor replayed. `/tree` navigation remains available, but when either source or destination branch contains a reset marker, Pi's raw summary generator is bypassed: the summary is empty and a notice explains why, preventing erased history from re-entering through a path outside the context hook. With no marker on either branch, native summaries remain unchanged.
 
-Validation is split into persisted-data integration tests, isolated lifecycle event tests, and scripted SDK tests running Pi's actual agent loop. The SDK tests cover explicit success, instant automatic reset, and core compaction rejection followed by a user prompt. Lifecycle tests cover callback races and queue guards without pretending to exercise provider/network behavior.
+Validation is split into persisted-data integration tests, isolated lifecycle event tests, and scripted SDK tests running Pi's actual agent loop. History/coherence coverage checks marker-selected branch history, durable reload, repeated windows, and exact read cursors. Scripted SDK coverage checks explicit and automatic marker resets, mixed-tool completion before the boundary, steering/follow-up delivery exactly once in the new window, complete system/tool projections, manual clear without a model call, bounded overflow recovery, and ordinary errors that must not wipe memory. Partial marker/boot repair and tree-summary suppression remain independent probes until promoted into permanent tests.
