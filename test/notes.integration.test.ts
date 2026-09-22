@@ -165,7 +165,6 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 		firstWindowId: "pcw:test:root",
 		currentWindowId: "pcw:test:next",
 		previousWindowId: "pcw:test:root",
-		resetLine: true,
 		notes: snapshot,
 	};
 	const rendered = renderBootBlock(renderData);
@@ -185,7 +184,6 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 		modelName: "default",
 		firstWindowId: "pcw:test:root",
 		currentWindowId: "pcw:test:next",
-		resetLine: true,
 		notes: oneFailed,
 	});
 	assert.ok(oneFailedText.includes("PROJECT_MAP_BODY") && oneFailedText.includes("notes_list can retry after recovery"), "healthy homes and the recovery notice survive one failure");
@@ -201,7 +199,6 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 		firstWindowId: "pcw:test:root",
 		currentWindowId: "pcw:test:next",
 		previousWindowId: "pcw:test:root",
-		resetLine: true,
 		notes: allFailed,
 	});
 	assert.ok(allFailedText.includes("pcw:test:root") && allFailedText.includes("pcw:test:next"), "identity survives an all-home failure");
@@ -221,7 +218,7 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 
 test("the boot block gives awake agents the notes-home file layout", () => {
 	const session = manager();
-	const rendered = explicitBoot(context(session), "pcw:test:root", undefined, false);
+	const rendered = explicitBoot(context(session), "pcw:test:root", undefined);
 	assert.equal(rendered.includes(process.env.PI_NOTES_HOME ?? ""), false, "the absolute notes home is never exposed");
 	assert.match(rendered, /bare <vpath>.*@project\/<vpath>.*@human\/<vpath>/);
 });

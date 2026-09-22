@@ -3,7 +3,7 @@ import { agentSlug, modelSlug, SLUG_PATTERN, type Scope } from "./paths.js";
 
 export type NoteAddress = { scope: Scope; path: string; who?: string };
 
-export const ADDRESS_FORMS = "legal prefixes are @project/, @human/, @self/, @agents/<name>/, @model/, and @models/<name>/; bare names are the session home";
+export const ADDRESS_FORMS = "legal prefixes are @project/, @human/, @self/, and @model/; bare names are this session";
 
 export function assertVirtualPath(value: unknown): string {
 	if (typeof value !== "string" || value.length === 0) throw new Error("path must be a non-empty virtual relative path");

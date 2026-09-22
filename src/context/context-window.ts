@@ -45,6 +45,16 @@ export function currentWindowId(ctx: SessionReader): string {
 	return currentReset(ctx)?.data.windowId ?? rootWindowId(ctx.sessionManager.getSessionId());
 }
 
+/** The durable window active just before the marker: the last earlier marker, else the root window. */
+export function previousWindowId(ctx: SessionReader, markerId: string): string {
+	let previousId = rootWindowId(ctx.sessionManager.getSessionId());
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.id === markerId) break;
+		if (isWindowMarker(entry)) previousId = entry.data.windowId;
+	}
+	return previousId;
+}
+
 function hasWindowId(details: unknown, windowId: string): boolean {
 	return typeof details === "object" && details !== null &&
 		typeof (details as { windowId?: unknown }).windowId === "string" &&
@@ -54,6 +64,11 @@ function hasWindowId(details: unknown, windowId: string): boolean {
 /** Match a provider-facing boot message, optionally by window identity. */
 export function isWindowBoot(message: AgentMessage, windowId?: string): boolean {
 	return message.role === "custom" && message.customType === BOOT_TYPE && (windowId === undefined || hasWindowId(message.details, windowId));
+}
+
+/** Match a persisted boot entry by raw identity, even when a later edit hides it from projection. */
+export function isWindowBootEntry(entry: SessionEntry, windowId: string): boolean {
+	return entry.type === "custom_message" && entry.customType === BOOT_TYPE && hasWindowId(entry.details, windowId);
 }
 
 /**

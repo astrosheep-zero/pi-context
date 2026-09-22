@@ -16,7 +16,7 @@ import {
 	type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import piContext, { createPiContext } from "../src/index.js";
-import { BOOT_TYPE, CONTEXT_WINDOW_OPEN_TAG, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, RESET_MARKER_TYPE, WARNING_TYPE } from "../src/protocol.js";
+import { BOOT_TYPE, CONTEXT_WINDOW_OPEN_TAG, CONTINUATION, CONTINUATION_TYPE, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, RESET_MARKER_TYPE, WARNING_TYPE } from "../src/protocol.js";
 
 type StreamScript = (request: number, context: AgentContext) => AssistantMessage;
 type Hook = (pi: ExtensionAPI, getSession: () => AgentSession, requests: AgentContext[]) => void;
@@ -255,6 +255,7 @@ function assertFreshRequest(fixture: Fixture, requestIndex: number, oldSentinel:
 	const body = text(fixture.requests[requestIndex]);
 	assert.equal(body.includes(oldSentinel), false, "the new provider request excludes the old window transcript");
 	assert.ok(body.includes(CONTEXT_WINDOW_OPEN_TAG), "the new provider request includes the fresh context-window boot");
+	assert.equal(body.split(CONTINUATION).length - 1, 1, "the fresh window carries exactly one reset message");
 }
 
 test("real AgentSession: aborted low-budget requests notify only after a retry commits the reminder", async () => {
@@ -648,6 +649,7 @@ test("real AgentSession: concurrent trusted projects keep reserve and automatic 
 		]);
 		await Promise.all([automatic.session.waitForIdle(), modelInvalidated.session.waitForIdle(), sessionInvalidated.session.waitForIdle()]);
 		assert.equal(resetMarkers(automatic).length, 1, "the low reserve and enabled project resets automatically");
+		assert.equal(automatic.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === CONTINUATION_TYPE).length, 1, "the automatic reset persists exactly one continuation");
 		assert.equal(resetMarkers(modelInvalidated).length, 0, "the high reserve and disabled project does not reset");
 		assert.equal(resetMarkers(sessionInvalidated).length, 0, "the second high reserve and disabled session does not reset");
 

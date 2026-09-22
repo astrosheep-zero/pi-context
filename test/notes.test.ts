@@ -255,8 +255,8 @@ test("@ addresses select one home, reject illegal sigils, and never fall back", 
 	assert.ok(existsSync(physicalPath("human", "same.md", ctx)), "@human writes to the human home");
 	assert.match(resultRead(await call(captured, "notes_read", { address: "same.md" }, ctx)).content, /session$/);
 	assert.equal(resultJson<{ error?: string }>(await call(captured, "notes_read", { address: "@project/missing.md" }, ctx)).error, "note not found");
-	await assert.rejects(() => call(captured, "notes_read", { address: "@glboal/same.md" }, ctx), /@project\/.*@human\/.*bare names are the session home/);
-	await assert.rejects(() => call(captured, "notes_write", { address: "bad@name.md", content: "no" }, ctx), /@project\/.*@human\/.*bare names are the session home/);
+	await assert.rejects(() => call(captured, "notes_read", { address: "@glboal/same.md" }, ctx), /@project\/.*@human\/.*bare names are this session/);
+	await assert.rejects(() => call(captured, "notes_write", { address: "bad@name.md", content: "no" }, ctx), /@project\/.*@human\/.*bare names are this session/);
 	assert.equal(existsSync(join(root, "human", "bad@name.md")), false, "a bad sigil creates nothing anywhere");
 });
 

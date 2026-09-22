@@ -10,7 +10,7 @@ import { NoteError, editNote, listNotes, readNote, searchNotes, writeNote } from
 const ORIGIN = Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("self"), Type.Literal("external")], {
 	description: "Where the note's content came from. user: written or dictated by the human. self: written by you, the agent (default). external: anything else — third-party text, tool output, fetched material.",
 }));
-const ADDRESS_DESCRIPTION = "Address forms are bare `<vpath>` for this session, `@project/<vpath>` for this project, `@human/<vpath>` for the human's cross-project home, `@self/<vpath>` / `@agents/<name>/<vpath>` for agent homes, and `@model/<vpath>` / `@models/<name>/<vpath>` for model homes. `@self` and `@model` mean the current agent/model; the `<name>` forms name one absolutely. The word after `@` is always one of the reserved home names — names live at the second level, never `@faye/`. `@` means leaving home. Any other `@` prefix, or `@` inside a vpath, is a hard error. There is no cross-home fallback. Paths reject `..`, absolute paths, and backslashes. Homes you do not own (`@agents/<other>/`, `@models/<other>/`) are read-only.";
+const ADDRESS_DESCRIPTION = "Address forms are bare `<vpath>` for this session, `@project/<vpath>` for this project, `@human/<vpath>` for the human's cross-project notes, `@self/<vpath>` for your own, and `@model/<vpath>` for the current model's. `@self` and `@model` mean whoever is running now. Any other `@` prefix, or `@` inside a vpath, is a hard error. There is no fallback across prefixes. Paths reject `..`, absolute paths, and backslashes.";
 
 function failure(error: unknown) {
 	if (error instanceof NoteError) {
@@ -73,7 +73,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 
 	pi.registerTool(defineTool({
 		name: "notes_list", label: "Notes list",
-		description: `List note files as rows carrying address, updated_at, and stale, most recently updated first. ${ADDRESS_DESCRIPTION} Listings merge your five reachable homes: this session, @project/, @human/, your @self home, and the current @model home; other agents and models appear only under an explicit glob (@agents/<name>/**, @models/<name>/**, or a glob in the name segment to scan a whole namespace).`,
+		description: `List note files as rows carrying address, updated_at, and stale, most recently updated first. ${ADDRESS_DESCRIPTION} Listings merge your five prefixes: this session, @project/, @human/, @self/, and @model/.`,
 		parameters: Type.Object({ pattern: nullableString(), cursor: cursor(), max_results: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			let rows: ReturnType<typeof listNotes>;
@@ -89,7 +89,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 
 	pi.registerTool(defineTool({
 		name: "notes_search", label: "Notes search",
-		description: `Case-sensitive literal substring search over note bodies; query is one string or several (OR), each matched line appears once. ${ADDRESS_DESCRIPTION} Search merges the same five reachable homes as notes_list; explicit globs reach other agents and models. Patterns glob over full address strings. Each file entry carries matches_total, its full match count before capping. Each match carries line, text, offset_chars (a code-point offset into the serialized note returned by notes_read, at the earliest query match), and truncated.`,
+		description: `Case-sensitive literal substring search over note bodies; query is one string or several (OR), each matched line appears once. ${ADDRESS_DESCRIPTION} Search merges the same five prefixes as notes_list. Patterns glob over full address strings. Each file entry carries matches_total, its full match count before capping. Each match carries line, text, offset_chars (a code-point offset into the serialized note returned by notes_read, at the earliest query match), and truncated.`,
 		parameters: Type.Object({ query: searchQuery(), pattern: nullableString(), cursor: cursor(), max_matches_per_file: positiveInteger(), max_files: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const queries = searchQueries(params.query);

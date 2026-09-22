@@ -182,14 +182,13 @@ export function makeExtension(sessionManager: SessionManager, settingsManager?: 
 	return captured;
 }
 
-export function explicitBoot(ctx: ExtensionContext, currentWindowId: string, previousWindowId: string | undefined, resetLine: boolean): string {
+export function explicitBoot(ctx: ExtensionContext, currentWindowId: string, previousWindowId: string | undefined): string {
 	return renderBootBlock({
 		agentName: agentSlug(ctx),
 		modelName: modelSlug(ctx),
 		firstWindowId: rootWindowId(ctx.sessionManager.getSessionId()),
 		currentWindowId,
 		previousWindowId,
-		resetLine,
 		notes: loadNotesSnapshot(ctx),
 	});
 }

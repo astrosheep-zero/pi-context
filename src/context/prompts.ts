@@ -1,5 +1,5 @@
 import type { NotesHome, NotesSnapshot } from "../notes/notes-snapshot.js";
-import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, POCKET_AGENT_LIMIT, POCKET_HUMAN_LIMIT, POCKET_MODEL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, RESET_SUMMARY, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "../protocol.js";
+import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, POCKET_AGENT_LIMIT, POCKET_HUMAN_LIMIT, POCKET_MODEL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "../protocol.js";
 
 /** Codex-style <context_window> identity block: the resolved agent and model names plus first/current/previous window ids. */
 function identityBlock(agentName: string, modelName: string, firstWindowId: string, currentWindowId: string, previousWindowId?: string): string {
@@ -27,8 +27,7 @@ function rowsFor(snapshot: NotesSnapshot, scope: NotesHome["scope"]) {
 function notesUnavailableNotice(snapshot: NotesSnapshot): string | undefined {
 	if (snapshot.unavailable.length === 0) return undefined;
 	const homes = snapshot.unavailable.map((home) => home.label).join(", ");
-	const noun = snapshot.unavailable.length === 1 ? "home's index was" : "home indexes were";
-	return `Notes index incomplete: ${homes} ${noun} unavailable during boot; notes_list can retry after recovery.`;
+	return `Notes index incomplete: index for ${homes} unavailable during boot; notes_list can retry after recovery.`;
 }
 
 /**
@@ -61,7 +60,7 @@ function notesIndex(snapshot: NotesSnapshot): string {
 		...rowsFor(snapshot, "model").filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_MODEL_LIMIT),
 	];
 	if (recentNotes.length > 0) {
-		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (by home, most recent first within each: up to ${POCKET_SESSION_LIMIT} from this session, ${POCKET_PROJECT_LIMIT} from this project, ${POCKET_HUMAN_LIMIT} from @human, ${POCKET_AGENT_LIMIT} from your @self home, ${POCKET_MODEL_LIMIT} from the current @model home). A note's content never appears here, so its name has to say what the note is about:`];
+		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (by prefix, most recent first within each: up to ${POCKET_SESSION_LIMIT} from this session, ${POCKET_PROJECT_LIMIT} from @project, ${POCKET_HUMAN_LIMIT} from @human, ${POCKET_AGENT_LIMIT} from @self, ${POCKET_MODEL_LIMIT} from @model). A note's content never appears here, so its name has to say what the note is about:`];
 		for (const row of recentNotes) {
 			lines.push(`- ${row.address} (${row.body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${relativeTime(row.meta.updated_at, snapshot.openedAt)})`);
 		}
@@ -71,7 +70,7 @@ function notesIndex(snapshot: NotesSnapshot): string {
 }
 
 function notesHomeBlock(): string {
-	return "Notes_* addresses have five homes: bare <vpath> is this session, @project/<vpath> is this project, @human/<vpath> is the human's cross-project home, @self/<vpath> and @agents/<name>/<vpath> are agent homes (current vs named), and @model/<vpath> and @models/<name>/<vpath> are model homes. @self and @model resolve to who is running now; listings always show resolved names. @ means leaving home; there is no cross-home fallback. Anything else after @ — or @ inside a vpath — is a hard error. Any other note is a plain file — use the file tools.";
+	return "Note addresses: bare <vpath> is this session; @project/<vpath> is this project; @human/<vpath> is the human's cross-project notes; @self/<vpath> is your own (current agent); @model/<vpath> is the current model's. @self and @model resolve to who is running now. Any other @ prefix, or @ inside a vpath, is a hard error; there is no fallback across prefixes. Anything not matching these is a plain file — use the file tools.";
 }
 
 /**
@@ -84,13 +83,11 @@ export type BootRenderData = {
 	readonly firstWindowId: string;
 	readonly currentWindowId: string;
 	readonly previousWindowId?: string;
-	readonly resetLine: boolean;
 	readonly notes: NotesSnapshot;
 };
 
 export function renderBootBlock(data: BootRenderData): string {
 	const parts: string[] = [];
-	if (data.resetLine) parts.push(RESET_SUMMARY);
 	parts.push(identityBlock(data.agentName, data.modelName, data.firstWindowId, data.currentWindowId, data.previousWindowId));
 	parts.push(notesHomeBlock());
 	const incomplete = notesUnavailableNotice(data.notes);

@@ -146,6 +146,9 @@ test("public reset boundary drafts one marker, one boot, and one continuation af
 	const windowId = (markerDrafts[0] as { data: { windowId: string } }).data.windowId;
 	assert.match(windowId, /^pcw:/);
 	assert.equal((bootDrafts[0] as { details: { windowId: string } }).details.windowId, windowId);
+	const continuationDrafts = boundary.entries.filter((entry) => entry.type === "custom_message" && entry.customType === internal.CONTINUATION_TYPE);
+	assert.equal(continuationDrafts.length, 1, "the boundary persists exactly one reset message");
+	assert.equal(boundary.entries[3]?.type, "custom_message", "the continuation closes the ordered reset shape");
 	appendDrafts(h.sessionManager, boundary.entries);
 	const branch = h.sessionManager.getBranch();
 	assert.deepEqual(branch.filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE).map((entry) => entry.type === "custom" ? entry.data : undefined), [{ windowId }]);
@@ -172,8 +175,10 @@ test("off stops future automatic/manual reset requests while an existing marker 
 	assert.equal(afterOff.entries.length, 0, "off does not create another reset");
 	await h.runCommand("pi-context", "on");
 	await h.runCommand("wipe-memory");
-	assert.equal(h.sent.length, 1, "/wipe-memory writes one hidden boot without a model turn");
+	assert.equal(h.sent.length, 2, "/wipe-memory writes one hidden boot and one continuation without a model turn");
 	assert.equal(h.sent[0]?.triggerTurn, false);
+	assert.equal(h.sent[0]?.customType, internal.BOOT_TYPE);
+	assert.equal(h.sent[1]?.customType, internal.CONTINUATION_TYPE);
 	const markers = h.sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
 	assert.equal(markers.length, 2, "off does not resurrect history; re-enabled wipe-memory creates the explicit new marker");
 });

@@ -1,14 +1,12 @@
 import { getCurrentSystemMessage, Type } from "@earendil-works/pi-ai";
-import { VERSION, defineTool, type ExtensionAPI, type ExtensionContext, type SessionBoundaryDraft, type SettingsManager } from "@earendil-works/pi-coding-agent";
-import { randomUUID } from "node:crypto";
+import { VERSION, defineTool, type ExtensionAPI, type ExtensionContext, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { registerBudget } from "./budget.js";
 import { output } from "../tool-output.js";
-import { BOOT_TYPE, RESET_MARKER_TYPE, CONTINUATION_TYPE, CONTINUATION } from "../protocol.js";
-import { agentSlug, migrateLegacyHomes, modelSlug } from "../notes/paths.js";
-import { loadNotesSnapshot, type NotesSnapshot } from "../notes/notes-snapshot.js";
-import { renderBootBlock } from "./prompts.js";
-import { currentReset, currentWindowId, isWindowBoot, isWindowMarker, projectRootWindow, projectWindow, rootWindowId } from "./context-window.js";
+import { migrateLegacyHomes } from "../notes/paths.js";
+import { currentReset, isWindowMarker, projectRootWindow, projectWindow, rootWindowId } from "./context-window.js";
 import { registerResetLifecycle } from "./reset-lifecycle.js";
+import { buildResetDrafts, persistManualReset, resetTailCommitted } from "./reset-artifacts.js";
+import { ensureBoot, type IncompleteNotesNotifier } from "./boot.js";
 
 declare const __PI_CONTEXT_BUILD__: { version: string; sourceHash: string };
 
@@ -16,100 +14,6 @@ declare const __PI_CONTEXT_BUILD__: { version: string; sourceHash: string };
 const buildLabel = typeof __PI_CONTEXT_BUILD__ === "undefined"
 	? "unbundled source (build unknown)"
 	: `${__PI_CONTEXT_BUILD__.version} · build ${__PI_CONTEXT_BUILD__.sourceHash.slice(0, 12)}`;
-
-type IncompleteNotesNotifier = (ctx: ExtensionContext, windowId: string, snapshot: NotesSnapshot) => void;
-
-function bootContent(ctx: ExtensionContext, currentId: string, previousId: string | undefined, resetLine: boolean, notes: NotesSnapshot): string {
-	return renderBootBlock({
-		agentName: agentSlug(ctx),
-		modelName: modelSlug(ctx),
-		firstWindowId: rootWindowId(ctx.sessionManager.getSessionId()),
-		currentWindowId: currentId,
-		previousWindowId: previousId,
-		resetLine,
-		notes,
-	});
-}
-
-function buildResetDrafts(ctx: ExtensionContext, notifyIncompleteNotes?: IncompleteNotesNotifier) {
-	const sessionPrefix = ctx.sessionManager.getSessionId().slice(0, 8);
-	const usedWindowIds = new Set(
-		ctx.sessionManager.getBranch().filter(isWindowMarker).map((entry) => entry.data.windowId),
-	);
-	let windowId: string;
-	do {
-		windowId = `pcw:${sessionPrefix}:${randomUUID().slice(0, 8)}`;
-	} while (usedWindowIds.has(windowId));
-	const notes = loadNotesSnapshot(ctx);
-	notifyIncompleteNotes?.(ctx, windowId, notes);
-	return [
-		{ type: "custom", customType: RESET_MARKER_TYPE, data: { windowId } },
-		{
-			type: "custom_message",
-			customType: BOOT_TYPE,
-			content: bootContent(ctx, windowId, currentWindowId(ctx), true, notes),
-			display: false,
-			details: { windowId },
-		},
-		{
-			type: "custom_message",
-			customType: CONTINUATION_TYPE,
-			content: CONTINUATION,
-			display: false,
-		},
-	] satisfies [SessionBoundaryDraft, SessionBoundaryDraft, SessionBoundaryDraft];
-}
-
-function ensureBoot(pi: ExtensionAPI, ctx: ExtensionContext, notifyIncompleteNotes?: IncompleteNotesNotifier): void {
-	const reset = currentReset(ctx);
-	const sessionId = ctx.sessionManager.getSessionId();
-	const windowId = reset?.data?.windowId ?? rootWindowId(sessionId);
-	if (ctx.sessionManager.buildSessionProjection().messages.some((message) => isWindowBoot(message, windowId))) return;
-	if (reset && !resetBootMayBeRepaired(ctx, reset.id, windowId)) return;
-	let previousId: string | undefined = reset ? rootWindowId(sessionId) : undefined;
-	if (reset) {
-		for (const entry of ctx.sessionManager.getBranch()) {
-			if (entry.id === reset.id) break;
-			if (isWindowMarker(entry)) previousId = entry.data.windowId;
-		}
-	}
-	const notes = loadNotesSnapshot(ctx);
-	notifyIncompleteNotes?.(ctx, windowId, notes);
-	pi.sendMessage(
-		{ customType: BOOT_TYPE, content: bootContent(ctx, windowId, previousId, reset !== undefined, notes), display: false, details: { windowId } },
-		{ triggerTurn: false },
-	);
-}
-
-function persistManualReset(pi: ExtensionAPI, ctx: ExtensionContext, notifyIncompleteNotes?: IncompleteNotesNotifier): string {
-	const [marker, boot] = buildResetDrafts(ctx, notifyIncompleteNotes);
-	pi.appendEntry(marker.customType, marker.data);
-	pi.sendMessage(
-		{ customType: boot.customType, content: boot.content, display: boot.display, details: boot.details },
-		{ triggerTurn: false },
-	);
-	return boot.details.windowId;
-}
-
-function resetBootMayBeRepaired(ctx: ExtensionContext, markerId: string, windowId: string): boolean {
-	const branch = ctx.sessionManager.getBranch();
-	const markerIndex = branch.findIndex((entry) => entry.id === markerId);
-	if (markerIndex < 0) return false;
-	const afterMarker = branch.slice(markerIndex + 1);
-	// A raw boot is authoritative even when a later context_edit hides it from the
-	// projection. Appending another boot at the tail would move the boundary.
-	if (afterMarker.some((entry) => isWindowBootEntry(entry, windowId))) return false;
-	// Only a genuinely incomplete marker tail can be repaired. Once conversation or
-	// a context-bearing custom message follows it, refusing is safer than guessing.
-	return !afterMarker.some((entry) => entry.type === "message" || entry.type === "custom_message" || entry.type === "compaction" || entry.type === "branch_summary");
-}
-
-function isWindowBootEntry(entry: ReturnType<ExtensionContext["sessionManager"]["getBranch"]>[number], windowId: string): boolean {
-	return entry.type === "custom_message" && entry.customType === BOOT_TYPE &&
-		typeof entry.details === "object" && entry.details !== null &&
-		typeof (entry.details as { windowId?: unknown }).windowId === "string" &&
-		(entry.details as { windowId: string }).windowId === windowId;
-}
 
 function branchHasWindowMarker(ctx: ExtensionContext, fromId?: string): boolean {
 	return ctx.sessionManager.getBranch(fromId).some((entry) => isWindowMarker(entry));
@@ -121,18 +25,19 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 	let missingBootNotice: string | undefined;
 	const incompleteNotesNotified = new Set<string>();
 	const pendingResetNotices = new Set<string>();
+	// Announce only a fully committed reset (marker + matching boot + continuation), not a
+	// reset request or a partial boot repair.
 	const notifyCommittedResets = (ctx: ExtensionContext, addedWindowId?: string) => {
 		if (addedWindowId) pendingResetNotices.add(addedWindowId);
 		if (pendingResetNotices.size === 0) return;
 		const branch = ctx.sessionManager.getBranch();
 		for (const windowId of pendingResetNotices) {
-			if (!branch.some((entry) => isWindowMarker(entry) && entry.data.windowId === windowId) ||
-				!branch.some((entry) => isWindowBootEntry(entry, windowId))) continue;
+			const marker = branch.find((entry) => isWindowMarker(entry) && entry.data.windowId === windowId);
+			if (!marker || !resetTailCommitted(ctx, marker.id, windowId)) continue;
 			pendingResetNotices.delete(windowId);
 			ctx.ui.notify(`pi-context: memory cleared · ${windowId}`, "info");
 		}
 	};
-	// Announce only a committed reset (marker + boot), not a reset request or boot repair.
 	pi.on("turn_start", (_event, ctx) => notifyCommittedResets(ctx));
 	pi.on("agent_settled", (_event, ctx) => {
 		notifyCommittedResets(ctx);

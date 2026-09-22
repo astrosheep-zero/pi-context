@@ -32,9 +32,8 @@ export const DEFAULT_REMINDER_MARGIN_TOKENS = 24_576;
  * never sees — Codex's fallback buffer, relocated above the line.
  */
 export const WARNING_RUNWAY_TOKENS = 12_288;
-export const RESET_SUMMARY =
-	"You wake up. Your head is empty — no memories, the past a blank. The memory is gone for good. What outlived it: the notes you wrote, and the history that was recorded. They are not your memory — read them to rebuild what you need.";
-export const CONTINUATION = "Your memory was just erased. Pull only the details you need from history_* and notes_*, then get back to work.";
+/** The single reset message: the only reset prose persisted, carried by the continuation entry. */
+export const CONTINUATION = "Your memory was just erased. Your head is blank. Good news: your notes are still here, and history remains... searchable. Do try to keep up.";
 
 /**
  * Static protocol teaching adapted from Codex's token_budget.guidance_message to
@@ -49,9 +48,7 @@ Keep a running checkpoint while you work, not at the last minute — the next wi
 
 Use get_context_remaining to see how much of the window is left. When it runs out, this window is gone — with no final turn at the limit — and you continue in a fresh one, recovering only through notes_* and history_*. Once your checkpoint is written, you can call wipe_memory yourself instead of waiting for the erase. Do not let a window die undocumented.
 
-If <context_window> lists a Previous context window id, a reset just happened and the old conversation is not included. Read your note checkpoint first, then recover details through history_*: history_read directly when you know the window and item IDs, history_list or history_search to find them when you don't.
-
-Notes live in five homes, and the word after @ is always one of their reserved names — your own name and other people's names live at the second level (@agents/faye/, never @faye/). Bare names are this session; @project/<vpath> is this project's workspace; @human/<vpath> is the human's cross-project home; @self/<vpath> and @agents/<name>/<vpath> are agent homes; @model/<vpath> and @models/<name>/<vpath> are model homes. @self and @model are the only relative forms — the current agent, the current model — and listings never show them, only the resolved name. There is no cross-home fallback.
+Note addresses take five prefixes: bare <vpath> is this session; @project/<vpath> is this project; @human/<vpath> is the human's cross-project notes; @self/<vpath> is your own, as the current agent; @model/<vpath> is the current model's. @self and @model resolve to who is running now; listings always show resolved names. Nothing else is legal — any other @ prefix, or @ inside a vpath, is a hard error, with no fallback across prefixes.
 Session notes belong to this trip — the goal, the progress, the loose ends. The next window of THIS trip wakes to them; once the trip is over, nobody does.
 @project notes hold facts about this project — architecture, conventions, workflows, deployment and environment details — for whoever works here next.
 @human notes hold the human's durable preferences and standing rules, plus lessons that apply across projects — for every agent that serves this human, whoever is running. You write there as the human's scribe; what the human dictates carries origin: user. When the intended scope is unclear, keep the note in the narrowest stated scope rather than widening it.
