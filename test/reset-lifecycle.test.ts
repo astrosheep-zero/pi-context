@@ -15,6 +15,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { SessionManager as Manager } from "@earendil-works/pi-coding-agent";
 import piContext, { internal } from "../src/index.js";
+import { registerResetLifecycle } from "../src/reset-lifecycle.js";
 
 const previousNotesHome = process.env.PI_NOTES_HOME;
 const testNotesHome = mkdtempSync(join(tmpdir(), "pi-context-lifecycle-notes-"));
@@ -194,4 +195,99 @@ test("tree navigation with a marker returns an empty extension summary and never
 	});
 	assert.deepEqual(result.at(-1), { summary: { summary: "" } }, "an empty extension summary prevents SDK summarization");
 	assert.equal(h.sessionManager.getEntries().filter((entry) => entry.type === "branch_summary").length, 0, "the hook itself does not write a summary");
+});
+
+test("reset construction failure preserves incoming and budget drafts without continuation", async () => {
+	const sessionManager = Manager.inMemory("/private/tmp/pi-context-reset-failure-test");
+	const handlers = new Map<string, Handler[]>();
+	const notices: Array<{ message: string; type?: string }> = [];
+	const api = {
+		on(name: string, handler: Handler) {
+			const list = handlers.get(name) ?? [];
+			list.push(handler);
+			handlers.set(name, list);
+			return () => {};
+		},
+	} as unknown as ExtensionAPI;
+	const ctx = {
+		sessionManager,
+		model: undefined,
+		signal: undefined,
+		hasPendingMessages: () => false,
+		ui: { notify: (message: string, type?: string) => notices.push({ message, type }) },
+	} as unknown as ExtensionContext;
+	const budgetDraft: SessionBoundaryDraft = { type: "custom_message", customType: internal.GUIDANCE_TYPE, content: "budget draft", display: false };
+	const lifecycle = registerResetLifecycle(api, {
+		isEnabled: () => true,
+		budget: {
+			automaticResetEnabled: () => true,
+			resetDue: () => false,
+			consumeTurnEnd: () => [budgetDraft],
+			clear: () => {},
+		},
+		buildReset: () => { throw new Error("synthetic reset construction failure"); },
+	});
+	lifecycle.request();
+	const incoming: SessionBoundaryDraft = { type: "custom_message", customType: "foreign/boundary", content: "foreign draft", display: false };
+	const results = [];
+	for (const handler of handlers.get("turn_end") ?? []) results.push(await handler(fakeBoundaryEvent([incoming]), ctx));
+	const result = resultEntries(results);
+	assert.deepEqual(result.entries, [incoming, budgetDraft], "already-built drafts survive reset construction failure");
+	assert.equal(result.continue, false, "a failed reset does not request continuation");
+	assert.equal(notices.at(-1)?.type, "warning");
+	assert.match(notices.at(-1)?.message ?? "", /could not build reset/);
+});
+
+test("a queued success clears an overflow failure before settle recovery can reset", async () => {
+	const sessionManager = Manager.inMemory("/private/tmp/pi-context-queued-overflow-test");
+	const handlers = new Map<string, Handler[]>();
+	const api = {
+		on(name: string, handler: Handler) {
+			const list = handlers.get(name) ?? [];
+			list.push(handler);
+			handlers.set(name, list);
+			return () => {};
+		},
+	} as unknown as ExtensionAPI;
+	const ctx = {
+		sessionManager,
+		model: { contextWindow: 100_000, maxTokens: 4_096 },
+		signal: undefined,
+		hasPendingMessages: () => false,
+		ui: { notify() {} },
+	} as unknown as ExtensionContext;
+	let resetCount = 0;
+	const lifecycle = registerResetLifecycle(api, {
+		isEnabled: () => true,
+		budget: {
+			automaticResetEnabled: () => true,
+			resetDue: () => false,
+			consumeTurnEnd: () => [],
+			clear: () => {},
+		},
+		buildReset: () => {
+			resetCount += 1;
+			return [];
+		},
+	});
+
+	const failed = fakeBoundaryEvent();
+	failed.message = { ...failed.message, stopReason: "error", errorMessage: "Prompt too long: context exceeds maximum context length" } as unknown as AgentMessage;
+	const turnEnd = handlers.get("turn_end")?.[0];
+	const beforeSettle = handlers.get("agent_before_settle")?.[0];
+	assert.ok(turnEnd && beforeSettle);
+	await turnEnd(failed, ctx);
+	const queued = {
+		...failed,
+		type: "agent_before_settle",
+		outcome: "error",
+		context: { ...failed.context, pendingMessages: [{ role: "user", content: [{ type: "text", text: "queued success" }], timestamp: Date.now() }] },
+	};
+	assert.equal(await beforeSettle(queued, ctx), undefined, "a queued message defers overflow recovery");
+
+	const success = fakeBoundaryEvent();
+	await turnEnd(success, ctx);
+	const settled = { ...queued, context: { ...queued.context, pendingMessages: [] }, outcome: "completed" };
+	assert.equal(await beforeSettle(settled, ctx), undefined, "the successful queued turn clears the stale recovery");
+	assert.equal(resetCount, 0);
 });

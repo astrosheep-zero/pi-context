@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
-import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { GUIDANCE_TYPE, WARNING_TYPE } from "./protocol.js";
-import { thresholdsFor, resetThresholds } from "./thresholds.js";
+import { defineTool, type ExtensionAPI, type ExtensionContext, type SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
+import { GUIDANCE_CLOSE_TAG, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, WARNING_PROMPT, WARNING_TYPE } from "./protocol.js";
+import { readThresholdSettings, type ResolvedThresholds } from "./thresholds.js";
 import { currentWindowId, hasWindowMessage } from "./history.js";
 import { tokenBudgetGuidance } from "./prompts.js";
 import { output } from "./tool-output.js";
@@ -14,37 +14,85 @@ export function remainingTokens(ctx: Pick<ExtensionContext, "sessionManager" | "
 }
 
 export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean) {
-	let guidancePersistedInWindow: string | undefined;
-	let pending: { windowId: string; content: string } | undefined;
+	let cachedPolicy: { thresholds: ResolvedThresholds; automatic: boolean } | undefined;
+	const thresholdsFor = (ctx: ExtensionContext): ResolvedThresholds => {
+		if (!cachedPolicy) cachedPolicy = readThresholdSettings(ctx);
+		return cachedPolicy.thresholds;
+	};
+	const automaticResetEnabled = (ctx: ExtensionContext): boolean => {
+		if (!cachedPolicy) cachedPolicy = readThresholdSettings(ctx);
+		return cachedPolicy.automatic;
+	};
+	const resetDue = (ctx: ExtensionContext): boolean => {
+		if (!automaticResetEnabled(ctx)) return false;
+		const usage = windowUsage(ctx);
+		return usage !== undefined && usage.tokens !== null && usage.contextWindow - usage.tokens <= thresholdsFor(ctx).reserve;
+	};
+	const invalidateThresholds = () => { cachedPolicy = undefined; };
+	let pendingGuidance: { windowId: string; content: string } | undefined;
+	let pendingWarning: { windowId: string; content: string } | undefined;
 
-	pi.on("session_start", (_event, ctx) => { guidancePersistedInWindow = undefined; pending = undefined; resetThresholds(); thresholdsFor(ctx); });
-	pi.on("session_tree", () => { guidancePersistedInWindow = undefined; pending = undefined; resetThresholds(); });
-	pi.on("model_select", resetThresholds);
-	pi.on("agent_end", () => { pending = undefined; });
-	pi.on("turn_end", (event, ctx) => {
-		const reminder = pending;
-		pending = undefined;
-		if (!isEnabled() || !reminder || reminder.windowId !== currentWindowId(ctx)) return;
-		return { entries: [...(event.entries ?? []), { type: "custom_message", customType: GUIDANCE_TYPE, content: reminder.content, display: false }] };
-	});
+	const clearStaged = () => {
+		pendingGuidance = undefined;
+		pendingWarning = undefined;
+	};
+	const resetForTransition = () => {
+		clearStaged();
+		invalidateThresholds();
+	};
+
+	const consumeTurnEnd = (ctx: ExtensionContext): SessionBoundaryDraft[] => {
+		const staged = [
+			pendingGuidance ? { ...pendingGuidance, customType: GUIDANCE_TYPE } : undefined,
+			pendingWarning ? { ...pendingWarning, customType: WARNING_TYPE } : undefined,
+		];
+		clearStaged();
+		const windowId = currentWindowId(ctx);
+		return staged.flatMap((draft) => draft?.windowId === windowId ? [{
+			type: "custom_message" as const,
+			customType: draft.customType,
+			content: draft.content,
+			display: false,
+		}] : []);
+	};
+
+	pi.on("session_start", (_event, ctx) => { resetForTransition(); thresholdsFor(ctx); });
+	pi.on("session_tree", resetForTransition);
+	pi.on("model_select", () => { clearStaged(); invalidateThresholds(); });
+	pi.on("session_shutdown", clearStaged);
+	// A request can fail before Pi emits turn_end. agent_settled is the public
+	// lifecycle point that must discard an uncommitted draft before the next prompt.
+	pi.on("agent_settled", clearStaged);
 	pi.on("context", (_event, ctx) => {
-		if (!isEnabled() || hasWindowMessage(ctx, GUIDANCE_TYPE)) return undefined;
+		if (!isEnabled()) return undefined;
 		// The early reminder persists once per window the first time remaining crosses
 		// reserve+margin. It never edits the outgoing request.
 		const remaining = remainingTokens(ctx);
 		if (remaining === null) return undefined;
 		const windowId = currentWindowId(ctx);
-		const { reminder, reserve, warning } = thresholdsFor(ctx);
-		// The final warning owns the deep band: when it has fired (or is due now),
-		// the shallow reminder would only repeat the same instruction closer to
-		// the wipe, at a worse position. See warning.ts.
-		if (remaining <= warning || hasWindowMessage(ctx, WARNING_TYPE)) return undefined;
-		if (remaining <= reminder && guidancePersistedInWindow !== windowId) {
-			guidancePersistedInWindow = windowId;
+		const { reminder, warning } = thresholdsFor(ctx);
+		if (hasWindowMessage(ctx, WARNING_TYPE) || pendingWarning?.windowId === windowId) return undefined;
+		if (remaining <= warning) {
+			// A not-yet-committed shallow reminder is superseded by the final warning.
+			pendingGuidance = undefined;
+			const content = `${GUIDANCE_OPEN_TAG}\n${WARNING_PROMPT}\n${GUIDANCE_CLOSE_TAG}`;
+			pendingWarning = { windowId, content };
+			const warningMessage = {
+				role: "custom" as const,
+				customType: WARNING_TYPE,
+				content,
+				display: false,
+				timestamp: Date.now(),
+			};
+			ctx.ui.notify("pi-context: context budget critical — final checkpoint warning steered to the model.", "warning");
+			return { messages: [..._event.messages, warningMessage] };
+		}
+		if (hasWindowMessage(ctx, GUIDANCE_TYPE) || pendingGuidance?.windowId === windowId) return undefined;
+		if (remaining <= reminder) {
 			// Persist at turn_end, before any reset drafts. A queued sendMessage could
 			// otherwise cross the marker and leak the old window's reminder forward.
 			const left = Math.max(0, remaining - warning);
-			pending = { windowId, content: tokenBudgetGuidance(left) };
+			pendingGuidance = { windowId, content: tokenBudgetGuidance(left) };
 			ctx.ui.notify("pi-context: context budget low — checkpoint reminder recorded for the model, kept out of the chat view.", "warning");
 		}
 		return undefined;
@@ -63,4 +111,10 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean) {
 		},
 	}));
 
+	return {
+		automaticResetEnabled,
+		resetDue,
+		consumeTurnEnd,
+		clear: clearStaged,
+	};
 }

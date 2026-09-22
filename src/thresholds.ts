@@ -78,42 +78,32 @@ export function readDreamerSettings(cwd = process.cwd()): DreamerSetting {
 	}
 }
 
-let cached: ResolvedThresholds | undefined;
-let automatic = true;
-
-export function automaticResetEnabled(ctx: ExtensionContext): boolean {
-	thresholdsFor(ctx);
-	return automatic;
-}
-
 /**
- * Session-level threshold resolution: Pi's compaction reserve plus the settings.json
- * "pi-context" margins. The file-backed read is cached until resetThresholds (called
- * on session_start/session_tree); invalid configuration degrades per offending key
- * with one warning and never throws during session operation.
+ * Read the active compaction reserve, enablement, and pi-context margin settings. This
+ * function deliberately has no cache: the budget owner supplies the invocation-scoped
+ * cache so two live piContext instances cannot share mutable policy state.
  */
-export function thresholdsFor(ctx: ExtensionContext): ResolvedThresholds {
-	if (cached) return cached;
+export function readThresholdSettings(ctx: ExtensionContext): { thresholds: ResolvedThresholds; automatic: boolean } {
 	try {
 		const settingsManager = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
 		// Resolve the active provider/model override from the public settings API.
 		const model = ctx.model;
 		const compaction = settingsManager.getCompactionSettings(model ? { provider: model.provider, id: model.id } : undefined);
-		automatic = compaction.enabled;
 		const derived = deriveThresholds(
 			compaction.reserveTokens,
 			mergePiContextSettings(settingsManager.getGlobalSettings(), settingsManager.getProjectSettings()),
 		);
 		for (const warning of derived.warnings) ctx.ui.notify(warning, "warning");
-		cached = derived.thresholds;
+		return { thresholds: derived.thresholds, automatic: compaction.enabled };
 	} catch (error) {
 		ctx.ui.notify(`pi-context: could not read settings; using defaults (${String(error)}).`, "warning");
-		cached = { reminder: DEFAULT_RESERVE_TOKENS + DEFAULT_REMINDER_MARGIN_TOKENS, reserve: DEFAULT_RESERVE_TOKENS, warning: DEFAULT_RESERVE_TOKENS + WARNING_RUNWAY_TOKENS };
+		return {
+			thresholds: {
+				reminder: DEFAULT_RESERVE_TOKENS + DEFAULT_REMINDER_MARGIN_TOKENS,
+				reserve: DEFAULT_RESERVE_TOKENS,
+				warning: DEFAULT_RESERVE_TOKENS + WARNING_RUNWAY_TOKENS,
+			},
+			automatic: true,
+		};
 	}
-	return cached;
-}
-
-export function resetThresholds(): void {
-	cached = undefined;
-	automatic = true;
 }

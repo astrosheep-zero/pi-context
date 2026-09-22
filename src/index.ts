@@ -5,7 +5,7 @@ import { registerHistoryTools } from "./history-tools.js";
 import { registerNotesTools } from "./notes/tools.js";
 import { registerBudget } from "./budget.js";
 import { output } from "./tool-output.js";
-import { automaticResetEnabled, deriveThresholds, mergePiContextSettings } from "./thresholds.js";
+import { deriveThresholds, mergePiContextSettings } from "./thresholds.js";
 import { NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, WARNING_TYPE, RESET_MARKER_TYPE, CONTINUATION_TYPE, MAX_NOTE_BYTES, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, WARNING_RUNWAY_TOKENS, RESET_SUMMARY, CONTINUATION, WARNING_PROMPT } from "./protocol.js";
 import { currentReset, currentWindowId, isWindowMarker, rootWindowId } from "./history.js";
 import { assertVirtualPath } from "./notes/model.js";
@@ -13,7 +13,6 @@ import { migrateLegacyHomes } from "./notes/paths.js";
 import { bootBlock } from "./prompts.js";
 import { isWindowBoot, projectRootWindow, projectWindow } from "./context-window.js";
 import { registerResetLifecycle } from "./reset-lifecycle.js";
-import { registerWarning } from "./warning.js";
 export { historyFromSession } from "./history.js";
 export { notesFromSession } from "./notes/model.js";
 
@@ -49,6 +48,7 @@ function ensureBoot(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	const sessionId = ctx.sessionManager.getSessionId();
 	const windowId = reset?.data?.windowId ?? rootWindowId(sessionId);
 	if (ctx.sessionManager.buildSessionProjection().messages.some((message) => isWindowBoot(message, windowId))) return;
+	if (reset && !resetBootMayBeRepaired(ctx, reset.id, windowId)) return;
 	let previousId: string | undefined = reset ? rootWindowId(sessionId) : undefined;
 	if (reset) {
 		for (const entry of ctx.sessionManager.getBranch()) {
@@ -60,6 +60,26 @@ function ensureBoot(pi: ExtensionAPI, ctx: ExtensionContext): void {
 		{ customType: BOOT_TYPE, content: bootBlock(ctx, windowId, previousId, reset !== undefined), display: false, details: { windowId } },
 		{ triggerTurn: false },
 	);
+}
+
+function resetBootMayBeRepaired(ctx: ExtensionContext, markerId: string, windowId: string): boolean {
+	const branch = ctx.sessionManager.getBranch();
+	const markerIndex = branch.findIndex((entry) => entry.id === markerId);
+	if (markerIndex < 0) return false;
+	const afterMarker = branch.slice(markerIndex + 1);
+	// A raw boot is authoritative even when a later context_edit hides it from the
+	// projection. Appending another boot at the tail would move the boundary.
+	if (afterMarker.some((entry) => isWindowBootEntry(entry, windowId))) return false;
+	// Only a genuinely incomplete marker tail can be repaired. Once conversation or
+	// a context-bearing custom message follows it, refusing is safer than guessing.
+	return !afterMarker.some((entry) => entry.type === "message" || entry.type === "custom_message" || entry.type === "compaction" || entry.type === "branch_summary");
+}
+
+function isWindowBootEntry(entry: ReturnType<ExtensionContext["sessionManager"]["getBranch"]>[number], windowId: string): boolean {
+	return entry.type === "custom_message" && entry.customType === BOOT_TYPE &&
+		typeof entry.details === "object" && entry.details !== null &&
+		typeof (entry.details as { windowId?: unknown }).windowId === "string" &&
+		(entry.details as { windowId: string }).windowId === windowId;
 }
 
 function persistManualReset(pi: ExtensionAPI, ctx: ExtensionContext): void {
@@ -81,8 +101,7 @@ export default function piContext(pi: ExtensionAPI) {
 	const migrationWarning = migrateLegacyHomes();
 	if (migrationWarning) console.warn(`pi-context: ${migrationWarning}`);
 
-	registerBudget(pi, () => enabled);
-	registerWarning(pi, () => enabled);
+	const budget = registerBudget(pi, () => enabled);
 
 	pi.on("session_start", (_event, ctx) => {
 		if (!enabled) return;
@@ -113,7 +132,7 @@ export default function piContext(pi: ExtensionAPI) {
 		} catch (error) {
 			if (missingBootNotice !== windowId) {
 				missingBootNotice = windowId;
-				ctx.ui.notify(`pi-context: missing boot for active context window ${windowId}; request cancelled until startup/tree repair completes.`, "error");
+				ctx.ui.notify(`pi-context: active context window ${windowId} has no visible boot; request cancelled safely. Use /clear-context to start another window.`, "error");
 			}
 			ctx.abort();
 			const safeHead = getCurrentSystemMessage(event.messages);
@@ -132,6 +151,7 @@ export default function piContext(pi: ExtensionAPI) {
 				ensureBoot(pi, cmdCtx);
 			} else if (arg === "off") {
 				enabled = false;
+				budget.clear();
 				resets.clear();
 			} else if (arg !== "") {
 				cmdCtx.ui.notify("Usage: /pi-context [on|off]", "error");
@@ -172,7 +192,7 @@ export default function piContext(pi: ExtensionAPI) {
 
 	const resets = registerResetLifecycle(pi, {
 		isEnabled: () => enabled,
-		automaticResetEnabled,
+		budget,
 		buildReset: buildResetDrafts,
 	});
 }

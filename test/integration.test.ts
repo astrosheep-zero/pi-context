@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -1302,6 +1302,58 @@ test("the root boot and reset boot carry durable window identity", async () => {
 	assert.ok(continuation && continuation.type === "custom_message" && continuation.display === false, "the resumed run is represented by one hidden continuation");
 });
 
+test("a marker tail with only metadata repairs its missing boot without moving the boundary", () => {
+	const sessionManager = manager(true);
+	const windowId = "pcw:metadata-tail";
+	const markerId = sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId });
+	const modelChangeId = sessionManager.appendModelChange("openai", "scripted-model");
+	sessionManager.appendThinkingLevelChange("low");
+	const captured = makeExtension(sessionManager);
+	const ctx = context(sessionManager);
+
+	runHandlers(captured, "session_start", { reason: "startup" }, ctx);
+	const branch = sessionManager.getBranch();
+	const markerIndex = branch.findIndex((entry) => entry.id === markerId);
+	const bootEntries = branch.filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE && entry.details && typeof entry.details === "object" && (entry.details as { windowId?: unknown }).windowId === windowId);
+	assert.equal(bootEntries.length, 1, "an incomplete marker tail gets one repaired boot");
+	assert.ok(branch.findIndex((entry) => entry.id === modelChangeId) > markerIndex, "metadata remains after the marker");
+	assert.ok(branch.findIndex((entry) => entry.id === bootEntries[0]?.id) > markerIndex, "the repaired boot remains in the marked window");
+	assert.equal(captured.sent.length, 1, "repair emits one hidden boot without a model turn");
+});
+
+test("a root fork refreshes boot identity while preserving copied root messages", async () => {
+	const source = manager(true);
+	const sourceExtension = makeExtension(source);
+	const sourceCtx = context(source);
+	appendText(source, "user", "ROOT_FORK_PRESERVE_THIS_MESSAGE");
+	runHandlers(sourceExtension, "session_start", { reason: "startup" }, sourceCtx);
+	appendText(source, "assistant", "ROOT_FORK_FLUSHES_SOURCE_SESSION");
+	const sourcePath = source.getSessionFile();
+	assert.ok(sourcePath);
+
+	const targetCwd = mkdtempSync(join(tmpdir(), "pi-context-fork-cwd-"));
+	const targetSessionDir = mkdtempSync(join(tmpdir(), "pi-context-fork-session-"));
+	const fork = SessionManager.forkFrom(sourcePath, targetCwd, targetSessionDir, { id: "forkboot1" });
+	try {
+		const forkExtension = makeExtension(fork);
+		const forkCtx = context(fork, undefined, undefined, true, targetCwd);
+		runHandlers(forkExtension, "session_start", { reason: "startup" }, forkCtx);
+		const rootWindowId = `pcw:${fork.getSessionId().slice(0, 8)}:root`;
+		const boots = fork.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE);
+		assert.equal(boots.length, 2, "the fork keeps the copied boot and appends one refreshed boot");
+		assert.equal(forkExtension.sent.length, 1, "the fork refreshes boot identity without starting a turn");
+		assert.deepEqual(forkExtension.sent[0]?.message.details, { windowId: rootWindowId });
+		const projected = await runContextWithSystemHook(forkExtension, forkCtx, fork.buildSessionContext().messages);
+		const providerText = JSON.stringify(projected?.messages ?? []);
+		assert.ok(providerText.includes("ROOT_FORK_PRESERVE_THIS_MESSAGE"), "root fork keeps the copied conversation");
+		assert.ok(providerText.includes(rootWindowId), "root projection exposes the fork's boot identity");
+	} finally {
+		// SessionManager owns the persisted file; remove only this test's isolated roots.
+		rmSync(targetCwd, { recursive: true, force: true });
+		rmSync(targetSessionDir, { recursive: true, force: true });
+	}
+});
+
 test("marker window ids drive history_* lookups and provider projection", async () => {
 	const sessionManager = manager();
 	const captured = makeExtension(sessionManager);
@@ -1388,14 +1440,17 @@ test("low-budget guidance and warning persist at turn_end, once per active windo
 	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.WARNING_TYPE).length, 1);
 });
 
-test("an ignored warning never repeats or creates a durable checkpoint", async () => {
+test("an ignored warning is redelivered after settlement without creating a durable checkpoint", async () => {
 	const sm = manager();
 	const captured = makeExtension(sm);
 	const ctx = context(sm, undefined, { tokens: 199_000, percent: 99.5, contextWindow: 200_000 });
 	const first = await runContextHook(captured, ctx);
 	assert.equal(first?.messages.length, 1);
 	runHandlers(captured, "agent_end", {}, ctx);
-	assert.equal(await runContextHook(captured, ctx), undefined, "the fired-in-window guard ignores a warning the model did not act on");
+	runHandlers(captured, "agent_settled", {}, ctx);
+	const second = await runContextHook(captured, ctx);
+	assert.equal(second?.messages.length, 1, "an uncommitted warning is eligible again after settlement");
+	assert.equal((second?.messages[0] as { customType?: string }).customType, internal.WARNING_TYPE);
 	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.WARNING_TYPE).length, 0);
 });
 

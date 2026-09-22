@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -27,6 +27,7 @@ type Fixture = {
 	session: AgentSession;
 	model: Awaited<ReturnType<ModelRuntime["getModels"]>>[number];
 	requests: AgentContext[];
+	streamContexts: AgentContext[];
 	streamSignals: boolean[];
 	events: Array<{ type: string; [key: string]: unknown }>;
 	close: () => void;
@@ -38,15 +39,24 @@ async function openFixture(options: {
 	contextWindow?: number;
 	systemPrompt?: string;
 	tools?: string[];
+	cwd?: string;
+	agentDir?: string;
+	notesRoot?: string;
+	writeSettings?: boolean;
+	projectSettings?: Record<string, unknown>;
+	projectTrusted?: boolean;
 	seed?: (sessionManager: SessionManager) => void;
 	script: StreamScript;
 	hook?: Hook;
 }): Promise<Fixture> {
-	const dir = mkdtempSync(join(tmpdir(), "pi-context-agent-loop-"));
-	const notesRoot = mkdtempSync(join(tmpdir(), "pi-context-agent-loop-notes-"));
+	const dir = options.cwd ?? mkdtempSync(join(tmpdir(), "pi-context-agent-loop-"));
+	const ownsDir = options.cwd === undefined;
+	const notesRoot = options.notesRoot ?? mkdtempSync(join(tmpdir(), "pi-context-agent-loop-notes-"));
+	const ownsNotesRoot = options.notesRoot === undefined;
+	const agentDir = options.agentDir ?? dir;
 	const previousDir = process.env.PI_CODING_AGENT_DIR;
 	const previousNotesRoot = process.env.PI_NOTES_HOME;
-	process.env.PI_CODING_AGENT_DIR = dir;
+	process.env.PI_CODING_AGENT_DIR = agentDir;
 	process.env.PI_NOTES_HOME = notesRoot;
 	const runtime = await ModelRuntime.create({
 		authPath: join(dir, "auth.json"),
@@ -62,7 +72,7 @@ async function openFixture(options: {
 	runtime.complete = (() => { throw new Error("unexpected native model request"); }) as typeof runtime.complete;
 	runtime.streamSimple = (() => { throw new Error("unexpected native model request"); }) as typeof runtime.streamSimple;
 	runtime.completeSimple = (() => { throw new Error("unexpected native model request"); }) as typeof runtime.completeSimple;
-	writeFileSync(join(dir, "settings.json"), JSON.stringify({
+	if (options.writeSettings !== false) writeFileSync(join(agentDir, "settings.json"), JSON.stringify({
 		compaction: {
 			enabled: options.compactionEnabled ?? true,
 			reserveTokens: 32_768,
@@ -70,8 +80,13 @@ async function openFixture(options: {
 		},
 		retry: { enabled: false },
 	}));
-	const settingsManager = SettingsManager.create(dir, dir);
+	if (options.projectSettings !== undefined) {
+		mkdirSync(join(dir, ".pi"), { recursive: true });
+		writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify(options.projectSettings));
+	}
+	const settingsManager = SettingsManager.create(dir, agentDir, { projectTrusted: options.projectTrusted ?? true });
 	const requests: AgentContext[] = [];
+	const streamContexts: AgentContext[] = [];
 	const streamSignals: boolean[] = [];
 	const events: Array<{ type: string; [key: string]: unknown }> = [];
 	let session!: AgentSession;
@@ -106,6 +121,7 @@ async function openFixture(options: {
 	session.subscribe((event) => events.push(event as unknown as { type: string; [key: string]: unknown }));
 	session.agent.streamFunction = (_model, context, streamOptions) => {
 		const aborted = streamOptions?.signal?.aborted === true;
+		streamContexts.push(context);
 		streamSignals.push(aborted);
 		if (aborted) {
 			const message: AssistantMessage = {
@@ -140,6 +156,7 @@ async function openFixture(options: {
 		session,
 		model,
 		requests,
+		streamContexts,
 		streamSignals,
 		events,
 		close: () => {
@@ -148,8 +165,8 @@ async function openFixture(options: {
 			else process.env.PI_CODING_AGENT_DIR = previousDir;
 			if (previousNotesRoot === undefined) delete process.env.PI_NOTES_HOME;
 			else process.env.PI_NOTES_HOME = previousNotesRoot;
-			rmSync(dir, { recursive: true, force: true });
-			rmSync(notesRoot, { recursive: true, force: true });
+			if (ownsDir) rmSync(dir, { recursive: true, force: true });
+			if (ownsNotesRoot) rmSync(notesRoot, { recursive: true, force: true });
 		},
 	};
 }
@@ -382,6 +399,66 @@ test("real AgentSession: abort before a boundary cancels the pending wipe, and a
 	}
 });
 
+test("real AgentSession: hidden or missing reset boots refuse to move the boundary", { timeout: 15000 }, async () => {
+	let fixture!: Fixture;
+	fixture = await openFixture({
+		compactionEnabled: false,
+		script: () => assistant(fixture, [{ type: "text", text: "scripted acknowledgement" }]),
+	});
+	try {
+		await fixture.session.prompt("ROOT_BEFORE_HIDDEN_BOOT");
+		await fixture.session.waitForIdle();
+		await fixture.session.prompt("/clear-context");
+		await fixture.session.waitForIdle();
+		await fixture.session.prompt("VALID_POST_MARKER_WORK");
+		await fixture.session.waitForIdle();
+
+		const marker = resetMarkers(fixture)[0];
+		assert.ok(marker && marker.type === "custom");
+		const windowId = (marker.data as { windowId: string }).windowId;
+		const boot = fixture.sessionManager.getBranch().find((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && entry.details && typeof entry.details === "object" && (entry.details as { windowId?: unknown }).windowId === windowId);
+		assert.ok(boot && boot.type === "custom_message");
+		fixture.sessionManager.appendContextEdit(boot.id, null);
+		const bootCount = () => fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && entry.details && typeof entry.details === "object" && (entry.details as { windowId?: unknown }).windowId === windowId).length;
+		assert.equal(bootCount(), 1);
+
+		await fixture.session.reload();
+		assert.equal(bootCount(), 1, "a raw boot hidden by context_edit is not replaced at the tail");
+		const requestsBeforeRefusal = fixture.requests.length;
+		await fixture.session.prompt("MISSING_PROJECTED_BOOT_SENTINEL");
+		await fixture.session.waitForIdle();
+		assert.equal(bootCount(), 1, "a refused active window never receives a replacement boot");
+		assert.ok(fixture.requests.length <= requestsBeforeRefusal, "the normal provider request is not generated from a shortened window");
+		const safeContext = fixture.streamContexts.at(-1);
+		assert.ok(safeContext, "the SDK may still invoke the stream function with an aborted signal");
+		assert.ok(safeContext.messages.every((message) => message.role === "system"), "a refused request receives system-only safe context");
+		assert.equal(fixture.streamSignals.at(-1), true, "the refused request is aborted before provider work");
+		assert.ok(JSON.stringify(fixture.sessionManager.getBranch()).includes("VALID_POST_MARKER_WORK"), "raw post-marker work remains durable");
+	} finally {
+		fixture.close();
+	}
+
+	let missingRaw!: Fixture;
+	missingRaw = await openFixture({
+		compactionEnabled: false,
+		seed: (sessionManager) => {
+			sessionManager.appendCustomEntry(RESET_MARKER_TYPE, { windowId: "pcw:missing:boot" });
+			sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "RAW_POST_MARKER_WORK" }], timestamp: Date.now() });
+		},
+		script: () => assistant(missingRaw, [{ type: "text", text: "must not be called normally" }]),
+	});
+	try {
+		assert.equal(missingRaw.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE).length, 0, "post-marker conversation blocks startup repair");
+		await missingRaw.session.prompt("MISSING_RAW_BOOT_SENTINEL");
+		await missingRaw.session.waitForIdle();
+		assert.equal(missingRaw.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE).length, 0, "later conversation without a boot is refused, not repaired");
+		assert.equal(missingRaw.streamSignals.at(-1), true);
+		assert.ok(missingRaw.streamContexts.at(-1)?.messages.every((message) => message.role === "system"));
+	} finally {
+		missingRaw.close();
+	}
+});
+
 test("real AgentSession: the complete system message and a changed tool loadout survive the reset projection", async () => {
 	let fixture!: Fixture;
 	fixture = await openFixture({
@@ -449,6 +526,135 @@ test("real AgentSession: overflow and recoverable length reset and retry once; r
 		assert.ok(repeated.events.some((event) => event.type === "compaction_end" && typeof event.errorMessage === "string"));
 	} finally {
 		repeated.close();
+	}
+});
+
+test("real AgentSession: queued success supersedes overflow recovery before settlement", { timeout: 15000 }, async () => {
+	let fixture!: Fixture;
+	let overflowTurnObserved = false;
+	let queuedRequestObserved = false;
+	fixture = await openFixture({
+		compactionEnabled: true,
+		hook: (pi) => {
+			pi.on("agent_end", (event) => {
+				const message = (event as { messages?: Array<{ stopReason?: string }> }).messages?.at(-1);
+				if (message?.stopReason === "error") {
+					overflowTurnObserved = true;
+					fixture.session.agent.followUp({
+						role: "user",
+						content: [{ type: "text", text: "QUEUED_AFTER_OVERFLOW" }],
+						timestamp: Date.now(),
+					});
+				}
+			});
+		},
+		script: (request, context) => {
+			if (text(context).includes("QUEUED_AFTER_OVERFLOW")) queuedRequestObserved = true;
+			if (request === 1) {
+				return assistant(fixture, [{ type: "text", text: "overflow before queued input" }], "error", { errorMessage: "Prompt too long: context exceeds maximum context length" });
+			}
+			return assistant(fixture, [{ type: "text", text: "queued success" }]);
+		},
+	});
+	try {
+		await fixture.session.prompt("OVERFLOW_WITH_QUEUED_INPUT_SENTINEL");
+		await fixture.session.waitForIdle();
+		assert.equal(overflowTurnObserved, true, "the scripted overflow actually reached turn_end");
+		assert.equal(queuedRequestObserved, true, "the queued success ran on the real AgentSession before settlement");
+		assert.equal(resetMarkers(fixture).length, 0, "a successful queued turn supersedes the pending overflow recovery");
+		assert.ok(fixture.requests.length >= 2, "the queued user input runs before settlement");
+		assert.equal(fixture.requests.filter((request) => text(request).includes("QUEUED_AFTER_OVERFLOW")).length, 1, "queued input is delivered once");
+	} finally {
+		fixture.close();
+	}
+});
+
+test("real AgentSession: concurrent trusted projects keep reserve and automatic policy isolated", { timeout: 20000 }, async () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "pi-context-shared-agent-"));
+	const notesRoot = mkdtempSync(join(tmpdir(), "pi-context-shared-notes-"));
+	const cwdAutomatic = mkdtempSync(join(tmpdir(), "pi-context-project-automatic-"));
+	const cwdModel = mkdtempSync(join(tmpdir(), "pi-context-project-model-"));
+	const cwdSession = mkdtempSync(join(tmpdir(), "pi-context-project-session-"));
+	writeFileSync(join(agentDir, "settings.json"), JSON.stringify({
+		compaction: { enabled: true, reserveTokens: 70_000, keepRecentTokens: 200 },
+		retry: { enabled: false },
+	}));
+	let automatic!: Fixture;
+	let modelInvalidated!: Fixture;
+	let sessionInvalidated!: Fixture;
+	const script = (fixture: () => Fixture, highUsage: { next: boolean }) => () => {
+		const response = assistant(fixture(), [{ type: "text", text: "policy isolation response" }], "stop", { usage: usage(highUsage.next ? 85_000 : 100) });
+		highUsage.next = false;
+		return response;
+	};
+	const automaticUsage = { next: true };
+	const modelUsage = { next: true };
+	const sessionUsage = { next: true };
+	try {
+		// All three sessions share one stable global settings root. Only their trusted
+		// project settings differ, so this cannot pass by rotating PI_CODING_AGENT_DIR.
+		automatic = await openFixture({
+			contextWindow: 100_000,
+			cwd: cwdAutomatic,
+			agentDir,
+			notesRoot,
+			writeSettings: false,
+			projectSettings: { compaction: { enabled: true, reserveTokens: 20_000 } },
+			script: script(() => automatic, automaticUsage),
+		});
+		modelInvalidated = await openFixture({
+			contextWindow: 100_000,
+			cwd: cwdModel,
+			agentDir,
+			notesRoot,
+			writeSettings: false,
+			projectSettings: { compaction: { enabled: false, reserveTokens: 80_000 } },
+			script: script(() => modelInvalidated, modelUsage),
+		});
+		sessionInvalidated = await openFixture({
+			contextWindow: 100_000,
+			cwd: cwdSession,
+			agentDir,
+			notesRoot,
+			writeSettings: false,
+			projectSettings: { compaction: { enabled: false, reserveTokens: 80_000 } },
+			script: script(() => sessionInvalidated, sessionUsage),
+		});
+
+		await Promise.all([
+			automatic.session.prompt("AUTOMATIC_POLICY_PROJECT"),
+			modelInvalidated.session.prompt("MODEL_POLICY_PROJECT"),
+			sessionInvalidated.session.prompt("SESSION_POLICY_PROJECT"),
+		]);
+		await Promise.all([automatic.session.waitForIdle(), modelInvalidated.session.waitForIdle(), sessionInvalidated.session.waitForIdle()]);
+		assert.equal(resetMarkers(automatic).length, 1, "the low reserve and enabled project resets automatically");
+		assert.equal(resetMarkers(modelInvalidated).length, 0, "the high reserve and disabled project does not reset");
+		assert.equal(resetMarkers(sessionInvalidated).length, 0, "the second high reserve and disabled session does not reset");
+
+		writeFileSync(join(cwdModel, ".pi", "settings.json"), JSON.stringify({ compaction: { enabled: true, reserveTokens: 20_000 } }));
+		modelUsage.next = true;
+		const changedModel = { ...modelInvalidated.model, id: `${modelInvalidated.model.id}-changed` };
+		modelInvalidated.model = changedModel;
+		await modelInvalidated.session.setModel(changedModel, { persist: false });
+		await modelInvalidated.session.prompt("MODEL_POLICY_AFTER_INVALIDATION");
+		await modelInvalidated.session.waitForIdle();
+		assert.equal(resetMarkers(modelInvalidated).length, 1, "model_select invalidates the instance policy cache");
+
+		writeFileSync(join(cwdSession, ".pi", "settings.json"), JSON.stringify({ compaction: { enabled: true, reserveTokens: 20_000 } }));
+		sessionUsage.next = true;
+		await sessionInvalidated.session.reload();
+		await sessionInvalidated.session.prompt("SESSION_POLICY_AFTER_INVALIDATION");
+		await sessionInvalidated.session.waitForIdle();
+		assert.equal(resetMarkers(sessionInvalidated).length, 1, "session reload invalidates the instance policy cache");
+	} finally {
+		sessionInvalidated?.close();
+		modelInvalidated?.close();
+		automatic?.close();
+		rmSync(agentDir, { recursive: true, force: true });
+		rmSync(notesRoot, { recursive: true, force: true });
+		rmSync(cwdAutomatic, { recursive: true, force: true });
+		rmSync(cwdModel, { recursive: true, force: true });
+		rmSync(cwdSession, { recursive: true, force: true });
 	}
 });
 

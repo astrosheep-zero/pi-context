@@ -1,13 +1,18 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { isContextOverflow, isRecoverableLength } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext, SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
+import type { AgentBeforeSettleEvent, ExtensionAPI, ExtensionContext, SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
 import { currentReset } from "./history.js";
-import { thresholdsFor } from "./thresholds.js";
-import { windowUsage } from "./context-window.js";
+
+type BudgetOwner = {
+	automaticResetEnabled: (ctx: ExtensionContext) => boolean;
+	resetDue: (ctx: ExtensionContext) => boolean;
+	consumeTurnEnd: (ctx: ExtensionContext) => SessionBoundaryDraft[];
+	clear: () => void;
+};
 
 type ResetOptions = {
 	isEnabled: () => boolean;
-	automaticResetEnabled: (ctx: ExtensionContext) => boolean;
+	budget: BudgetOwner;
 	buildReset: (ctx: ExtensionContext) => SessionBoundaryDraft[];
 };
 
@@ -43,41 +48,59 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 			return { entries: [...entries, ...options.buildReset(ctx)], continue: true as const };
 		} catch (error) {
 			ctx.ui.notify(`pi-context: could not build reset (${String(error)}).`, "warning");
-			return undefined;
+			// The incoming drafts and budget drafts are already valid work from this
+			// boundary. Preserve them, but do not claim a continuation when reset
+			// construction failed.
+			return entries.length > 0 ? { entries } : undefined;
 		}
-	};
-
-	const thresholdDue = (ctx: ExtensionContext): boolean => {
-		const usage = windowUsage(ctx);
-		if (!usage || usage.tokens === null) return false;
-		return usage.contextWindow - usage.tokens <= thresholdsFor(ctx).reserve;
 	};
 
 	pi.on("turn_end", (event, ctx) => {
 		if (!active) return undefined;
 		const requested = explicitRequested;
 		explicitRequested = false;
-		if (isAbort(event.message, event.outcome, ctx)) return undefined;
-		// Native overflow/length recovery is handled after turn_end through the bounded
-		// settle path; do not turn that failed response into a threshold reset.
-		if (isOverflowLike(event.message, ctx)) {
-			if (options.isEnabled() && options.automaticResetEnabled(ctx)) overflowPending = true;
-			return undefined;
+		const aborted = isAbort(event.message, event.outcome, ctx);
+		const stagedBudgetEntries = options.budget.consumeTurnEnd(ctx);
+		// Lifecycle owns whether drafts are acceptable for this turn. Budget only
+		// drains its instance-local staging, so aborts and disabled mode cannot commit it.
+		const budgetEntries = options.isEnabled() && !aborted ? stagedBudgetEntries : [];
+		const entries = [...(event.entries ?? []), ...budgetEntries];
+		if (aborted) {
+			overflowPending = false;
+			overflowRecoveryUsed = false;
+			return entries.length > 0 ? { entries } : undefined;
 		}
-		if (!options.isEnabled() || event.outcome === "error") return undefined;
-		overflowRecoveryUsed = false;
+		// Native overflow/length recovery is handled after turn_end through the bounded
+		// settle path; do not turn that failed response into a threshold reset. If Pi has
+		// already queued the next user message, the successful queued turn owns settlement
+		// and must supersede this stale failure.
+		if (isOverflowLike(event.message, ctx)) {
+			const queued = event.context.pendingMessages.length > 0 || ctx.hasPendingMessages();
+			overflowPending = !queued && options.isEnabled() && options.budget.automaticResetEnabled(ctx);
+			return entries.length > 0 ? { entries } : undefined;
+		}
+		// A successful turn, including one drained from Pi's queue, supersedes any
+		// older overflow failure before the settle boundary gets a chance to recover it.
+		if (event.outcome !== "error") {
+			overflowPending = false;
+			overflowRecoveryUsed = false;
+		}
+		if (!options.isEnabled() || event.outcome === "error") return entries.length > 0 ? { entries } : undefined;
 		// The completed response may be the first event whose persisted usage crosses the
 		// reserve, so a final assistant response does not defer the reset until another prompt.
-		const autoThreshold = options.automaticResetEnabled(ctx) && thresholdDue(ctx);
-		if (!requested && !autoThreshold) return undefined;
-		overflowPending = false;
-		return resetBoundaryResult(event.entries, ctx);
+		const autoThreshold = options.budget.resetDue(ctx);
+		if (!requested && !autoThreshold) return entries.length > 0 ? { entries } : undefined;
+		return resetBoundaryResult(entries, ctx);
 	});
 
-	pi.on("agent_before_settle", (event, ctx) => {
+	pi.on("agent_before_settle", (event: AgentBeforeSettleEvent, ctx) => {
 		if (!active || !overflowPending) return undefined;
+		// Pi invokes this boundary before settlement even when an agent_end handler has
+		// queued user input. Let that turn run first; its successful turn_end clears the
+		// stale failure, while another failure leaves the bounded recovery armed.
+		if (event.context.pendingMessages.length > 0 || ctx.hasPendingMessages()) return undefined;
 		overflowPending = false;
-		if (!options.isEnabled() || !options.automaticResetEnabled(ctx) || event.outcome === "aborted" || ctx.signal?.aborted) return undefined;
+		if (!options.isEnabled() || !options.budget.automaticResetEnabled(ctx) || event.outcome === "aborted" || ctx.signal?.aborted) return undefined;
 		if (overflowRecoveryUsed) return undefined;
 		overflowRecoveryUsed = true;
 		return resetBoundaryResult(event.entries, ctx);
@@ -109,7 +132,7 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 	});
 	pi.on("session_start", () => { clear(); active = true; });
 	pi.on("session_tree", clear);
-	pi.on("session_shutdown", () => { clear(); active = false; });
+	pi.on("session_shutdown", () => { clear(); options.budget.clear(); active = false; });
 
 	return {
 		request() {
