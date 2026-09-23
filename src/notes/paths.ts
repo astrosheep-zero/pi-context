@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, renameSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, renameSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export type Scope = "session" | "project" | "human" | "agent" | "model";
@@ -18,13 +18,44 @@ export function sessionHomesRoot(home = notesRoot()): string {
 }
 
 /**
- * Absolute git root for `cwd`, walking upward until a directory holds a `.git` entry.
+ * Repository root behind one `.git` entry. A `.git` directory is the main checkout
+ * itself. A `.git` file is a worktree or submodule pointer: a linked worktree names
+ * `<main>/.git/worktrees/<name>` and resolves to `<main>`, so every worktree of one
+ * repository shares one project identity. Submodules, bare repositories, and separate
+ * git dirs keep the current directory.
+ */
+function repositoryRoot(dir: string): string {
+	let stats;
+	try {
+		stats = statSync(join(dir, ".git"));
+	} catch {
+		return dir;
+	}
+	if (stats.isDirectory()) return dir;
+	let pointer: string;
+	try {
+		pointer = readFileSync(join(dir, ".git"), "utf8");
+	} catch {
+		return dir;
+	}
+	const match = /^gitdir:\s*(.+)$/m.exec(pointer);
+	if (!match) return dir;
+	const parts = resolve(dir, match[1]!.trim()).split(sep);
+	const worktrees = parts.lastIndexOf("worktrees");
+	if (worktrees <= 0 || worktrees !== parts.length - 2) return dir;
+	const common = parts.slice(0, worktrees).join(sep);
+	return basename(common) === ".git" ? dirname(common) : dir;
+}
+
+/**
+ * Absolute repository root for `cwd`, walking upward until a directory holds a `.git`
+ * entry and then resolving that entry to the main checkout.
  * No git root yields undefined, which projectKey then replaces with the cwd itself.
  */
 function gitRoot(cwd: string): string | undefined {
 	let dir = resolve(cwd);
 	for (;;) {
-		if (existsSync(join(dir, ".git"))) return dir;
+		if (existsSync(join(dir, ".git"))) return repositoryRoot(dir);
 		const parent = dirname(dir);
 		if (parent === dir) return undefined;
 		dir = parent;

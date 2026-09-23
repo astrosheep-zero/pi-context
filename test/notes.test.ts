@@ -7,7 +7,8 @@
  * HERMETIC: every test points PI_NOTES_HOME at its own temp root; no real ~/.agents is touched.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -144,6 +145,25 @@ test("session-note project ownership is per note, persistent across sessions, an
 	await call(firstCaptured, "notes_write", { path: "project-note.md", content: "project home note", scope: "project" }, movedContext);
 	assert.equal(parseNote(readFileSync(physicalPath("project", "project-note.md", movedContext), "utf8")).meta.project, undefined, "project-home notes do not receive session ownership metadata");
 	assert.equal(listNotes(movedContext, { scope: "session" }).length, 2, "project ownership remains frontmatter, not a separate note");
+});
+
+test("linked git worktrees share the main checkout's project key", () => {
+	freshRoot();
+	// realpath keeps the fixture's gitdir pointer and the asserted paths on one spelling
+	// (macOS temp roots live under the /var -> /private/var symlink).
+	const root = realpathSync(testEnvironment.cwd);
+	const main = join(root, "repo");
+	mkdirSync(main, { recursive: true });
+	const git = (args: string[]): void => {
+		execFileSync("git", ["-c", "user.email=test@test", "-c", "user.name=test", ...args], { cwd: main, stdio: "ignore" });
+	};
+	git(["init", "-q"]);
+	git(["commit", "-q", "--allow-empty", "-m", "init"]);
+	const worktree = join(root, "wt");
+	git(["worktree", "add", "-q", "--detach", worktree]);
+	assert.equal(projectKey(worktree), projectKey(main), "a linked worktree resolves to the main checkout's key");
+	assert.equal(projectKey(join(worktree, "gone", "deeper")), projectKey(main), "a nonexistent subdirectory still resolves through its worktree");
+	assert.equal(scopeDir("project", context(manager(), undefined, undefined, true, worktree)), scopeDir("project", context(manager(), undefined, undefined, true, main)), "@project uses the same physical home from both checkouts");
 });
 
 test("legacy and invalid session project metadata stays unknown without read/write backfill", async () => {
