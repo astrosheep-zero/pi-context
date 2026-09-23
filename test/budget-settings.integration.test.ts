@@ -127,7 +127,8 @@ test("an invalid reminder margin degrades to its default with one warning and ne
 	assert.equal(notices.length, 1, "one warning for the offending key");
 	assert.equal(notices[0]?.type, "warning");
 	assert.match(notices[0]?.message ?? "", /reminderMarginTokens/);
-	assert.match(notices[0]?.message ?? "", /24576/);
+	assert.match(notices[0]?.message ?? "", /default reminder margin/);
+	assert.equal(/\d+\s*k?\s*(remaining|tokens)/i.test(notices[0]?.message ?? ""), false, "UI notices do not expose token counts");
 
 	const window = 200_000;
 	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);

@@ -20,8 +20,8 @@ export function sendContinuation(pi: ExtensionAPI): void {
 }
 
 /**
- * The closed, ordered reset shape: marker, matching boot, continuation. This is the one
- * source of the reset message and the one place that mints the new window identity.
+ * The closed, ordered reset shape: retain-none native checkpoint, marker, matching boot,
+ * continuation. This is the one source of the reset message and new window identity.
  */
 export function buildResetDrafts(ctx: ExtensionContext, notifyIncompleteNotes?: IncompleteNotesNotifier) {
 	const sessionPrefix = ctx.sessionManager.getSessionId().slice(0, 8);
@@ -34,25 +34,11 @@ export function buildResetDrafts(ctx: ExtensionContext, notifyIncompleteNotes?: 
 	} while (usedWindowIds.has(windowId));
 	const boot = buildBootMessage(ctx, windowId, currentWindowId(ctx), notifyIncompleteNotes);
 	return [
+		{ type: "compaction", summary: "", firstKeptEntryId: null },
 		{ type: "custom", customType: RESET_MARKER_TYPE, data: { windowId } },
 		{ type: "custom_message", customType: BOOT_TYPE, content: boot.content, display: false, details: { windowId } },
 		{ type: "custom_message", customType: CONTINUATION_TYPE, content: CONTINUATION, display: false },
-	] satisfies [SessionBoundaryDraft, SessionBoundaryDraft, SessionBoundaryDraft];
-}
-
-/** Persist the marker and send both hidden reset messages; returns the new window id. */
-export function persistManualReset(pi: ExtensionAPI, ctx: ExtensionContext, notifyIncompleteNotes?: IncompleteNotesNotifier): string {
-	const [marker, boot, continuation] = buildResetDrafts(ctx, notifyIncompleteNotes);
-	pi.appendEntry(marker.customType, marker.data);
-	pi.sendMessage(
-		{ customType: boot.customType, content: boot.content, display: boot.display, details: boot.details },
-		{ triggerTurn: false },
-	);
-	pi.sendMessage(
-		{ customType: continuation.customType, content: continuation.content, display: continuation.display },
-		{ triggerTurn: false },
-	);
-	return boot.details.windowId;
+	] satisfies [SessionBoundaryDraft, SessionBoundaryDraft, SessionBoundaryDraft, SessionBoundaryDraft];
 }
 
 /**

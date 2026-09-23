@@ -120,23 +120,26 @@ function appendDrafts(sessionManager: SessionManager, entries: SessionBoundaryDr
 
 function turnEndFacts(overrides: Partial<ResetTurnEndFacts> = {}): ResetTurnEndFacts {
 	return {
+		windowId: "pcw:test:window",
 		aborted: false,
 		overflow: false,
 		failed: false,
 		enabled: true,
 		queued: false,
 		automaticResetEnabled: true,
-		thresholdDue: false,
+		hardReserveDue: false,
 		...overrides,
 	};
 }
 
 function beforeSettleFacts(overrides: Partial<ResetBeforeSettleFacts> = {}): ResetBeforeSettleFacts {
 	return {
+		windowId: "pcw:test:window",
 		queued: false,
 		enabled: true,
 		automaticResetEnabled: true,
 		aborted: false,
+		failed: false,
 		...overrides,
 	};
 }
@@ -171,14 +174,15 @@ test("public reset boundary drafts one marker, one boot, and one continuation af
 	assert.equal(markerDrafts.length, 1, "duplicate wipe requests in one turn dedupe");
 	assert.equal(bootDrafts.length, 1);
 	assert.equal(boundary.entries[0]?.type, "custom_message", "ordinary tool-batch entries precede the reset drafts");
-	assert.equal(boundary.entries[1]?.type, "custom");
-	assert.equal(boundary.entries[2]?.type, "custom_message");
+	assert.equal(boundary.entries[1]?.type, "compaction", "native retain-none checkpoint precedes the reset marker");
+	assert.equal(boundary.entries[2]?.type, "custom");
+	assert.equal(boundary.entries[3]?.type, "custom_message");
 	const windowId = (markerDrafts[0] as { data: { windowId: string } }).data.windowId;
 	assert.match(windowId, /^pcw:/);
 	assert.equal((bootDrafts[0] as { details: { windowId: string } }).details.windowId, windowId);
 	const continuationDrafts = boundary.entries.filter((entry) => entry.type === "custom_message" && entry.customType === internal.CONTINUATION_TYPE);
 	assert.equal(continuationDrafts.length, 1, "the boundary persists exactly one reset message");
-	assert.equal(boundary.entries[3]?.type, "custom_message", "the continuation closes the ordered reset shape");
+	assert.equal(boundary.entries[4]?.type, "custom_message", "the continuation closes the ordered reset shape");
 	appendDrafts(h.sessionManager, boundary.entries);
 	const branch = h.sessionManager.getBranch();
 	assert.deepEqual(branch.filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE).map((entry) => entry.type === "custom" ? entry.data : undefined), [{ windowId }]);
@@ -205,12 +209,14 @@ test("off stops future automatic/manual reset requests while an existing marker 
 	assert.equal(afterOff.entries.length, 0, "off does not create another reset");
 	await h.runCommand("pi-context", "on");
 	await h.runCommand("wipe-memory");
-	assert.equal(h.sent.length, 2, "/wipe-memory writes one hidden boot and one continuation without a model turn");
-	assert.equal(h.sent[0]?.triggerTurn, false);
-	assert.equal(h.sent[0]?.customType, internal.BOOT_TYPE);
-	assert.equal(h.sent[1]?.customType, internal.CONTINUATION_TYPE);
+	assert.equal(h.sent.length, 1, "/wipe-memory sends one hidden close-out warning and starts a normal turn");
+	assert.equal(h.sent[0]?.triggerTurn, true);
+	assert.equal(h.sent[0]?.customType, internal.WARNING_TYPE);
+	const warning = h.sessionManager.getBranch().find((entry) => entry.type === "custom_message" && entry.customType === internal.WARNING_TYPE);
+	assert.ok(warning && warning.type === "custom_message");
+	assert.equal(warning.content, internal.WARNING_CONTENT);
 	const markers = h.sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
-	assert.equal(markers.length, 2, "off does not resurrect history; re-enabled wipe-memory creates the explicit new marker");
+	assert.equal(markers.length, 1, "manual command waits for an agent boundary; it does not persist an immediate reset");
 });
 
 test("reset construction failure preserves incoming and budget drafts without continuation", async () => {
@@ -237,13 +243,13 @@ test("reset construction failure preserves incoming and budget drafts without co
 		isEnabled: () => true,
 		budget: {
 			automaticResetEnabled: () => true,
-			resetDue: () => false,
+			hardReserveDue: () => false,
 			consumeTurnEnd: () => [budgetDraft],
 			clear: () => {},
 		},
 		buildReset: () => { throw new Error("synthetic reset construction failure"); },
 	});
-	lifecycle.request();
+	lifecycle.request(`pcw:${sessionManager.getSessionId().slice(0, 8)}:root`);
 	const incoming: SessionBoundaryDraft = { type: "custom_message", customType: "foreign/boundary", content: "foreign draft", display: false };
 	const results = [];
 	for (const handler of handlers.get("turn_end") ?? []) results.push(await handler(fakeBoundaryEvent([incoming]), ctx));
@@ -277,7 +283,7 @@ test("a queued success clears an overflow failure before settle recovery can res
 		isEnabled: () => true,
 		budget: {
 			automaticResetEnabled: () => true,
-			resetDue: () => false,
+			hardReserveDue: () => false,
 			consumeTurnEnd: () => [],
 			clear: () => {},
 		},
@@ -308,70 +314,71 @@ test("a queued success clears an overflow failure before settle recovery can res
 	assert.equal(resetCount, 0);
 });
 
-test("reset-control: an explicit request deduplicates and is consumed at the turn boundary", () => {
-	const idle = Object.freeze({ ...initialResetControl() });
-	const first = reduceResetControl(idle, { type: "request" });
-	assert.equal(first.effect, "requested");
-	assert.deepEqual(first.state, { request: "explicit", overflow: "idle" });
-
-	const again = reduceResetControl(first.state, { type: "request" });
-	assert.equal(again.effect, "already-requested");
-	assert.deepEqual(again.state, first.state, "a duplicate request does not change state");
-
-	const committed = reduceResetControl(again.state, { type: "turn_end", facts: turnEndFacts() });
-	assert.equal(committed.effect, "commit-boundary");
-	assert.deepEqual(committed.state, initialResetControl(), "the request is consumed whether or not it commits");
+test("reset-control: close-out phases deduplicate, span turns, and upgrade to a tool commit", () => {
+	const windowId = "pcw:test:window";
+	const first = reduceResetControl(initialResetControl(), { type: "close_out", windowId, source: "manual" });
+	assert.equal(first.effect, "close-out-armed");
+	assert.deepEqual(first.state.request, { phase: "close-out", windowId, source: "manual" });
+	const duplicate = reduceResetControl(first.state, { type: "close_out", windowId, source: "manual" });
+	assert.equal(duplicate.effect, "already-pending");
+	const noteTurn = reduceResetControl(first.state, { type: "turn_end", facts: turnEndFacts() });
+	assert.equal(noteTurn.effect, "none");
+	assert.deepEqual(noteTurn.state.request, first.state.request, "note/tool turns do not consume close-out");
+	const tool = reduceResetControl(noteTurn.state, { type: "tool_request", windowId });
+	assert.deepEqual(tool.state.request, { phase: "tool-requested", windowId });
+	const commit = reduceResetControl(tool.state, { type: "turn_end", facts: turnEndFacts() });
+	assert.equal(commit.effect, "commit-boundary");
+	assert.deepEqual(commit.state, initialResetControl());
 });
 
-test("reset-control: turn_end commits explicit and threshold resets, and skips disabled or failed turns", () => {
-	const explicit = reduceResetControl({ request: "explicit", overflow: "idle" }, { type: "turn_end", facts: turnEndFacts() });
-	assert.equal(explicit.effect, "commit-boundary");
+test("reset-control: fallback is normal-stop only; hard reserve remains safety", () => {
+	const windowId = "pcw:test:window";
+	const manual = reduceResetControl(initialResetControl(), { type: "close_out", windowId, source: "manual" }).state;
+	const fallback = reduceResetControl(manual, { type: "before_settle", facts: beforeSettleFacts() });
+	assert.equal(fallback.effect, "commit-boundary", "manual close-out works even when automatic resets are disabled");
+	assert.deepEqual(fallback.state, initialResetControl());
 
-	const threshold = reduceResetControl(initialResetControl(), { type: "turn_end", facts: turnEndFacts({ thresholdDue: true }) });
-	assert.equal(threshold.effect, "commit-boundary");
+	const automatic = reduceResetControl(initialResetControl(), { type: "close_out", windowId, source: "automatic" }).state;
+	const disabledAuto = reduceResetControl(automatic, { type: "before_settle", facts: beforeSettleFacts({ automaticResetEnabled: false }) });
+	assert.equal(disabledAuto.effect, "none");
+	assert.deepEqual(disabledAuto.state, initialResetControl());
 
-	const neither = reduceResetControl(initialResetControl(), { type: "turn_end", facts: turnEndFacts() });
-	assert.equal(neither.effect, "none");
-
-	const disabled = reduceResetControl({ request: "explicit", overflow: "idle" }, { type: "turn_end", facts: turnEndFacts({ enabled: false, thresholdDue: true }) });
-	assert.equal(disabled.effect, "none");
-	assert.deepEqual(disabled.state, initialResetControl(), "a disabled turn drops the explicit request without committing");
-
-	const failed = reduceResetControl({ request: "explicit", overflow: "idle" }, { type: "turn_end", facts: turnEndFacts({ failed: true, thresholdDue: true }) });
-	assert.equal(failed.effect, "none");
-	assert.deepEqual(failed.state, initialResetControl());
+	const safety = reduceResetControl(initialResetControl(), { type: "turn_end", facts: turnEndFacts({ hardReserveDue: true }) });
+	assert.equal(safety.effect, "commit-boundary");
+	for (const outcome of [{ failed: true }, { aborted: true }]) {
+		const notNormalStop = reduceResetControl(manual, { type: "before_settle", facts: beforeSettleFacts(outcome) });
+		assert.equal(notNormalStop.effect, "none");
+		assert.deepEqual(notNormalStop.state, initialResetControl());
+	}
+	assert.deepEqual(reduceResetControl(manual, { type: "settled" }).state, initialResetControl());
 });
 
-test("reset-control: aborted turns clear the boundary, settlement keeps only an explicit request", () => {
-	const both: ResetControlState = { request: "explicit", overflow: "pending" };
-
-	const aborted = reduceResetControl(both, { type: "turn_end", facts: turnEndFacts({ aborted: true }) });
+test("reset-control: abort and lifecycle transitions clear every pending phase", () => {
+	const windowId = "pcw:test:window";
+	const pending = reduceResetControl(initialResetControl(), { type: "close_out", windowId, source: "manual" }).state;
+	const aborted = reduceResetControl(pending, { type: "turn_end", facts: turnEndFacts({ aborted: true }) });
 	assert.equal(aborted.effect, "none");
-	assert.deepEqual(aborted.state, initialResetControl(), "an abort manufactures no continuation");
-
-	const settled = reduceResetControl(both, { type: "settled" });
-	assert.deepEqual(settled.state, { request: "explicit", overflow: "idle" }, "settlement ends the failure chain only");
-
-	const cleared = reduceResetControl(both, { type: "clear" });
-	assert.deepEqual(cleared.state, initialResetControl());
+	assert.deepEqual(aborted.state, initialResetControl());
+	assert.deepEqual(reduceResetControl(pending, { type: "clear" }).state, initialResetControl());
+	assert.deepEqual(reduceResetControl(pending, { type: "settled" }).state, initialResetControl());
 });
 
 test("reset-control: overflow recovery is armed at turn_end and spent exactly once at settle", () => {
 	const armed = reduceResetControl(initialResetControl(), { type: "turn_end", facts: turnEndFacts({ overflow: true, failed: true }) });
-	assert.deepEqual(armed.state, { request: "none", overflow: "pending" });
+	assert.deepEqual(armed.state, { request: { phase: "none" }, overflow: "pending" });
 
 	const recovered = reduceResetControl(armed.state, { type: "before_settle", facts: beforeSettleFacts() });
 	assert.equal(recovered.effect, "recover-overflow", "the first settle commits the bounded recovery");
-	assert.deepEqual(recovered.state, { request: "none", overflow: "spent" });
+	assert.deepEqual(recovered.state, { request: { phase: "none" }, overflow: "spent" });
 
 	const repeated = reduceResetControl(recovered.state, { type: "before_settle", facts: beforeSettleFacts() });
 	assert.equal(repeated.effect, "none", "a spent recovery is never retried");
 
 	const rearmed = reduceResetControl(recovered.state, { type: "turn_end", facts: turnEndFacts({ overflow: true, failed: true }) });
-	assert.deepEqual(rearmed.state, { request: "none", overflow: "pending-spent" });
+	assert.deepEqual(rearmed.state, { request: { phase: "none" }, overflow: "pending-spent" });
 	const bounded = reduceResetControl(rearmed.state, { type: "before_settle", facts: beforeSettleFacts() });
 	assert.equal(bounded.effect, "none", "a second failure chain stays bounded to the spent attempt");
-	assert.deepEqual(bounded.state, { request: "none", overflow: "spent" });
+	assert.deepEqual(bounded.state, { request: { phase: "none" }, overflow: "spent" });
 });
 
 test("reset-control: a queued turn defers recovery and its success supersedes the failure", () => {
@@ -389,69 +396,44 @@ test("reset-control: disabled mode and explicit aborts disarm overflow without a
 
 	const disabled = reduceResetControl(armed, { type: "before_settle", facts: beforeSettleFacts({ enabled: false }) });
 	assert.equal(disabled.effect, "none");
-	assert.deepEqual(disabled.state, { request: "none", overflow: "idle" });
+	assert.deepEqual(disabled.state, { request: { phase: "none" }, overflow: "idle" });
 
 	const automaticOff = reduceResetControl(armed, { type: "before_settle", facts: beforeSettleFacts({ automaticResetEnabled: false }) });
 	assert.equal(automaticOff.effect, "none");
-	assert.deepEqual(automaticOff.state, { request: "none", overflow: "idle" });
+	assert.deepEqual(automaticOff.state, { request: { phase: "none" }, overflow: "idle" });
 
 	const aborted = reduceResetControl(armed, { type: "before_settle", facts: beforeSettleFacts({ aborted: true }) });
 	assert.equal(aborted.effect, "none");
-	assert.deepEqual(aborted.state, { request: "none", overflow: "idle" });
+	assert.deepEqual(aborted.state, { request: { phase: "none" }, overflow: "idle" });
 });
 
-test("reset-control: policy guards are consulted only in the branches that need them", () => {
-	const tracked = (overrides: {
-		aborted?: boolean;
-		overflow?: boolean;
-		failed?: boolean;
-		enabled?: boolean;
-		queuedResult?: boolean;
-		automaticResult?: boolean;
-		thresholdResult?: boolean;
-	}) => {
-		const calls = { queued: 0, automatic: 0, threshold: 0 };
-		const facts: ResetTurnEndFacts = {
-			aborted: overrides.aborted ?? false,
-			overflow: overrides.overflow ?? false,
-			failed: overrides.failed ?? false,
-			enabled: overrides.enabled ?? true,
-			get queued() { calls.queued += 1; return overrides.queuedResult ?? false; },
-			get automaticResetEnabled() { calls.automatic += 1; return overrides.automaticResult ?? true; },
-			get thresholdDue() { calls.threshold += 1; return overrides.thresholdResult ?? true; },
-		};
-		return { facts, calls };
+test("reset-control: lazy guards preserve overflow policy ordering", () => {
+	const calls = { queued: 0, automatic: 0, hardReserve: 0 };
+	const facts: ResetTurnEndFacts = {
+		windowId: "pcw:test:window",
+		aborted: false,
+		overflow: true,
+		failed: true,
+		enabled: true,
+		get queued() { calls.queued += 1; return false; },
+		get automaticResetEnabled() { calls.automatic += 1; return true; },
+		get hardReserveDue() { calls.hardReserve += 1; return true; },
 	};
-
-	const aborted = tracked({ aborted: true });
-	reduceResetControl(initialResetControl(), { type: "turn_end", facts: aborted.facts });
-	assert.deepEqual(aborted.calls, { queued: 0, automatic: 0, threshold: 0 }, "an abort consults no policy guard");
-
-	const failed = tracked({ failed: true });
-	reduceResetControl(initialResetControl(), { type: "turn_end", facts: failed.facts });
-	assert.deepEqual(failed.calls, { queued: 0, automatic: 0, threshold: 0 }, "a failed turn consults no threshold guard");
-
-	const disabled = tracked({ enabled: false });
-	reduceResetControl(initialResetControl(), { type: "turn_end", facts: disabled.facts });
-	assert.deepEqual(disabled.calls, { queued: 0, automatic: 0, threshold: 0 }, "a disabled turn consults no threshold guard");
-
-	const overflow = tracked({ overflow: true, queuedResult: false });
-	reduceResetControl(initialResetControl(), { type: "turn_end", facts: overflow.facts });
-	assert.deepEqual(overflow.calls, { queued: 1, automatic: 1, threshold: 0 }, "an overflow turn consults only the overflow guards");
-
-	const complete = tracked({ thresholdResult: false });
-	reduceResetControl(initialResetControl(), { type: "turn_end", facts: complete.facts });
-	assert.deepEqual(complete.calls, { queued: 0, automatic: 0, threshold: 1 }, "a completed turn consults only the threshold guard");
+	reduceResetControl(initialResetControl(), { type: "turn_end", facts });
+	assert.deepEqual(calls, { queued: 1, automatic: 1, hardReserve: 0 }, "overflow checks never consult hard-reserve policy");
 
 	const settleCalls = { queued: 0, enabled: 0, automatic: 0 };
 	const settleFacts: ResetBeforeSettleFacts = {
+		windowId: "pcw:test:window",
 		get queued() { settleCalls.queued += 1; return true; },
 		get enabled() { settleCalls.enabled += 1; return true; },
 		get automaticResetEnabled() { settleCalls.automatic += 1; return true; },
 		aborted: false,
+		failed: false,
 	};
-	reduceResetControl({ request: "none", overflow: "pending" }, { type: "before_settle", facts: settleFacts });
-	assert.deepEqual(settleCalls, { queued: 1, enabled: 0, automatic: 0 }, "a queued settle consults only the pending-message guard");
+	const pendingOverflow = reduceResetControl(initialResetControl(), { type: "turn_end", facts: turnEndFacts({ overflow: true, failed: true }) }).state;
+	reduceResetControl(pendingOverflow, { type: "before_settle", facts: settleFacts });
+	assert.deepEqual(settleCalls, { queued: 1, enabled: 0, automatic: 0 }, "queued settle checks no further overflow policy");
 });
 
 test("a committed reset places incoming and budget drafts before marker -> boot -> continuation", async () => {
@@ -478,29 +460,32 @@ test("a committed reset places incoming and budget drafts before marker -> boot 
 		isEnabled: () => true,
 		budget: {
 			automaticResetEnabled: () => true,
-			resetDue: () => false,
+			hardReserveDue: () => false,
 			consumeTurnEnd: () => [budgetDraft],
 			clear: () => {},
 		},
 		buildReset: () => [
+			{ type: "compaction", summary: "", firstKeptEntryId: null },
 			{ type: "custom", customType: internal.RESET_MARKER_TYPE, data: { windowId } },
 			{ type: "custom_message", customType: internal.BOOT_TYPE, content: "boot", display: false, details: { windowId } },
 			{ type: "custom_message", customType: internal.CONTINUATION_TYPE, content: "continuation", display: false },
 		],
 	});
-	lifecycle.request();
+	lifecycle.request(`pcw:${sessionManager.getSessionId().slice(0, 8)}:root`);
 	const incoming: SessionBoundaryDraft = { type: "custom_message", customType: "foreign/boundary", content: "incoming", display: false };
 	const results = [];
 	for (const handler of handlers.get("turn_end") ?? []) results.push(await handler(fakeBoundaryEvent([incoming]), ctx));
 	const result = resultEntries(results);
 	assert.equal(result.continue, true);
 	const customTypes = (entries: readonly { readonly type: string; readonly customType?: string }[]) => entries.map((entry) => {
-		assert.ok(entry.type === "custom" || entry.type === "custom_message", "the boundary only carries named reset drafts here");
+		if (entry.type === "compaction") return "native-compaction";
+		assert.ok(entry.type === "custom" || entry.type === "custom_message", "the boundary only carries expected reset drafts here");
 		return entry.customType;
 	});
 	assert.deepEqual(customTypes(result.entries), [
 		"foreign/boundary",
 		internal.GUIDANCE_TYPE,
+		"native-compaction",
 		internal.RESET_MARKER_TYPE,
 		internal.BOOT_TYPE,
 		internal.CONTINUATION_TYPE,
@@ -508,7 +493,12 @@ test("a committed reset places incoming and budget drafts before marker -> boot 
 	appendDrafts(sessionManager, result.entries);
 	const branch = sessionManager.getBranch();
 	const markerIndex = branch.findIndex((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
-	assert.ok(markerIndex >= 0);
+	assert.ok(markerIndex > 0);
+	assert.equal(branch[markerIndex - 1]?.type, "compaction", "the checkpoint is directly before the marker");
+	const checkpoint = branch[markerIndex - 1];
+	assert.ok(checkpoint?.type === "compaction");
+	assert.equal(checkpoint.summary, "");
+	assert.equal(checkpoint.firstKeptEntryId, checkpoint.id, "Pi materializes null as retain-none");
 	assert.deepEqual(customTypes(branch.slice(markerIndex)), [
 		internal.RESET_MARKER_TYPE,
 		internal.BOOT_TYPE,

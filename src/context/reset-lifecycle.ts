@@ -1,11 +1,11 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { isContextOverflow, isRecoverableLength } from "@earendil-works/pi-ai";
 import type { AgentBeforeSettleEvent, ExtensionAPI, ExtensionContext, SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
-import { currentReset } from "./context-window.js";
+import { currentReset, currentWindowId } from "./context-window.js";
 
 type BudgetOwner = {
 	automaticResetEnabled: (ctx: ExtensionContext) => boolean;
-	resetDue: (ctx: ExtensionContext) => boolean;
+	hardReserveDue: (ctx: ExtensionContext) => boolean;
 	consumeTurnEnd: (ctx: ExtensionContext) => SessionBoundaryDraft[];
 	clear: () => void;
 };
@@ -26,79 +26,59 @@ function isOverflowLike(message: AgentMessage, ctx: ExtensionContext): boolean {
 		(ctx.model !== undefined && isRecoverableLength(message, ctx.model.maxTokens));
 }
 
-/**
- * Reset-control state. The concern is split into two independent, explicitly typed axes so
- * that no combination of independently combinable lifecycle booleans is legal by accident:
- *
- * - `request` is the single pending explicit wipe request ("none" or "explicit"). Repeated
- *   requests deduplicate while one is pending.
- * - `overflow` is the bounded provider-overflow recovery chain:
- *   - "idle"          no overflow failure is pending; recovery is available for a later chain.
- *   - "pending"       an overflow failure is pending; recovery is still available.
- *   - "pending-spent" an overflow failure is pending, but recovery was already spent this chain.
- *   - "spent"         recovery was spent and the failure is no longer pending.
- *
- * All eight combinations of the two axes are reachable (a request may arrive while an overflow
- * chain is pending, spent, or settled), and each has a defined transition. There is no state
- * whose fields silently contradict one another.
- */
-export type ResetRequestPhase = "none" | "explicit";
+export type ResetRequestSource = "manual" | "automatic";
+export type ResetRequest =
+	| { readonly phase: "none" }
+	| { readonly phase: "close-out"; readonly windowId: string; readonly source: ResetRequestSource }
+	| { readonly phase: "tool-requested"; readonly windowId: string };
 export type ResetOverflowPhase = "idle" | "pending" | "pending-spent" | "spent";
 
 export interface ResetControlState {
-	readonly request: ResetRequestPhase;
+	readonly request: ResetRequest;
 	readonly overflow: ResetOverflowPhase;
 }
 
+const NO_REQUEST: ResetRequest = { phase: "none" };
+
 export function initialResetControl(): ResetControlState {
-	return { request: "none", overflow: "idle" };
+	return { request: NO_REQUEST, overflow: "idle" };
 }
 
-/**
- * Facts for a completed turn. The three `get`-supplied fields are guards the adapter resolves
- * lazily: the reducer reads each one only in the branch where the previous adapter consulted it,
- * so policy resolution and pending-message probes keep their original call ordering.
- */
+/** Facts for a completed turn. Guard values stay lazy to preserve policy resolution order. */
 export interface ResetTurnEndFacts {
+	readonly windowId: string;
 	readonly aborted: boolean;
 	readonly overflow: boolean;
 	readonly failed: boolean;
 	readonly enabled: boolean;
 	readonly queued: boolean;
 	readonly automaticResetEnabled: boolean;
-	readonly thresholdDue: boolean;
+	readonly hardReserveDue: boolean;
 }
 
 /** Facts for the pre-settlement boundary; policy guards stay lazy for the same reason. */
 export interface ResetBeforeSettleFacts {
+	readonly windowId: string;
 	readonly queued: boolean;
 	readonly enabled: boolean;
 	readonly automaticResetEnabled: boolean;
 	readonly aborted: boolean;
+	readonly failed: boolean;
 }
 
 export type ResetControlEvent =
-	| { readonly type: "request" }
+	| { readonly type: "close_out"; readonly windowId: string; readonly source: ResetRequestSource }
+	| { readonly type: "tool_request"; readonly windowId: string }
 	| { readonly type: "turn_end"; readonly facts: ResetTurnEndFacts }
 	| { readonly type: "before_settle"; readonly facts: ResetBeforeSettleFacts }
 	| { readonly type: "settled" }
 	| { readonly type: "abort" }
 	| { readonly type: "clear" };
 
-/**
- * The requested effect of a transition. Effects are named, not performed: marker/boot/
- * continuation writes, continuation requests, and UI notices stay in the adapter.
- *
- * - "none"              keep any return value to the drafts already collected for this event.
- * - "requested"         a new explicit reset request was recorded.
- * - "already-requested" a request was already pending and was deduplicated.
- * - "commit-boundary"   build and commit the reset boundary now (turn_end).
- * - "recover-overflow"  build and commit the one bounded overflow recovery now (settle).
- */
 export type ResetControlEffect =
 	| "none"
-	| "requested"
-	| "already-requested"
+	| "close-out-armed"
+	| "already-pending"
 	| "commit-boundary"
 	| "recover-overflow";
 
@@ -107,59 +87,77 @@ export interface ResetControlResult {
 	readonly effect: ResetControlEffect;
 }
 
-/**
- * Pure reset-control transition. It performs no writes, no policy resolution of its own, and
- * no UI work; every fact it reads is supplied by the caller. Callers can therefore drive the
- * full transition table without a live Pi session.
- */
+function requestForWindow(request: ResetRequest, windowId: string): ResetRequest {
+	return request.phase !== "none" && request.windowId === windowId ? request : NO_REQUEST;
+}
+
+/** Pure reset-control transitions: request phases own close-out, tool commit, and fallback. */
 export function reduceResetControl(state: ResetControlState, event: ResetControlEvent): ResetControlResult {
 	switch (event.type) {
-		case "request": {
-			if (state.request === "explicit") return { state, effect: "already-requested" };
-			return { state: { ...state, request: "explicit" }, effect: "requested" };
+		case "close_out": {
+			const request = state.request;
+			if (request.phase === "tool-requested" && request.windowId === event.windowId) {
+				return { state, effect: "already-pending" };
+			}
+			if (request.phase === "close-out" && request.windowId === event.windowId) {
+				if (request.source === "manual" || event.source === "automatic") return { state, effect: "already-pending" };
+				return { state: { ...state, request: { ...request, source: "manual" } }, effect: "close-out-armed" };
+			}
+			return { state: { ...state, request: { phase: "close-out", windowId: event.windowId, source: event.source } }, effect: "close-out-armed" };
+		}
+		case "tool_request": {
+			const request = state.request;
+			if (request.phase === "tool-requested" && request.windowId === event.windowId) return { state, effect: "already-pending" };
+			return { state: { ...state, request: { phase: "tool-requested", windowId: event.windowId } }, effect: "close-out-armed" };
 		}
 		case "turn_end": {
 			const facts = event.facts;
-			const requested = state.request === "explicit";
-			// The explicit request is consumed by the turn boundary whether or not it commits.
-			const request: ResetRequestPhase = "none";
-			if (facts.aborted) {
-				// An aborted turn drops the whole boundary: no explicit request, no overflow chain.
-				return { state: { request, overflow: "idle" }, effect: "none" };
-			}
+			const request = requestForWindow(state.request, facts.windowId);
+			if (facts.aborted) return { state: initialResetControl(), effect: "none" };
 			if (facts.overflow) {
-				// A failure that Pi may recover natively: arm (or re-arm) the bounded settle path.
-				// A queued message, disabled mode, or disabled automatic reset leaves it disarmed.
 				const pending = !facts.queued && facts.enabled && facts.automaticResetEnabled;
 				const spent = state.overflow === "pending-spent" || state.overflow === "spent";
 				const overflow: ResetOverflowPhase = pending
 					? (spent ? "pending-spent" : "pending")
 					: (spent ? "spent" : "idle");
-				return { state: { request, overflow }, effect: "none" };
+				return { state: { request: NO_REQUEST, overflow }, effect: "none" };
 			}
-			// Any non-overflow completed turn supersedes an older overflow failure. A non-overflow
-			// error leaves the armed overflow chain untouched for the settle boundary.
-			const overflow: ResetOverflowPhase = facts.failed ? state.overflow : "idle";
-			if (!facts.enabled || facts.failed) return { state: { request, overflow }, effect: "none" };
-			// Explicit and threshold resets both commit at turn_end, after incoming and budget drafts.
-			const commit = requested || facts.thresholdDue;
-			return { state: { request, overflow }, effect: commit ? "commit-boundary" : "none" };
+			if (facts.failed) return { state: { request: NO_REQUEST, overflow: state.overflow }, effect: "none" };
+			if (!facts.enabled) {
+				return { state: { request: NO_REQUEST, overflow: "idle" }, effect: "none" };
+			}
+			// A direct tool request commits after the whole tool batch. The budget cutoff is
+			// a separate hard-reserve safety path; ordinary close-out waits for settlement.
+			if (request.phase === "tool-requested" || facts.hardReserveDue) {
+				return { state: { request: NO_REQUEST, overflow: "idle" }, effect: "commit-boundary" };
+			}
+			return { state: { request, overflow: "idle" }, effect: "none" };
 		}
 		case "before_settle": {
 			const facts = event.facts;
-			if (state.overflow !== "pending" && state.overflow !== "pending-spent") return { state, effect: "none" };
-			// Let a queued turn run first; its own turn_end settles or clears this chain.
-			if (facts.queued) return { state, effect: "none" };
-			const spent = state.overflow === "pending-spent";
-			if (!facts.enabled || !facts.automaticResetEnabled || facts.aborted) {
-				return { state: { ...state, overflow: spent ? "spent" : "idle" }, effect: "none" };
+			if (facts.aborted) return { state: initialResetControl(), effect: "none" };
+			const request = requestForWindow(state.request, facts.windowId);
+			if (state.overflow === "pending" || state.overflow === "pending-spent") {
+				if (facts.queued) {
+					return { state: { ...state, request: facts.failed ? NO_REQUEST : request }, effect: "none" };
+				}
+				const spent = state.overflow === "pending-spent";
+				if (!facts.enabled || !facts.automaticResetEnabled) {
+					return { state: { request: facts.failed ? NO_REQUEST : request, overflow: spent ? "spent" : "idle" }, effect: "none" };
+				}
+				return { state: { request: NO_REQUEST, overflow: "spent" }, effect: spent ? "none" : "recover-overflow" };
 			}
-			// The recovery is one-use per failure chain. Committing it spends the attempt.
-			return { state: { ...state, overflow: "spent" }, effect: spent ? "none" : "recover-overflow" };
+			if (facts.failed || !facts.enabled || request.phase !== "close-out") {
+				return { state: { ...state, request: NO_REQUEST }, effect: "none" };
+			}
+			if (facts.queued) return { state: { ...state, request }, effect: "none" };
+			if (request.source === "automatic" && !facts.automaticResetEnabled) {
+				return { state: { ...state, request: NO_REQUEST }, effect: "none" };
+			}
+			return { state: { request: NO_REQUEST, overflow: "idle" }, effect: "commit-boundary" };
 		}
 		case "settled":
-			// Settlement ends the failure chain but leaves a pending explicit request armed.
-			return { state: { ...state, overflow: "idle" }, effect: "none" };
+			return { state: initialResetControl(), effect: "none" };
 		case "abort":
 		case "clear":
 			return { state: initialResetControl(), effect: "none" };
@@ -167,14 +165,9 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 }
 
 /**
- * Own reset requests at Pi 0.87 boundaries. Persisted windows are custom entries, not
- * compaction summaries: turn_end commits explicit/threshold resets after a complete tool
- * batch, while agent_before_settle commits the one bounded overflow recovery after Pi's
- * native recovery attempt has been cancelled.
- *
- * This function is the effect adapter: it captures Pi events, translates them into pure
- * reset-control transitions, and performs the resulting marker/boot/continuation writes and
- * notifications. The decision of what to do lives entirely in `reduceResetControl`.
+ * Own close-out requests at Pi's public turn and pre-settlement boundaries. Tool-requested
+ * resets commit at turn_end; manual and budget close-outs remain armed across note/tool turns
+ * and fall back at a successful agent_before_settle. Overflow recovery remains bounded.
  */
 export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) {
 	let sessionActive = true;
@@ -186,9 +179,6 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 			return { entries: [...entries, ...options.buildReset(ctx)], continue: true as const };
 		} catch (error) {
 			ctx.ui.notify(`pi-context: could not build reset (${String(error)}).`, "warning");
-			// The incoming drafts and budget drafts are already valid work from this
-			// boundary. Preserve them, but do not claim a continuation when reset
-			// construction failed.
 			return entries.length > 0 ? { entries } : undefined;
 		}
 	};
@@ -197,20 +187,19 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 		if (!sessionActive) return undefined;
 		const aborted = isAbort(event.message, event.outcome, ctx);
 		const stagedBudgetEntries = options.budget.consumeTurnEnd(ctx);
-		// Lifecycle owns whether drafts are acceptable for this turn. Budget only
-		// drains its instance-local staging, so aborts and disabled mode cannot commit it.
-		const budgetEntries = options.isEnabled() && !aborted ? stagedBudgetEntries : [];
+		const budgetEntries = options.isEnabled() && !aborted && event.outcome !== "error" ? stagedBudgetEntries : [];
 		const entries = [...(event.entries ?? []), ...budgetEntries];
 		const decision = reduceResetControl(control, {
 			type: "turn_end",
 			facts: {
+				windowId: currentWindowId(ctx),
 				aborted,
 				overflow: aborted ? false : isOverflowLike(event.message, ctx),
 				failed: event.outcome === "error",
 				enabled: options.isEnabled(),
 				get queued() { return event.context.pendingMessages.length > 0 || ctx.hasPendingMessages(); },
 				get automaticResetEnabled() { return options.budget.automaticResetEnabled(ctx); },
-				get thresholdDue() { return options.budget.resetDue(ctx); },
+				get hardReserveDue() { return options.budget.hardReserveDue(ctx); },
 			},
 		});
 		control = decision.state;
@@ -223,14 +212,16 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 		const decision = reduceResetControl(control, {
 			type: "before_settle",
 			facts: {
+				windowId: currentWindowId(ctx),
 				get queued() { return event.context.pendingMessages.length > 0 || ctx.hasPendingMessages(); },
 				get enabled() { return options.isEnabled(); },
 				get automaticResetEnabled() { return options.budget.automaticResetEnabled(ctx); },
-				get aborted() { return event.outcome === "aborted" || ctx.signal?.aborted === true; },
+				aborted: event.outcome === "aborted" || ctx.signal?.aborted === true,
+				failed: event.outcome === "error",
 			},
 		});
 		control = decision.state;
-		if (decision.effect !== "recover-overflow") return undefined;
+		if (decision.effect !== "commit-boundary" && decision.effect !== "recover-overflow") return undefined;
 		return resetBoundaryResult(event.entries, ctx);
 	});
 
@@ -242,19 +233,15 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 			if (event.reason === "manual") {
 				ctx.ui.notify("pi-context: /compact is disabled while context windows are active; use /wipe-memory to start a fresh window.", "warning");
 			}
-			// Native compaction is cancelled here. Threshold resets are decided solely from
-			// completed-turn usage at turn_end, never from canonical pre-request history.
 			return { cancel: true };
 		}
 		return undefined;
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
-		if (ctx.signal?.aborted) clear();
+		if (ctx.signal?.aborted) control = reduceResetControl(control, { type: "abort" }).state;
 	});
 	pi.on("agent_settled", () => {
-		// A failed recovery chain is bounded to one reset/retry. Once Pi settles, a later
-		// user prompt starts a new chain; successful continuations clear this earlier.
 		control = reduceResetControl(control, { type: "settled" }).state;
 	});
 	pi.on("session_start", () => { clear(); sessionActive = true; });
@@ -262,10 +249,15 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 	pi.on("session_shutdown", () => { clear(); options.budget.clear(); sessionActive = false; });
 
 	return {
-		request() {
-			const decision = reduceResetControl(control, { type: "request" });
+		closeOut(windowId: string, source: ResetRequestSource) {
+			const decision = reduceResetControl(control, { type: "close_out", windowId, source });
 			control = decision.state;
-			return decision.effect === "already-requested" ? "rollover_already_pending" : "rollover_requested";
+			return decision.effect;
+		},
+		request(windowId: string) {
+			const decision = reduceResetControl(control, { type: "tool_request", windowId });
+			control = decision.state;
+			return decision.effect === "already-pending" ? "rollover_already_pending" : "rollover_requested";
 		},
 		clear,
 	};

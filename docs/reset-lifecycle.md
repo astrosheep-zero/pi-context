@@ -1,83 +1,67 @@
 # Reset lifecycle
 
-`src/context/reset-lifecycle.ts` owns reset requests, turn-end batching, recovery, and continuation. It is the sole `turn_end` composer: incoming drafts, budget drafts, and reset drafts are ordered here. `src/context/budget.ts` owns the default-path instance-local policy cache, resolves injected policy live, stages guidance/warning drafts, and keeps the final warning text in the budget/protocol path; `src/context/thresholds.ts` only reads settings and derives values, using the shared merge in `src/settings.ts`. `src/index.ts` is the thin public entrypoint; `src/context/runtime.ts` composes the runtime hooks and constructs marker/boot boundaries. `src/notes/notes-snapshot.ts` acquires the notes snapshot, while `src/context/prompts.ts` only renders the explicit boot data and low-budget reminder. Projections and tools have separate modules described in [Architecture](architecture.md).
+`src/context/reset-lifecycle.ts` owns the close-out request phases, turn-end batching, bounded overflow recovery, and reset scheduling. `src/context/budget.ts` owns budget policy and stages the early reminder/final warning; `src/context/reset-artifacts.ts` builds the checkpoint, marker, boot, and continuation drafts; `src/context/context-window.ts` validates and projects the active window. `src/context/runtime.ts` wires these parts to Pi's public lifecycle hooks and `/wipe-memory` command.
 
-| Event | Transition / owner |
+## Lifecycle at a glance
+
+| Trigger | Behavior |
 | --- | --- |
-| `wipe_memory` | Record an explicit reset request. Repeated calls in one tool batch deduplicate; the tool returns terminal output. |
-| `turn_end` | The sole composer drains current-window budget drafts after the event entries, then appends reset drafts: one `pi-context/reset-marker` with `{ windowId }`, one hidden boot message with matching `details.windowId`, and the continuation marker; continue the turn through Pi's public queue. |
-| Abort before the boundary | Drop the pending boundary. Never manufacture a continuation for an aborted turn. |
-| Threshold / provider overflow | Request the same marker/boot boundary for the active provider window. Actual overflow/length recovery retries at most once per failure chain; ordinary retryable provider errors stay Pi-owned. |
-| `/wipe-memory` | Wait for idle, append marker and boot through public session APIs, and do not call a model. |
-| `/compact` while enabled | Cancel with an actionable `/wipe-memory` notice so native compaction cannot summarize erased canonical history back into the active window. |
-| Startup / tree / partial append | Repair only a marker followed by an otherwise empty metadata tail; refuse hidden/absent boots once later work exists, leaving `/wipe-memory` as the explicit recovery path. Do not interpret legacy reset-v2 details. |
-| `/pi-context off` | Stop new automatic resets, but retain the boundary of an existing marker. Marked branches still cancel native compaction; a fresh root may use Pi's native semantics. |
+| `wipe_memory` tool | Mark the current window tool-requested. At `turn_end`, after the complete tool batch and any accepted budget drafts, append the reset boundary and ask Pi to continue. Repeated requests for that window deduplicate. |
+| `/wipe-memory` | Capture the current window, wait for idle, and stop if another invocation has already moved the branch to a new window. Arm a manual close-out, persist the shared hidden warning, and trigger an ordinary model turn. The agent can write notes/use tools over several turns. A `wipe_memory` call commits at `turn_end`; otherwise a successful normal stop commits at `agent_before_settle` after queued messages drain. |
+| Budget warning | When automatic compaction is enabled and remaining active-window budget reaches reserve plus the warning runway, put the same hidden warning in the request and arm an automatic close-out. An explicit `wipe_memory` commits the boundary; a successful normal stop is the fallback. |
+| Hard reserve | Independent safety path: if automatic resets are enabled and completed-turn usage reaches Pi's reserve, commit a boundary at `turn_end`. |
+| Abort or error | Never count as successful close-out. Abort clears lifecycle state. An ordinary close-out error is dropped without reset; provider-overflow recovery remains separately bounded. |
+| `/compact` while active | Cancel native compaction, which could otherwise summarize pre-reset history back into the active window. A manual attempt receives an actionable `/wipe-memory` notice. |
 
-## Reset-control state machine
+A new boundary is ordered as:
 
-`registerResetLifecycle` is the effect adapter. `reduceResetControl` in `src/context/reset-lifecycle.ts` is the pure transition surface: given the current state and one lifecycle event it returns the next state and one named effect, performing no writes, policy resolution, or UI work of its own. The adapter captures Pi's events, supplies the guards only in the branches that consult them, then performs the marker/boot/continuation writes, continuation requests, and notices.
+1. A native `compaction` entry with `summary: ""` and `firstKeptEntryId` set to its own ID. This is Pi's retain-none canonical checkpoint; it is not a generated summary request.
+2. A `pi-context/reset-marker` custom entry with `{ windowId }`.
+3. A hidden `pi-context/boot` custom message with matching `details.windowId`.
+4. A hidden continuation message.
 
-State is a single value with two explicitly typed axes. There are no independently combinable lifecycle booleans.
+The raw session branch is preserved for history. New checkpoint-backed branches use Pi's canonical retain-none projection, which preserves the empty summary wrapper and system/tool state while excluding earlier conversational context. Older marker-only sessions use marker slicing as a narrow compatibility fallback. A marker is trusted as checkpoint-backed only when it directly follows an empty native compaction whose `firstKeptEntryId` is the compaction's own ID; a generic preceding compaction is not enough.
 
-| Axis | Value | Meaning |
-| --- | --- | --- |
-| `request` | `none` | no explicit wipe request pending |
-| | `explicit` | one explicit request is pending and will commit at the next `turn_end` |
-| `overflow` | `idle` | no overflow failure pending; a future recovery is available |
-| | `pending` | active-provider overflow failure pending; recovery still available |
-| | `pending-spent` | overflow failure pending, but its one recovery was already spent |
-| | `spent` | recovery spent and the failure is no longer pending |
+`turn_end` is the sole composer for completed turns. It preserves incoming entries, consumes current-window budget drafts, and appends the ordered reset boundary only when the reducer requests one. `agent_before_settle` handles successful close-out fallback after Pi has drained queued work. Pi owns the ensuing continuation and request scheduling. Boundary construction failures notify and preserve already-collected entries without claiming a continuation.
 
-All eight combinations of the two axes are reachable and each has a defined transition.
+## Reducer state
 
-| Event | Guard | Next state | Effect |
-| --- | --- | --- | --- |
-| `request` | `request=none` | `request=explicit`, overflow unchanged | `requested` |
-| `request` | `request=explicit` | unchanged | `already-requested` |
-| `turn_end` | turn aborted | `(request=none, overflow=idle)` | `none` |
-| `turn_end` | overflow-like and `!queued && enabled && automaticResetEnabled` | `request=none`; overflow `pending`, or `pending-spent` if already spent | `none` |
-| `turn_end` | overflow-like and (`queued \|\| !enabled \|\| !automaticResetEnabled`) | `request=none`; overflow `idle`, or `spent` if already spent | `none` |
-| `turn_end` | completed, `enabled`, and (`explicit` requested or `thresholdDue`) | `(request=none, overflow=idle)` | `commit-boundary` |
-| `turn_end` | completed, `enabled`, but neither trigger | `(request=none, overflow=idle)` | `none` |
-| `turn_end` | non-overflow `failed` | `request=none`; overflow unchanged | `none` |
-| `turn_end` | `!enabled` | `request=none`; completed clears overflow, error keeps it | `none` |
-| `before_settle` | `overflow=pending`, not queued, `enabled`, `automaticResetEnabled`, not aborted | `overflow=spent` | `recover-overflow` |
-| `before_settle` | `overflow=pending-spent` | `overflow=spent` | `none` |
-| `before_settle` | `overflow` not pending, or queued | unchanged | `none` |
-| `before_settle` | pending but `!enabled`, `!automaticResetEnabled`, or aborted | disarms to `idle` (`spent` if already spent) | `none` |
-| `settled` | — | `overflow=idle`; `request` unchanged | `none` |
-| `abort` / `clear` | — | `(request=none, overflow=idle)` | `none` |
+`reduceResetControl` is pure: the adapter supplies all lifecycle facts, and the reducer returns the next state plus a named effect. Its state combines a request phase with a bounded overflow phase:
 
-### Invariants
+| State | Meaning |
+| --- | --- |
+| `{ phase: "none" }` | No close-out/tool request is pending. |
+| `{ phase: "close-out", windowId, source }` | Manual or automatic warning close-out remains armed across ordinary note/tool turns. |
+| `{ phase: "tool-requested", windowId }` | A direct `wipe_memory` request will commit after its complete turn batch. |
+| `overflow: "idle"` | No overflow recovery is pending. |
+| `overflow: "pending"` | An overflow failure may recover once at pre-settlement. |
+| `overflow: "pending-spent"` | Recovery was already spent in this failure chain. |
+| `overflow: "spent"` | The one recovery has been used until the chain settles. |
 
-1. At most one explicit request is pending at a time; duplicate requests in one tool batch dedupe and never queue a second boundary.
-2. Every `turn_end` consumes a pending explicit request, whether or not that turn commits a reset.
-3. A committed reset is exactly `marker -> boot -> continuation`, and ordinary and budget drafts are ordered before the marker. Budget staging is drained once per turn and discarded on abort or disabled mode.
-4. Reset drafts are built once per commit. If construction throws, already-built incoming and budget drafts survive and no continuation is requested.
-5. Overflow recovery is one attempt per failure chain: a failure arms `pending` only when nothing is queued, the extension is enabled, and automatic reset is enabled; a settle spends it to `spent`; a later failure becomes `pending-spent` and cannot recover again until settlement ends the chain.
-6. Aborted turns never manufacture a continuation and clear both axes. Non-overflow errors keep the armed overflow chain for the settle boundary.
-7. A successful non-overflow turn clears the overflow chain first, so a queued success supersedes a stale overflow failure before settle recovery can act.
-8. `settled` ends the failure chain but preserves a pending explicit request; `clear` (session start, tree navigation, shutdown, `/pi-context off`, `/wipe-memory`) resets both axes.
-9. Disabled mode never commits a reset and never arms or spends overflow recovery; an existing persisted marker stays authoritative for native-compaction cancellation.
-10. Policy guards (`queued`, `automaticResetEnabled`, `thresholdDue`) are consulted only in the branch that needs them, preserving the adapter's original resolution order.
+### Transition rules
 
-### Critical sequences
+- `close_out(windowId, source)` arms a close-out for that window. Repeating an already-pending request deduplicates; a manual request can upgrade an automatic request for the same window.
+- `tool_request(windowId)` marks that window for a turn-end reset. A matching duplicate is reported as already pending.
+- `turn_end` first clears everything on abort. Overflow-like errors disarm the reset request and arm overflow recovery only when there is no queued work, the extension is enabled, and automatic reset is enabled. Other failures drop the request but preserve the overflow chain. A successful, enabled turn commits for a tool request or hard-reserve condition; a close-out alone remains armed.
+- `agent_before_settle` clears state on actual abort. Pending overflow recovery gets its one bounded attempt when enabled and unqueued. Otherwise a close-out commits only if the outcome is successful, the request belongs to the current window, the extension is enabled, and no queued work remains. Automatic close-outs also require automatic resets to remain enabled.
+- `agent_settled`, session start/tree navigation/shutdown, `/pi-context off`, and abort clear transient request state. Durable checkpoint/marker history remains authoritative after transient state is gone.
 
-- **Normal reset.** A completed, enabled turn whose explicit request is pending or whose usage is due returns `commit-boundary`. The adapter drains budget drafts, keeps incoming drafts in order, appends `marker -> boot -> continuation`, and requests continuation. A second request in the same batch returns `already-requested`; the next turn commits it alone.
-- **Overflow recovery.** An overflow-like `turn_end` with no queued message, enabled mode, and automatic reset arms `pending`; a `before_settle` with no queued message returns `recover-overflow` and spends the attempt to `spent`. A repeated settle is a no-op, and a later overflow failure re-arms only `pending-spent`.
-- **Abort.** An aborted `turn_end` returns only the drafts already collected for that boundary, clears both axes, and never appends reset drafts.
-- **Queued success.** A queued message defers `before_settle`; the queued turn's successful `turn_end` clears the stale overflow chain, so no recovery fires.
-- **Process interruption.** If Pi stops between the marker and the later reset messages, the marker remains the authoritative boundary. On the next start, startup repair may append only the missing boot and continuation when the tail is otherwise repairable; it never moves or reinterprets the boundary.
-- **Startup tail repair.** On `session_start` / `session_tree`, `ensureBoot` asks `repairResetTail` to inspect the marker tail and emit only the missing artifacts in the closed order: the boot, then the continuation. A boot/continuation sequence that is already complete, or a tail containing real conversation, a foreign message, a later marker, or a misordered/duplicate artifact, refuses repair and leaves `/wipe-memory` as the explicit recovery path.
+This separation is intentional: a note write or ordinary tool turn during a close-out must not consume it. Direct `wipe_memory` is not armed by the shared warning and remains valid without one. A user abort, an assistant message with a synthetic `stopReason: "aborted"`, and a generic provider error are distinct cases; none commits an ordinary close-out, while only Pi's actual operation cancellation is a user abort.
 
-The budget owner stages the early guidance and final checkpoint warning from active-window usage. The warning is visible in the current provider request, while both drafts are committed only by the lifecycle composer and are discarded on abort, settlement without a `turn_end`, transition, or window mismatch. After the warning, the model either writes its note and calls `wipe_memory`, or runtime recovery requests the same marker/boot boundary. Guidance and warning drafts precede reset drafts so stale reminders cannot be queued into the new window; durable entries remain the authority for redelivery. Their UI notices are emitted at the next turn start or settlement only after the matching reminder is committed in the active window, so aborted requests and retries cannot repeat an uncommitted reminder's notification.
+## Budget staging and notifications
 
-The turn-end commit is the scheduling boundary: Pi receives the finished tool batch and then the marker/boot drafts as one append operation. Pi owns queue scheduling and deduplication of the next request; the extension does not run a parallel compaction state machine or use a compaction completion callback.
+The early reminder is staged once per window when remaining budget reaches `reserve + reminderMarginTokens`. The final close-out warning is staged/attached at `reserve + WARNING_RUNWAY_TOKENS`, only when automatic compaction is enabled. The hard reserve itself remains a separate safety cutoff. The warning text is shared with `/wipe-memory`; after it is durable, the extension does not repeat it in that window. Warning persistence deduplicates only injection: each eligible low-budget request re-arms transient automatic close-out before checking for the durable warning, so an abort/error can clear its attempt and the next request can retry without another warning.
 
-Boot construction reads the five note homes into one closed snapshot before rendering the hidden boot. An absent home is empty; a real read failure removes only that home's MAP/pocket rows. The boot retains its identity, reset line, notes-home instructions, and recovery protocol, and includes a concise `notes_list` retry notice. The human receives one incomplete-index notification per boot. This notes failure isolation does not bypass the marker/boot commit, alter raw history, or turn a partial boot into an empty fallback.
+Budget drafts are instance-local and are consumed at turn end. They are discarded on abort, failed turn, transition, or window mismatch. UI reminder notices are emitted only after the matching hidden entry is durable, so failed requests do not report an uncommitted warning. Active-window usage and the exact `SettingsManager` authority drive threshold checks; default file-backed policy is cached per extension instance, while injected managers are read through their public API.
 
-The hidden boot is selected by its durable `details.windowId`, not by timestamp or content equality. The context hook folds only the dropped system prefix before that boot and preserves later prompt patches and messages in order. If the boot is missing, the hook aborts with a safe head and notice rather than sending raw history. Startup/tree repair is deliberately narrow: it appends a boot only when the marker tail is otherwise incomplete metadata; later conversation or an authoritative raw boot causes safe refusal. `/wipe-memory` is the recovery path for that refused branch. A fork/clone creates a new session ID while copying branch entries, so startup refreshes the root boot identity while retaining copied root messages.
+## Projection, repair, and history
 
-Public APIs let a mixed tool batch finish before the marker/boot boundary. Queued steering/follow-up messages are delivered exactly once in the new window, neither dropped nor replayed. `/tree` navigation remains available, but when either source or destination branch contains a reset marker, Pi's raw summary generator is bypassed: the summary is empty and a notice explains why, preventing erased history from re-entering through a path outside the context hook. With no marker on either branch, native summaries remain unchanged.
+`context_with_system` selects the active boot by durable `details.windowId`. For a verified native checkpoint, Pi's canonical projection is used directly; for a legacy marker-only reset, the compatibility projection slices at the matching boot. The projection preserves system/tool state and later prompt patches. If the boot is absent, the runtime aborts safely instead of sending raw history. Usage estimation uses the same checkpoint-aware projection decision.
 
-Validation uses a reduced set of persisted-data integration tests, isolated lifecycle event tests, and scripted SDK tests running Pi's actual agent loop. Representative cases check reset-window history retention, resumable reads, native-compaction cancellation, mixed-tool completion, steering/follow-up delivery, bounded overflow recovery, and settings authority. Tree-summary suppression no longer has a dedicated retained test. The separate coherence and pagination property suites have been removed; the retained cases do not cover the previous full matrix of branch, cancellation, malformed-input, and pagination edges.
+Startup/tree repair is narrow: it may complete a repairable marker tail when later conversation does not make the missing metadata ambiguous. Legacy marker-only tails remain supported; repair never moves a boundary or promotes an arbitrary compaction to a retain-none checkpoint. `/tree` summary generation is suppressed with an empty summary when either branch crosses a reset, because the raw summary generator bypasses the provider projection.
+
+## Validation and known limits
+
+The test suite combines isolated reducer tests with scripted SDK tests executing Pi's real agent loop without model/network calls. The agent-loop coverage includes manual warning plus multi-turn note writes and explicit wipe, direct wipe without warning, normal-stop fallback, same-window concurrent command deduplication, actual and synthetic abort/error cleanup, queued steering/follow-up delivery, hard-reserve and bounded-overflow recovery, successive resets, and real SessionManager file reopen after two retain-none checkpoints. It also checks raw-history preservation, canonical projection, empty-summary retention, system/tool state, warning/marker order, and fresh-window continuation.
+
+The broader coherence and pagination property suites were removed during test reduction; retained cases are representative rather than exhaustive. Tree-summary suppression has no dedicated retained test, and external-provider behavior, every malformed persisted shape, and every filesystem failure mode are not established by this suite.

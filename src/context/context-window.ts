@@ -24,6 +24,16 @@ export function currentReset(ctx: SessionReader): WindowMarker | undefined {
 	return undefined;
 }
 
+/** A reset is checkpoint-backed only when its marker directly follows a native compaction. */
+export function isCheckpointBackedReset(ctx: SessionReader, marker = currentReset(ctx)): boolean {
+	if (!marker?.parentId) return false;
+	const branch = ctx.sessionManager.getBranch();
+	const markerIndex = branch.findIndex((entry) => entry.id === marker.id);
+	const checkpoint = branch[markerIndex - 1];
+	return markerIndex > 0 && checkpoint?.id === marker.parentId && checkpoint.type === "compaction" &&
+		checkpoint.summary === "" && checkpoint.firstKeptEntryId === checkpoint.id;
+}
+
 /** Mint the durable identity of a session's root history window. */
 export function rootWindowId(sessionId: string): string {
 	return `pcw:${sessionId.slice(0, 8)}:root`;
@@ -106,7 +116,12 @@ export function windowUsage(ctx: Pick<ExtensionContext, "sessionManager" | "getC
 	if (!contextWindow) return undefined;
 	const windowId = reset.data.windowId;
 	try {
-		const messages: AgentMessage[] = projectWindow(ctx.sessionManager.buildSessionProjection().messages, windowId);
+		const canonicalMessages = ctx.sessionManager.buildSessionProjection().messages;
+		// New resets already cut the durable Pi projection. Marker slicing is retained only
+		// for sessions written before native reset checkpoints existed.
+		const messages: AgentMessage[] = isCheckpointBackedReset(ctx, reset)
+			? canonicalMessages
+			: projectWindow(canonicalMessages, windowId);
 		const { tokens } = estimateContextTokens(convertToLlm(messages));
 		return { tokens, contextWindow, percent: tokens / contextWindow * 100 };
 	} catch {

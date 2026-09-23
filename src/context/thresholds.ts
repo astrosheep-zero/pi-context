@@ -24,7 +24,7 @@ export function deriveThresholds(reserveTokens: number, margins: PiContextSettin
 	else {
 		const parsed = validMargin(margins.reminderMarginTokens);
 		if (parsed === undefined) {
-			warnings.push(`pi-context: ${reminderKey} must be a positive integer; using default ${DEFAULT_REMINDER_MARGIN_TOKENS}.`);
+			warnings.push(`pi-context: ${reminderKey} must be a positive integer; using the default reminder margin.`);
 			reminderMargin = DEFAULT_REMINDER_MARGIN_TOKENS;
 		} else reminderMargin = parsed;
 	}

@@ -57,4 +57,7 @@ Session notes belong to this trip — the goal, the progress, the loose ends. Th
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const WARNING_PROMPT =
-	"Your memory is about to be erased. Write the note. NOW. If it already exists, revise it with notes_edit (or rewrite it whole): the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. Do not continue any task. Then call wipe_memory IMMEDIATELY — anything not in the note dies with the window.";
+	"Your memory is about to be erased. Stop the current task and write the note NOW. If it already exists, revise it with notes_edit (or rewrite it whole): the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. Use as many note/tool turns as needed to finish the checkpoint. When it is ready, call wipe_memory to reset immediately; otherwise finish normally and the extension will reset at your normal stop. Anything not in the note dies with the window.";
+
+/** Identical hidden close-out message for manual and budget-triggered requests. */
+export const WARNING_CONTENT = `${GUIDANCE_OPEN_TAG}\n${WARNING_PROMPT}\n${GUIDANCE_CLOSE_TAG}`;

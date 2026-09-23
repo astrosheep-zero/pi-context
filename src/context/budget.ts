@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext, type SessionBoundaryDraft, type SettingsManager } from "@earendil-works/pi-coding-agent";
-import { GUIDANCE_CLOSE_TAG, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, WARNING_PROMPT, WARNING_TYPE } from "../protocol.js";
+import { GUIDANCE_TYPE, WARNING_CONTENT, WARNING_TYPE } from "../protocol.js";
 import { readThresholdSettings, type ResolvedThresholds, type ThresholdSettingsResolution } from "./thresholds.js";
 import { currentWindowId, hasWindowMessage, windowUsage } from "./context-window.js";
 import { tokenBudgetGuidance } from "./prompts.js";
@@ -12,7 +12,12 @@ export function remainingTokens(ctx: Pick<ExtensionContext, "sessionManager" | "
 	return !usage || usage.tokens === null ? null : Math.max(0, usage.contextWindow - usage.tokens);
 }
 
-export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean, settingsManager?: SettingsManager) {
+export function registerBudget(
+	pi: ExtensionAPI,
+	isEnabled: () => boolean,
+	settingsManager?: SettingsManager,
+	onCloseOut: (windowId: string) => void = () => {},
+) {
 	let cachedPolicy: { thresholds: ResolvedThresholds; automatic: boolean } | undefined;
 	const notifiedWarnings = new Set<string>();
 	const resolvePolicy = (ctx: ExtensionContext): ThresholdSettingsResolution => {
@@ -32,13 +37,12 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean, setti
 	const automaticResetEnabled = (ctx: ExtensionContext): boolean => {
 		return resolvePolicy(ctx).automatic;
 	};
-	const resetDue = (ctx: ExtensionContext): boolean => {
+	const hardReserveDue = (ctx: ExtensionContext): boolean => {
 		if (!automaticResetEnabled(ctx)) return false;
 		const usage = windowUsage(ctx);
 		return usage !== undefined && usage.tokens !== null && usage.contextWindow - usage.tokens <= thresholdsFor(ctx).reserve;
 	};
 	const invalidateThresholds = () => { cachedPolicy = undefined; };
-	const formatRemaining = (remaining: number): string => `${Math.max(0, Math.ceil(remaining / 1000))}k`;
 	let pendingGuidance: { windowId: string; content: string; remaining: number } | undefined;
 	let pendingWarning: { windowId: string; content: string; remaining: number } | undefined;
 	let pendingNotices: Array<{ windowId: string; customType: string; remaining: number }> = [];
@@ -47,8 +51,8 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean, setti
 		for (const notice of pendingNotices) {
 			if (notice.windowId !== windowId || !hasWindowMessage(ctx, notice.customType)) continue;
 			ctx.ui.notify(notice.customType === WARNING_TYPE
-				? `pi-context: Context almost full — ${formatRemaining(notice.remaining)} remaining`
-				: `pi-context: Context running low — ${formatRemaining(notice.remaining)} remaining`, "warning");
+				? "pi-context: Context almost full; close out the current memory window."
+				: "pi-context: Context running low; checkpoint your notes soon.", "warning");
 		}
 		pendingNotices = [];
 	};
@@ -101,11 +105,14 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean, setti
 		if (remaining === null) return undefined;
 		const windowId = currentWindowId(ctx);
 		const { reminder, warning } = thresholdsFor(ctx);
-		if (hasWindowMessage(ctx, WARNING_TYPE) || pendingWarning?.windowId === windowId) return undefined;
-		if (remaining <= warning) {
-			// A not-yet-committed shallow reminder is superseded by the final warning.
+		if (remaining <= warning && automaticResetEnabled(ctx)) {
+			// Re-arm close-out on each eligible request. A prior request may have aborted
+			// after persisting the warning, so warning deduplication must not own this state.
+			onCloseOut(windowId);
+			if (hasWindowMessage(ctx, WARNING_TYPE) || pendingWarning?.windowId === windowId) return undefined;
+			// The critical close-out starts at reserve + runway, not at the hard reserve.
 			pendingGuidance = undefined;
-			const content = `${GUIDANCE_OPEN_TAG}\n${WARNING_PROMPT}\n${GUIDANCE_CLOSE_TAG}`;
+			const content = WARNING_CONTENT;
 			pendingWarning = { windowId, content, remaining };
 			const warningMessage = {
 				role: "custom" as const,
@@ -116,6 +123,7 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean, setti
 			};
 			return { messages: [..._event.messages, warningMessage] };
 		}
+		if (hasWindowMessage(ctx, WARNING_TYPE) || pendingWarning?.windowId === windowId) return undefined;
 		if (hasWindowMessage(ctx, GUIDANCE_TYPE) || pendingGuidance?.windowId === windowId) return undefined;
 		if (remaining <= reminder) {
 			// Persist at turn_end, before any reset drafts. A queued sendMessage could
@@ -141,7 +149,7 @@ export function registerBudget(pi: ExtensionAPI, isEnabled: () => boolean, setti
 
 	return {
 		automaticResetEnabled,
-		resetDue,
+		hardReserveDue,
 		consumeTurnEnd,
 		clear: () => { clearStaged(); pendingNotices = []; },
 	};

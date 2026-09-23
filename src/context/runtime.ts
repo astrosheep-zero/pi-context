@@ -3,9 +3,10 @@ import { VERSION, defineTool, type ExtensionAPI, type ExtensionContext, type Set
 import { registerBudget } from "./budget.js";
 import { output } from "../tool-output.js";
 import { migrateLegacyHomes } from "../notes/paths.js";
-import { currentReset, isWindowMarker, projectRootWindow, projectWindow, rootWindowId } from "./context-window.js";
+import { currentReset, currentWindowId, isCheckpointBackedReset, isWindowBoot, isWindowMarker, projectRootWindow, projectWindow, rootWindowId, type WindowMarker } from "./context-window.js";
 import { registerResetLifecycle } from "./reset-lifecycle.js";
-import { buildResetDrafts, persistManualReset, resetTailCommitted } from "./reset-artifacts.js";
+import { buildResetDrafts, resetTailCommitted } from "./reset-artifacts.js";
+import { WARNING_CONTENT, WARNING_TYPE } from "../protocol.js";
 import { ensureBoot, type IncompleteNotesNotifier } from "./boot.js";
 
 declare const __PI_CONTEXT_BUILD__: { version: string; sourceHash: string };
@@ -32,8 +33,8 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 		if (pendingResetNotices.size === 0) return;
 		const branch = ctx.sessionManager.getBranch();
 		for (const windowId of pendingResetNotices) {
-			const marker = branch.find((entry) => isWindowMarker(entry) && entry.data.windowId === windowId);
-			if (!marker || !resetTailCommitted(ctx, marker.id, windowId)) continue;
+			const marker = branch.find((entry): entry is WindowMarker => isWindowMarker(entry) && entry.data.windowId === windowId);
+			if (!marker || !isCheckpointBackedReset(ctx, marker) || !resetTailCommitted(ctx, marker.id, windowId)) continue;
 			pendingResetNotices.delete(windowId);
 			ctx.ui.notify(`pi-context: memory cleared · ${windowId}`, "info");
 		}
@@ -52,7 +53,7 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 	const migrationWarning = migrateLegacyHomes();
 	if (migrationWarning) console.warn(`pi-context: ${migrationWarning}`);
 
-	const budget = registerBudget(pi, () => enabled, settingsManager);
+	const budget = registerBudget(pi, () => enabled, settingsManager, (windowId) => resets.closeOut(windowId, "automatic"));
 
 	pi.on("session_start", (_event, ctx) => {
 		if (!enabled) return;
@@ -81,7 +82,11 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 		const reset = currentReset(ctx);
 		const windowId = reset?.data.windowId ?? rootWindowId(ctx.sessionManager.getSessionId());
 		try {
-			return { messages: reset ? projectWindow(event.messages, windowId) : projectRootWindow(event.messages, windowId) };
+			if (reset) {
+				if (!event.messages.some((message) => isWindowBoot(message, windowId))) throw new Error(`Missing boot for context window ${windowId}`);
+				return { messages: isCheckpointBackedReset(ctx, reset) ? event.messages : projectWindow(event.messages, windowId) };
+			}
+			return { messages: projectRootWindow(event.messages, windowId) };
 		} catch (error) {
 			if (missingBootNotice !== windowId) {
 				missingBootNotice = windowId;
@@ -115,16 +120,25 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 	});
 
 	pi.registerCommand("wipe-memory", {
-		description: "Persist a fresh context window without calling the model",
+		description: "Ask the agent to close out its notes, then start a fresh context window",
 		handler: async (_args, cmdCtx) => {
 			if (!enabled) {
 				cmdCtx.ui.notify("pi-context: /wipe-memory requires /pi-context on.", "error");
 				return;
 			}
+			const requestedWindowId = currentWindowId(cmdCtx);
 			await cmdCtx.waitForIdle();
-			if (!enabled) return;
-			resets.clear();
-			notifyCommittedResets(cmdCtx, persistManualReset(pi, cmdCtx, notifyIncompleteNotes));
+			if (!enabled || currentWindowId(cmdCtx) !== requestedWindowId) return;
+			const armed = resets.closeOut(requestedWindowId, "manual");
+			if (armed === "already-pending") return;
+			try {
+				pi.sendMessage({ customType: WARNING_TYPE, content: WARNING_CONTENT, display: false }, { triggerTurn: true });
+			} catch (error) {
+				resets.clear();
+				cmdCtx.ui.notify(`pi-context: could not start manual close-out (${String(error)}).`, "error");
+				return;
+			}
+			await cmdCtx.waitForIdle();
 		},
 	});
 
@@ -133,9 +147,9 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 		label: "Wipe memory",
 		description: "Wipe your in-context memory and start a fresh context window. Your session, notes, and history survive.",
 		parameters: Type.Object({}, { additionalProperties: false }),
-		async execute() {
+		async execute(_id, _params, _signal, _update, ctx) {
 			if (!enabled) return output({ error: "pi-context is off (/pi-context on to enable)" });
-			return output({ status: resets.request() }, undefined, true);
+			return output({ status: resets.request(currentWindowId(ctx)) }, undefined, true);
 		},
 	}));
 
@@ -143,7 +157,7 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 		isEnabled: () => enabled,
 		buildReset: (ctx) => {
 			const drafts = buildResetDrafts(ctx, notifyIncompleteNotes);
-			pendingResetNotices.add(drafts[1].details.windowId);
+			pendingResetNotices.add(drafts[2].details.windowId);
 			return drafts;
 		},
 		budget,

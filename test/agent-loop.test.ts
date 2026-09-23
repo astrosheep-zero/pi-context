@@ -16,9 +16,9 @@ import {
 	type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import piContext, { createPiContext } from "../src/index.js";
-import { BOOT_TYPE, CONTEXT_WINDOW_OPEN_TAG, CONTINUATION, CONTINUATION_TYPE, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, RESET_MARKER_TYPE, WARNING_TYPE } from "../src/protocol.js";
+import { BOOT_TYPE, CONTEXT_WINDOW_OPEN_TAG, CONTINUATION, CONTINUATION_TYPE, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, RESET_MARKER_TYPE, WARNING_CONTENT, WARNING_PROMPT, WARNING_TYPE } from "../src/protocol.js";
 
-type StreamScript = (request: number, context: AgentContext) => AssistantMessage;
+type StreamScript = (request: number, context: AgentContext) => AssistantMessage | Promise<AssistantMessage>;
 type Hook = (pi: ExtensionAPI, getSession: () => AgentSession, requests: AgentContext[]) => void;
 
 type Fixture = {
@@ -53,6 +53,8 @@ async function openFixture(options: {
 	settingsManager?: SettingsManager | ((model: Fixture["model"]) => SettingsManager);
 	manageEnvironment?: boolean;
 	projectTrusted?: boolean;
+	sessionDir?: string;
+	sessionManager?: SessionManager;
 	seed?: (sessionManager: SessionManager) => void;
 	script: StreamScript;
 	hook?: Hook;
@@ -124,7 +126,7 @@ async function openFixture(options: {
 	}],
 	});
 	await loader.reload();
-	const sessionManager = SessionManager.inMemory(dir);
+	const sessionManager = options.sessionManager ?? (options.sessionDir ? SessionManager.create(dir, options.sessionDir) : SessionManager.inMemory(dir));
 	options.seed?.(sessionManager);
 	const created = await createAgentSession({
 		cwd: dir,
@@ -138,7 +140,7 @@ async function openFixture(options: {
 	});
 	session = created.session;
 	session.subscribe((event) => events.push(event as unknown as { type: string; [key: string]: unknown }));
-	session.agent.streamFunction = (_model, context, streamOptions) => {
+	session.agent.streamFunction = async (_model, context, streamOptions) => {
 		const aborted = streamOptions?.signal?.aborted === true;
 		streamContexts.push(context);
 		streamSignals.push(aborted);
@@ -161,7 +163,7 @@ async function openFixture(options: {
 		}
 		requests.push(context);
 		const request = requests.length;
-		const message = options.script(request, context);
+		const message = await options.script(request, context);
 		const stream = createAssistantMessageEventStream();
 		stream.push({ type: "done", reason: (message.stopReason === "error" || message.stopReason === "aborted" ? "stop" : message.stopReason) as "stop" | "toolUse" | "length" | "deferred", message });
 		stream.end();
@@ -313,10 +315,168 @@ test("real AgentSession: explicit tiny-session wipe ignores keepRecentTokens and
 		const boot = fixture.sessionManager.getBranch().find((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && entry.details && typeof entry.details === "object" && (entry.details as { windowId?: unknown }).windowId === windowId);
 		assert.ok(boot && boot.type === "custom_message", "the reset boot is persisted after the marker");
 		assert.equal((boot.details as { windowId: string }).windowId, windowId);
-		assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "compaction").length, 0, "the explicit path does not manufacture a native compaction");
+		const checkpoint = fixture.sessionManager.getBranch().find((entry) => entry.type === "compaction");
+		assert.ok(checkpoint && checkpoint.type === "compaction", "explicit wipe commits a native checkpoint without a summary model call");
+		assert.equal(checkpoint.summary, "");
+		assert.equal(checkpoint.firstKeptEntryId, checkpoint.id, "the checkpoint retains none of the preceding context");
 		assert.ok(JSON.stringify(fixture.sessionManager.getBranch()).includes("OLD_CONTEXT_SENTINEL"), "raw history remains readable");
 	} finally {
 		fixture.close();
+	}
+});
+
+test("real AgentSession: manual close-out spans note turns and commits its checkpoint after notes", { timeout: 20000 }, async () => {
+	let fixture!: Fixture;
+	fixture = await openFixture({
+		compactionEnabled: false,
+		script: (request, context) => {
+			if (request === 1) return assistant(fixture, [{ type: "text", text: "before manual close-out" }]);
+			if (request === 2) {
+				assert.ok(text(context).includes(WARNING_PROMPT), "manual /wipe-memory sends the shared close-out warning");
+				return assistant(fixture, [{ type: "toolCall", id: "manual-note-a", name: "notes_write", arguments: { address: "manual-a.md", content: "MANUAL_NOTE_ALPHA" } }], "toolUse");
+			}
+			if (request === 3) return assistant(fixture, [{ type: "toolCall", id: "manual-note-b", name: "notes_write", arguments: { address: "manual-b.md", content: "MANUAL_NOTE_BETA" } }], "toolUse");
+			if (request === 4) return assistant(fixture, [{ type: "toolCall", id: "manual-wipe", name: "wipe_memory", arguments: {} }], "toolUse");
+			assertFreshRequest(fixture, request - 1, "MANUAL_CLOSEOUT_OLD_SENTINEL");
+			return assistant(fixture, [{ type: "text", text: "new window resumed" }]);
+		},
+	});
+	try {
+		await fixture.session.prompt("MANUAL_CLOSEOUT_OLD_SENTINEL");
+		await fixture.session.waitForIdle();
+		await fixture.session.prompt("/wipe-memory");
+		await fixture.session.waitForIdle();
+		assert.equal(fixture.requests.length, 5, "two note turns, explicit wipe, and one fresh continuation run");
+		assert.equal(resetMarkers(fixture).length, 1);
+		const branch = fixture.sessionManager.getBranch();
+		const warningIndex = branch.findIndex((entry) => entry.type === "custom_message" && entry.customType === WARNING_TYPE);
+		const checkpointIndex = branch.findIndex((entry) => entry.type === "compaction");
+		const markerIndex = branch.findIndex((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE);
+		assert.ok(warningIndex >= 0 && warningIndex < checkpointIndex, "the warning is durable before the checkpoint");
+		const warning = branch[warningIndex];
+		assert.ok(warning?.type === "custom_message");
+		assert.equal(warning.content, WARNING_CONTENT, "manual and budget close-out persist the same hidden warning");
+		assert.equal(branch[markerIndex - 1]?.id, branch[checkpointIndex]?.id, "native retain-none checkpoint immediately precedes the marker");
+		assert.ok(branch.slice(0, checkpointIndex).filter((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "notes_write").length >= 2, "both note writes finish before the checkpoint");
+		const marker = resetMarkers(fixture)[0]!;
+		assert.equal(marker.type, "custom");
+		const windowId = (marker.data as { windowId: string }).windowId;
+		const boot = branch.find((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && (entry.details as { windowId?: string } | undefined)?.windowId === windowId);
+		assert.ok(boot && boot.type === "custom_message");
+		assert.ok(typeof boot.content === "string" && boot.content.includes("manual-a.md") && boot.content.includes("manual-b.md"), "the fresh boot indexes both completed notes");
+		assert.equal(boot.display, false);
+		const canonical = fixture.sessionManager.buildSessionProjection().messages;
+		assert.equal(JSON.stringify(canonical).includes("MANUAL_CLOSEOUT_OLD_SENTINEL"), false, "canonical context excludes the prior window");
+		assert.ok(canonical.some((message) => message.role === "compactionSummary"), "the empty native summary wrapper remains canonical");
+		assert.ok(JSON.stringify(branch).includes("MANUAL_CLOSEOUT_OLD_SENTINEL"), "raw history remains intact");
+	} finally {
+		fixture.close();
+	}
+});
+
+test("real AgentSession: repeated manual commands share one pending window and normal-stop fallback", { timeout: 20000 }, async () => {
+	let fixture!: Fixture;
+	let announceStarted!: () => void;
+	let releaseResponse!: () => void;
+	const started = new Promise<void>((resolve) => { announceStarted = resolve; });
+	const gate = new Promise<void>((resolve) => { releaseResponse = resolve; });
+	fixture = await openFixture({
+		compactionEnabled: false,
+		script: async (request) => {
+			if (request === 1) {
+				announceStarted();
+				await gate;
+			}
+			return assistant(fixture, [{ type: "text", text: "close-out complete" }]);
+		},
+	});
+	try {
+		const first = fixture.session.prompt("/wipe-memory");
+		await started;
+		const second = fixture.session.prompt("/wipe-memory");
+		releaseResponse();
+		await Promise.all([first, second]);
+		await fixture.session.waitForIdle();
+		assert.equal(fixture.requests.length, 2, "duplicate command waits do not schedule a second fresh-window request");
+		assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === WARNING_TYPE).length, 1, "the same pending-window warning is deduplicated");
+		assert.equal(resetMarkers(fixture).length, 1, "normal stop commits exactly one reset");
+		assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "compaction").length, 1);
+	} finally {
+		releaseResponse();
+		fixture.close();
+	}
+});
+
+test("real AgentSession: user abort, synthetic aborted response, and generic error never fall back", { timeout: 25000 }, async () => {
+	for (const mode of ["ctx-abort", "synthetic-abort", "generic-error"] as const) {
+		let fixture!: Fixture;
+		let didAbort = false;
+		fixture = await openFixture({
+			compactionEnabled: false,
+			hook: mode === "ctx-abort" ? (pi) => pi.on("context", (_event, ctx) => {
+				if (!didAbort) {
+					didAbort = true;
+					ctx.abort();
+				}
+			}) : undefined,
+			script: (request) => {
+				if (request === 1 && mode === "synthetic-abort") return assistant(fixture, [{ type: "text", text: "synthetic aborted" }], "aborted");
+				if (request === 1 && mode === "generic-error") return assistant(fixture, [{ type: "text", text: "request failed" }], "error", { errorMessage: "synthetic generic provider failure" });
+				return assistant(fixture, [{ type: "text", text: "later user turn" }]);
+			},
+		});
+		try {
+			await fixture.session.prompt("/wipe-memory");
+			await fixture.session.waitForIdle();
+			assert.equal(resetMarkers(fixture).length, 0, `${mode} does not force a reset`);
+			assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "compaction").length, 0);
+			assert.equal(fixture.notices.some((notice) => notice.includes("memory cleared")), false);
+			if (mode === "ctx-abort") assert.equal(fixture.streamSignals.at(-1), true, "this case aborts the real Pi operation signal");
+			else assert.equal(fixture.streamSignals.at(-1), false, "synthetic abort/error is not a user abort signal");
+			await fixture.session.prompt("AFTER_UNSUCCESSFUL_CLOSEOUT");
+			await fixture.session.waitForIdle();
+			assert.equal(resetMarkers(fixture).length, 0, "no pending close-out leaks into a later prompt");
+		} finally {
+			fixture.close();
+		}
+	}
+});
+
+test("real AgentSession: steering and follow-up queued during fallback reach the old window once", { timeout: 25000 }, async () => {
+	for (const delivery of ["steer", "followUp"] as const) {
+		let fixture!: Fixture;
+		let announceStarted!: () => void;
+		let releaseResponse!: () => void;
+		const started = new Promise<void>((resolve) => { announceStarted = resolve; });
+		const gate = new Promise<void>((resolve) => { releaseResponse = resolve; });
+		fixture = await openFixture({
+			compactionEnabled: false,
+			script: async (request, context) => {
+				if (request === 1) {
+					assert.ok(text(context).includes(WARNING_PROMPT));
+					announceStarted();
+					await gate;
+				}
+				if (request === 2) assert.equal(text(context).split("QUEUED_DURING_FALLBACK").length - 1, 1, `${delivery} is delivered once before fallback`);
+				return assistant(fixture, [{ type: "text", text: `response ${request}` }]);
+			},
+		});
+		try {
+			const command = fixture.session.prompt("/wipe-memory");
+			await started;
+			if (delivery === "steer") fixture.session.steer("QUEUED_DURING_FALLBACK");
+			else fixture.session.followUp("QUEUED_DURING_FALLBACK");
+			releaseResponse();
+			await command;
+			await fixture.session.waitForIdle();
+			assert.equal(fixture.requests.length, 3, `${delivery} runs once before one fresh continuation`);
+			assert.equal(resetMarkers(fixture).length, 1, `${delivery} does not duplicate the fallback reset`);
+			assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "message" && JSON.stringify(entry.message).includes("QUEUED_DURING_FALLBACK")).length, 1);
+			assertFreshRequest(fixture, 2, "QUEUED_DURING_FALLBACK");
+		} finally {
+			releaseResponse();
+			fixture.close();
+		}
 	}
 });
 
@@ -427,6 +587,65 @@ test("real AgentSession: successive resets and a mixed tool batch cut only after
 		} finally {
 			fixture.close();
 		}
+	}
+});
+
+test("real AgentSession: two retain-none checkpoints survive session-file reopen", { timeout: 20000 }, async () => {
+	const sessionDir = mkdtempSync(join(tmpdir(), "pi-context-persisted-session-"));
+	let fixture!: Fixture;
+	let sessionFile = "";
+	let sessionId = "";
+	fixture = await openFixture({
+		compactionEnabled: false,
+		sessionDir,
+		script: (request) => request < 3
+			? assistant(fixture, [{ type: "toolCall", id: `persisted-wipe-${request}`, name: "wipe_memory", arguments: {} }], "toolUse")
+			: assistant(fixture, [{ type: "text", text: "second reset window complete" }]),
+	});
+	try {
+		await fixture.session.prompt("PERSISTED_OLD_WINDOW_SENTINEL");
+		await fixture.session.waitForIdle();
+		assert.equal(fixture.requests.length, 3, "two explicit requests and one final continuation, with no summary-model request");
+		assert.equal(resetMarkers(fixture).length, 2);
+		assertFreshRequest(fixture, 2, "PERSISTED_OLD_WINDOW_SENTINEL");
+		const branch = fixture.sessionManager.getBranch();
+		const checkpoints = branch.filter((entry) => entry.type === "compaction");
+		assert.equal(checkpoints.length, 2);
+		const markers = resetMarkers(fixture);
+		assert.equal(markers[0]?.parentId, checkpoints[0]?.id);
+		assert.equal(markers[1]?.parentId, checkpoints[1]?.id);
+		assert.equal(checkpoints[0]?.type === "compaction" ? checkpoints[0].firstKeptEntryId : undefined, checkpoints[0]?.id);
+		assert.equal(checkpoints[1]?.type === "compaction" ? checkpoints[1].firstKeptEntryId : undefined, checkpoints[1]?.id);
+		sessionFile = fixture.sessionManager.getSessionFile() ?? "";
+		sessionId = fixture.sessionManager.getSessionId();
+		assert.ok(sessionFile && existsSync(sessionFile), "the SDK persisted the real session file");
+	} finally {
+		fixture.close();
+	}
+	try {
+		const reopened = SessionManager.open(sessionFile, sessionDir);
+		assert.equal(reopened.getSessionId(), sessionId);
+		const branch = reopened.getBranch();
+		assert.equal(branch.filter((entry) => entry.type === "compaction").length, 2);
+		assert.equal(branch.filter((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE).length, 2);
+		assert.ok(JSON.stringify(branch).includes("PERSISTED_OLD_WINDOW_SENTINEL"), "raw history survives disk reopen");
+		const canonical = reopened.buildSessionProjection().messages;
+		assert.equal(JSON.stringify(canonical).includes("PERSISTED_OLD_WINDOW_SENTINEL"), false, "disk-loaded canonical context agrees with the fresh request");
+		assert.ok(canonical.some((message) => message.role === "compactionSummary"), "the accepted empty-summary wrapper survives reload");
+		const system = getCurrentSystemMessage(canonical);
+		assert.ok(JSON.stringify(system).includes("Use the tools as requested."), "the complete system prompt survives the checkpoint");
+		assert.ok(system?.toolsAdded?.some((tool) => tool.name === "wipe_memory"), "the active tool loadout survives reopen");
+		const reopenedMarkers = branch.filter((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE);
+		const latestMarker = reopenedMarkers.at(-1);
+		const previousMarker = reopenedMarkers[0];
+		assert.ok(latestMarker?.type === "custom" && previousMarker?.type === "custom");
+		const latestWindowId = (latestMarker.data as { windowId: string }).windowId;
+		const previousWindowId = (previousMarker.data as { windowId: string }).windowId;
+		const latestBoot = branch.find((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && (entry.details as { windowId?: string } | undefined)?.windowId === latestWindowId);
+		assert.ok(latestBoot && latestBoot.type === "custom_message" && typeof latestBoot.content === "string");
+		assert.ok(latestBoot.content.includes(`Previous context window id: ${previousWindowId}`));
+	} finally {
+		rmSync(sessionDir, { recursive: true, force: true });
 	}
 });
 
@@ -568,6 +787,7 @@ test("real AgentSession: overflow and recoverable length reset and retry once; r
 			await fixture.session.prompt(`RECOVER_${failure}_SENTINEL`);
 			await fixture.session.waitForIdle();
 			assert.equal(resetMarkers(fixture).length, 1, `${failure} performs one reset`);
+			assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "compaction").length, 1, `${failure} commits one native reset checkpoint`);
 			assert.equal(fixture.requests.length, 2, `${failure} resumes once`);
 			assertFreshRequest(fixture, 1, `RECOVER_${failure}_SENTINEL`);
 		} finally {
@@ -583,8 +803,8 @@ test("real AgentSession: overflow and recoverable length reset and retry once; r
 		await repeated.session.prompt("REPEATED_OVERFLOW_SENTINEL");
 		await repeated.session.waitForIdle();
 		assert.equal(resetMarkers(repeated).length, 1, "repeated overflow does not create repeated windows");
+		assert.equal(repeated.sessionManager.getBranch().filter((entry) => entry.type === "compaction").length, 1, "bounded overflow recovery commits one retain-none checkpoint");
 		assert.equal(repeated.requests.length, 2, "repeated overflow stops after one recovery request");
-		assert.ok(repeated.events.some((event) => event.type === "compaction_end" && typeof event.errorMessage === "string"));
 	} finally {
 		repeated.close();
 	}
@@ -753,7 +973,7 @@ test("real AgentSession: injected settings managers own live policy and ignore c
 		assert.equal(resetMarkers(first).length, 1, "live enablement and a lower reserve apply on the next turn");
 
 		firstHighUsage.next = true;
-		firstManager.applyOverrides({ compaction: { reserveTokens: 90_000 } });
+		firstManager.applyOverrides({ compaction: { reserveTokens: 80_000 } });
 		await first.session.prompt("INJECTED_LIVE_HIGH_RESERVE");
 		await first.session.waitForIdle();
 		assert.equal(resetMarkers(first).length, 2, "a live reserve increase drives the next reset decision");
@@ -820,13 +1040,82 @@ test("real AgentSession: injected model overrides select the active model's rese
 	}
 });
 
+test("real AgentSession: persisted budget warning re-arms after a later abort/error", { timeout: 30000 }, async () => {
+	for (const mode of ["ctx-abort", "generic-error"] as const) {
+		let fixture!: Fixture;
+		let warningTurnStarted!: () => void;
+		let releaseWarningTurn!: () => void;
+		let didAbort = false;
+		const warningStarted = new Promise<void>((resolve) => { warningTurnStarted = resolve; });
+		const warningGate = new Promise<void>((resolve) => { releaseWarningTurn = resolve; });
+		fixture = await openFixture({
+			compactionEnabled: true,
+			hook: mode === "ctx-abort" ? (pi, _getSession, requests) => pi.on("context", (_event, ctx) => {
+				if (!didAbort && requests.length === 3) {
+					didAbort = true;
+					ctx.abort();
+				}
+			}) : undefined,
+			script: async (request, context) => {
+				if (request === 1) return assistant(fixture, [{ type: "toolCall", id: "rearm-probe-1", name: "get_context_remaining", arguments: {} }], "toolUse", { usage: usage(50_000) });
+				if (request === 2) return assistant(fixture, [{ type: "toolCall", id: "rearm-probe-2", name: "get_context_remaining", arguments: {} }], "toolUse", { usage: usage(60_000) });
+				if (request === 3) {
+					assert.ok(text(context).includes(WARNING_PROMPT), "the low-budget request carries the close-out warning");
+					warningTurnStarted();
+					await warningGate;
+					return assistant(fixture, [{ type: "toolCall", id: "rearm-note", name: "notes_write", arguments: { address: "warning-rearm.md", content: "DURABLE_WARNING_CHECKPOINT" } }], "toolUse", { usage: usage(60_000) });
+				}
+				if (request === 4 && mode === "generic-error") {
+					assert.equal(text(context).split(WARNING_PROMPT).length - 1, 1, "the durable warning is not injected a second time");
+					assert.ok(text(context).includes("REARM_QUEUED_FOLLOWUP"));
+					return assistant(fixture, [{ type: "text", text: "ordinary provider failure" }], "error", { errorMessage: "synthetic non-overflow failure", usage: usage(60_000) });
+				}
+				return assistant(fixture, [{ type: "text", text: `normal response ${request}` }], "stop", { usage: usage(60_000) });
+			},
+		});
+		try {
+			const initialTurn = fixture.session.prompt(`REARM_${mode}_INITIAL`);
+			await warningStarted;
+			fixture.session.steer("REARM_QUEUED_FOLLOWUP");
+			releaseWarningTurn();
+			await initialTurn;
+			await fixture.session.waitForIdle();
+			const afterFailure = fixture.sessionManager.getBranch();
+			assert.equal(afterFailure.filter((entry) => entry.type === "custom_message" && entry.customType === WARNING_TYPE).length, 1, "the warning was persisted exactly once before the failed follow-up");
+			assert.ok(existsSync(join(fixture.notesRoot, "pi", "session", fixture.sessionManager.getSessionId(), "warning-rearm.md")), "the preceding note/tool turn completed");
+			assert.equal(resetMarkers(fixture).length, 0, `${mode} itself must not reset`);
+			assert.equal(afterFailure.filter((entry) => entry.type === "compaction").length, 0);
+			const failedContext = fixture.streamContexts[3];
+			assert.ok(failedContext);
+			assert.equal(text(failedContext).split(WARNING_PROMPT).length - 1, 1, "the persisted warning appears once, without duplicate injection");
+			assert.equal(text(failedContext).split("REARM_QUEUED_FOLLOWUP").length - 1, 1, "queued follow-up reaches the failed request once");
+			assert.equal(fixture.streamSignals.at(-1), mode === "ctx-abort", "the abort case cancels Pi's real signal; the error case does not");
+
+			await fixture.session.prompt("REARM_AFTER_FAILED_TURN");
+			await fixture.session.waitForIdle();
+			assert.equal(resetMarkers(fixture).length, 1, "the next low-budget normal stop re-arms and commits one reset");
+			assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === WARNING_TYPE).length, 1, "re-arming does not duplicate the durable warning");
+			const checkpoint = fixture.sessionManager.getBranch().find((entry) => entry.type === "compaction");
+			assert.ok(checkpoint?.type === "compaction");
+			assert.equal(checkpoint.firstKeptEntryId, checkpoint.id, "the retry closes with one retain-none checkpoint");
+			assertFreshRequest(fixture, fixture.requests.length - 1, "REARM_AFTER_FAILED_TURN");
+		} finally {
+			releaseWarningTurn();
+			fixture.close();
+		}
+	}
+});
+
 test("real AgentSession: warning precedes a durable checkpoint, including failed writes and an ignored warning", { timeout: 20000 }, async () => {
 	for (const scenario of ["checkpoint", "write-error", "ignored-warning"] as const) {
 		let fixture!: Fixture;
 		fixture = await openFixture({
 			compactionEnabled: true,
 			script: (request, context) => {
-				if (request === 3) assert.ok(text(context).includes(GUIDANCE_OPEN_TAG), "the critical warning reaches the provider before checkpoint choice");
+				if (request === 3) {
+					assert.ok(text(context).includes(GUIDANCE_OPEN_TAG), "the warning remains in its hidden guidance wrapper");
+					assert.ok(text(context).includes(WARNING_PROMPT), "the shared close-out warning reaches the provider before checkpoint choice");
+				}
 				if (request === 1) return assistant(fixture, [{ type: "toolCall", id: "budget-probe-1", name: "get_context_remaining", arguments: {} }], "toolUse", { usage: usage(50_000) });
 				if (request === 2) return assistant(fixture, [{ type: "toolCall", id: "budget-probe-2", name: "get_context_remaining", arguments: {} }], "toolUse", { usage: usage(60_000) });
 				if (request === 3 && scenario !== "ignored-warning") return assistant(fixture, [{ type: "toolCall", id: "checkpoint", name: "notes_write", arguments: {
@@ -853,8 +1142,9 @@ test("real AgentSession: warning precedes a durable checkpoint, including failed
 				assert.equal(existsSync(noteFile), false, "a failed checkpoint does not create a note");
 				assert.ok(branch.some((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "notes_write" && entry.message.isError), "the failed write is a durable tool error");
 			} else {
-				assert.equal(resetMarkers(fixture).length, 0, "ignoring the warning does not reset automatically");
+				assert.equal(resetMarkers(fixture).length, 1, "normal stop falls back to the same reset even when the warning was ignored");
 				assert.equal(existsSync(noteFile), false);
+				assertFreshRequest(fixture, fixture.requests.length - 1, `WARNING_${scenario.toUpperCase()}_SENTINEL`);
 			}
 		} finally {
 			fixture.close();

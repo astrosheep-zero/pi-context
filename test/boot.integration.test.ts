@@ -7,7 +7,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { historyFromSession, internal } from "../src/index.js";
 import { physicalPath } from "../src/notes/paths.js";
 import { listNotes } from "../src/notes/store.js";
-import { CONTINUATION_TYPE } from "../src/protocol.js";
+import { CONTINUATION_TYPE, WARNING_TYPE } from "../src/protocol.js";
 import {
 	appendText,
 	call,
@@ -46,7 +46,12 @@ test("custom reset marker removes old provider context while history remains sea
 	const branch = sessionManager.getBranch();
 	const marker = branch.find((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
 	assert.ok(marker && marker.type === "custom");
-	assert.equal(marker.parentId, toolResultId, "marker follows the completed tool result");
+	const checkpoint = branch.find((entry) => entry.type === "compaction");
+	assert.ok(checkpoint && checkpoint.type === "compaction", "reset persists a native retain-none checkpoint");
+	assert.equal(checkpoint.parentId, toolResultId, "checkpoint follows the completed tool result");
+	assert.equal(checkpoint.summary, "");
+	assert.equal(checkpoint.firstKeptEntryId, checkpoint.id);
+	assert.equal(marker.parentId, checkpoint.id, "marker follows the native checkpoint");
 	assert.deepEqual(Object.keys(marker.data as object), ["windowId"]);
 	const projected = await runContextWithSystemHook(captured, ctx, sessionManager.buildSessionContext().messages);
 	const providerText = JSON.stringify(projected?.messages ?? []);
@@ -221,7 +226,7 @@ test("wipe_memory uses one turn boundary and never calls ctx.compact", async () 
 	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE && entry.details && typeof entry.details === "object" && "windowId" in entry.details).length, 1);
 });
 
-test("pi-context command toggles future work, /wipe-memory is the manual path, and active markers cancel /compact", async () => {
+test("pi-context command toggles future work, /wipe-memory starts close-out, and /compact remains disabled", async () => {
 	const sessionManager = manager();
 	appendText(sessionManager, "user", "hello");
 	const captured = makeExtension(sessionManager);
@@ -244,17 +249,16 @@ test("pi-context command toggles future work, /wipe-memory is the manual path, a
 	notices = await runCommand(captured, "pi-context", "on", low);
 	assert.match(notices[0]?.message ?? "", /on/);
 	notices = await runCommand(captured, "wipe-memory", "", low);
-	assert.equal(notices.length, 1, "manual clear emits exactly one notification");
-	assert.match(notices[0]?.message ?? "", /memory cleared/);
-	assert.equal(captured.sent.length, 3, "/wipe-memory writes one hidden boot and one continuation without triggering a model turn");
-	assert.equal(captured.sent[1]?.options?.triggerTurn, false);
-	assert.equal(captured.sent[1]?.message.customType, internal.BOOT_TYPE);
-	assert.equal(captured.sent[2]?.message.customType, CONTINUATION_TYPE);
-	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE).length, 1);
+	assert.equal(notices.length, 0, "the command begins a model close-out rather than announcing a reset request");
+	assert.equal(captured.sent.length, 2, "the command persists one hidden warning after the startup boot");
+	assert.equal(captured.sent[1]?.options?.triggerTurn, true, "the shared warning starts an ordinary agent turn");
+	assert.equal(captured.sent[1]?.message.customType, WARNING_TYPE);
+	assert.equal(captured.sent[1]?.message.display, false);
+	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE).length, 0, "no reset is claimed until close-out completes");
 	const markerContext = await runManualCompact(captured, low);
-	assert.deepEqual(markerContext, { cancel: true }, "/compact is canceled while a marker is active");
+	assert.deepEqual(markerContext, { cancel: true }, "/compact is canceled while context windows are enabled");
 	const projected = await runContextWithSystemHook(captured, low, sessionManager.buildSessionContext().messages);
-	assert.equal(JSON.stringify(projected?.messages ?? []).includes("hello"), false, "off keeps the existing wipe in force");
+	assert.equal(JSON.stringify(projected?.messages ?? []).includes("hello"), true, "the old window remains active until the close-out commits");
 
 	notices = await runCommand(captured, "pi-context", "maybe", low);
 	assert.equal(notices[0]?.type, "error", "unknown argument rejected");
