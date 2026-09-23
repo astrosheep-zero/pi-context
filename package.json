@@ -16,6 +16,9 @@
   "pi": {
     "extensions": [
       "./dist/extension.js"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "files": [
@@ -24,7 +27,8 @@
     "docs",
     "LICENSE",
     "README.md",
-    "playbook.md"
+    "playbook.md",
+    "skills"
   ],
   "bin": {
     "dream": "dist/src/dream/cli.js"

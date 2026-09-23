@@ -6,7 +6,7 @@ import { generateDiffString } from "@earendil-works/pi-coding-agent";
 import { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "../protocol.js";
 import { isOrigin, isScope, parseNote, serializeNote, stripLeadingFrontmatter, type NoteMeta, type Origin } from "./frontmatter.js";
 import { addressFor, assertGlobPattern, assertVirtualPath, globToRegExp } from "./address.js";
-import { agentSlug, modelSlug, namespaceSlugs, physicalPath, scopeDir, type Scope } from "./paths.js";
+import { agentSlug, modelSlug, namespaceSlugs, physicalPath, projectKey, scopeDir, type Scope } from "./paths.js";
 import { earliestMatchOffsetChars } from "../tool-output.js";
 
 export type { NoteMeta, Origin, Scope };
@@ -183,6 +183,7 @@ export function writeNote(ctx: ExtensionContext, vpath: string, body: string, op
 		updated_at: now,
 		last_accessed: now,
 		access_count: 0,
+		...(scope === "session" ? { project: projectKey(ctx.cwd) } : {}),
 	};
 	meta.scope = scope;
 	meta.origin = origin;

@@ -123,6 +123,14 @@ rm "${PI_NOTES_HOME:-$HOME/.agents/notes}/.dream.lock"
 
 Removing a lock while a holder is running is outside the supported cooperative protocol and can let two dreams run at once.
 
+## Dream skill
+
+The package also provides `/skill:dream` for reviewing notes in the current agent session. The skill reads the same `playbook.md` used by the `dream` CLI; there is only one set of dream instructions.
+
+Scope comes from the invocation directory: inside the notes store, dream may inspect across homes; in a project, it extracts from that project's material and all session notes with matching project metadata, and organizes only that project's notes. New session notes record their project key in the frontmatter `project` field; older notes without that field remain untouched and are skipped in project-only discovery. There is no migration or backfill. Changing directories later does not broaden the scope.
+
+The skill does not start another model or install the CLI's runtime safeguards. Before writing notes, it requires an exclusive dream lock and Git audit snapshots in the notes store. If those safeguards cannot be established, it remains read-only. Session records and unapproved homes stay untouched.
+
 ## Documentation
 
 Implementation architecture and the reset lifecycle live in [docs/](docs/).

@@ -21,6 +21,8 @@ export type NoteMeta = {
 	supersedes?: string;
 	recurrence_count?: number;
 	recurrence_windows?: string[];
+	/** Project ownership on newly-created session notes; legacy/invalid values are preserved as-is. */
+	project?: unknown;
 	[key: string]: unknown;
 };
 

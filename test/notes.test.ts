@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { parseNote } from "../src/notes/frontmatter.js";
 import { physicalPath, projectKey, scopeDir } from "../src/notes/paths.js";
 import { listNotes, type Scope } from "../src/notes/store.js";
 import { CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
@@ -85,14 +86,111 @@ test("write lands a real markdown file with harness frontmatter and a pure body"
 	for (const key of ["created_at", "updated_at", "last_accessed"]) {
 		assert.match(raw, new RegExp(`^${key}: \\d{4}-\\d{2}-\\d{2}T`, "m"), `frontmatter renders ${key} via localIso`);
 	}
+	assert.equal(parseNote(raw).meta.project, projectKey(ctx.cwd), "a newly-created session note records its existing project key");
 	assert.equal(result.address, "a/b.md");
 	assert.equal(result.written, true);
+	assert.equal(existsSync(join(scopeDir("session", ctx), ".session.json")), false, "ownership is stored in note frontmatter, not a sidecar");
 
 	// A leading YAML block in user content is stripped from the body.
 	await call(captured, "notes_write", { path: "stripped.md", content: "---\nscope: human\nnonsense: true\n---\nreal body" }, ctx);
 	const stripped = readFileSync(physicalPath("session", "stripped.md", ctx), "utf8");
 	assert.match(stripped, /\n---\n\nreal body$/, "the injected block is not part of the body");
 	assert.equal(stripped.includes("nonsense"), false, "the injected block never reaches the file");
+});
+
+test("session-note project ownership is per note, persistent across sessions, and not reassigned by cwd", async () => {
+	freshRoot();
+	const cwdA = join(testEnvironment.cwd, "project-a");
+	const cwdB = join(testEnvironment.cwd, "project-b");
+	mkdirSync(cwdA, { recursive: true });
+	mkdirSync(cwdB, { recursive: true });
+	const projectA = projectKey(cwdA);
+	const projectB = projectKey(cwdB);
+	assert.notEqual(projectA, projectB);
+
+	const firstSession = manager();
+	const firstCaptured = makeExtension(firstSession);
+	const firstCtx = context(firstSession, undefined, undefined, true, cwdA);
+	await call(firstCaptured, "notes_write", { path: "first.md", content: "first project session" }, firstCtx);
+	const firstFile = physicalPath("session", "first.md", firstCtx);
+	assert.equal(parseNote(readFileSync(firstFile, "utf8")).meta.project, projectA);
+
+	const secondSession = manager();
+	const secondCaptured = makeExtension(secondSession);
+	const secondCtx = context(secondSession, undefined, undefined, true, cwdA);
+	await call(secondCaptured, "notes_write", { path: "second.md", content: "same project, another session" }, secondCtx);
+	const secondFile = physicalPath("session", "second.md", secondCtx);
+	assert.equal(parseNote(readFileSync(secondFile, "utf8")).meta.project, projectA, "another session in the same project carries the matching key");
+
+	const thirdSession = manager();
+	const thirdCaptured = makeExtension(thirdSession);
+	const thirdCtx = context(thirdSession, undefined, undefined, true, cwdB);
+	await call(thirdCaptured, "notes_write", { path: "third.md", content: "different project" }, thirdCtx);
+	const thirdFile = physicalPath("session", "third.md", thirdCtx);
+	assert.equal(parseNote(readFileSync(thirdFile, "utf8")).meta.project, projectB);
+	const projectASessions = [firstFile, secondFile, thirdFile].filter((file) => parseNote(readFileSync(file, "utf8")).meta.project === projectA);
+	assert.deepEqual(projectASessions.sort(), [firstFile, secondFile].sort(), "exact frontmatter project matching recognizes only sessions from the same project");
+
+	const movedContext = context(firstSession, undefined, undefined, true, cwdB);
+	await call(firstCaptured, "notes_write", { path: "first.md", content: "overwritten from another cwd" }, movedContext);
+	assert.equal(parseNote(readFileSync(firstFile, "utf8")).meta.project, projectA, "overwriting an existing note does not silently reassign it");
+	await call(firstCaptured, "notes_edit", { path: "first.md", edits: [{ oldText: "overwritten", newText: "edited" }] }, movedContext);
+	assert.equal(parseNote(readFileSync(firstFile, "utf8")).meta.project, projectA, "editing an existing note preserves its original project key");
+	await call(firstCaptured, "notes_read", { path: "first.md" }, movedContext);
+	assert.equal(parseNote(readFileSync(firstFile, "utf8")).meta.project, projectA, "reading preserves existing project ownership");
+
+	await call(firstCaptured, "notes_write", { path: "new-from-project-b.md", content: "new note", scope: "session" }, movedContext);
+	assert.equal(parseNote(readFileSync(physicalPath("session", "new-from-project-b.md", movedContext), "utf8")).meta.project, projectB, "only a newly-created session note uses the current project key");
+	await call(firstCaptured, "notes_write", { path: "project-note.md", content: "project home note", scope: "project" }, movedContext);
+	assert.equal(parseNote(readFileSync(physicalPath("project", "project-note.md", movedContext), "utf8")).meta.project, undefined, "project-home notes do not receive session ownership metadata");
+	assert.equal(listNotes(movedContext, { scope: "session" }).length, 2, "project ownership remains frontmatter, not a separate note");
+});
+
+test("legacy and invalid session project metadata stays unknown without read/write backfill", async () => {
+	freshRoot();
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const legacyFile = physicalPath("session", "legacy.md", ctx);
+	mkdirSync(scopeDir("session", ctx), { recursive: true });
+	writeFileSync(legacyFile, `---
+origin: self
+status: active
+stale: false
+created_at: 2026-01-01T00:00:00.000+00:00
+updated_at: 2026-01-01T00:00:00.000+00:00
+last_accessed: 2026-01-01T00:00:00.000+00:00
+access_count: 0
+---
+
+legacy body`);
+	assert.equal(parseNote(readFileSync(legacyFile, "utf8")).meta.project, undefined);
+	assert.equal(listNotes(ctx, { scope: "session" })[0]?.meta.project, undefined, "listing a legacy note does not backfill project ownership");
+	await call(captured, "notes_read", { path: "legacy.md" }, ctx);
+	assert.equal(parseNote(readFileSync(legacyFile, "utf8")).meta.project, undefined, "reading a legacy note does not backfill project ownership");
+	await call(captured, "notes_write", { path: "legacy.md", content: "legacy overwritten" }, ctx);
+	assert.equal(parseNote(readFileSync(legacyFile, "utf8")).meta.project, undefined, "overwriting a legacy note does not migrate it");
+	await call(captured, "notes_edit", { path: "legacy.md", edits: [{ oldText: "overwritten", newText: "edited" }] }, ctx);
+	assert.equal(parseNote(readFileSync(legacyFile, "utf8")).meta.project, undefined, "editing a legacy note does not backfill ownership");
+
+	const invalidFile = physicalPath("session", "invalid.md", ctx);
+	writeFileSync(invalidFile, `---
+origin: self
+status: active
+stale: false
+created_at: 2026-01-01T00:00:00.000+00:00
+updated_at: 2026-01-01T00:00:00.000+00:00
+last_accessed: 2026-01-01T00:00:00.000+00:00
+access_count: 0
+project: 17
+---
+
+invalid owner`);
+	assert.equal(parseNote(readFileSync(invalidFile, "utf8")).meta.project, 17);
+	assert.notEqual(parseNote(readFileSync(invalidFile, "utf8")).meta.project, projectKey(ctx.cwd), "invalid ownership does not match the current project key");
+	await call(captured, "notes_write", { path: "invalid.md", content: "still invalid" }, ctx);
+	assert.equal(parseNote(readFileSync(invalidFile, "utf8")).meta.project, 17, "an invalid value remains unknown and is not replaced with cwd-derived ownership");
+	assert.equal(existsSync(join(scopeDir("session", ctx), ".session.json")), false, "legacy and new notes use no ownership sidecar");
 });
 
 test("edit is body-scoped with named failures and a replace_all escape hatch", async () => {
