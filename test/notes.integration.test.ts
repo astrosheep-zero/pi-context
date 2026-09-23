@@ -3,11 +3,11 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { internal } from "../src/index.js";
-import { loadNotesSnapshot as loadNotesSnapshot } from "../src/notes/notes-snapshot.js";
+import { loadNotesSnapshot } from "../src/pi/notes/snapshot.js";
 import { renderBootBlock } from "../src/context/prompts.js";
 import { localIso } from "../src/notes/frontmatter.js";
-import { physicalPath, scopeDir } from "../src/notes/paths.js";
-import { listNotes, type NoteRow, type Scope } from "../src/notes/store.js";
+import type { NoteRow, Scope } from "../src/notes/index.js";
+import { listNotes, physicalPath, scopeDir } from "./helpers/notes.js";
 import { TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
 import {
 	assertWithinBudget,

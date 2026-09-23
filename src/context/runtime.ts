@@ -2,7 +2,7 @@ import { getCurrentSystemMessage, Type } from "@earendil-works/pi-ai";
 import { VERSION, defineTool, type ExtensionAPI, type ExtensionContext, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { registerBudget } from "./budget.js";
 import { output } from "../tool-output.js";
-import { migrateLegacyHomes } from "../notes/paths.js";
+import { migrateLegacyHomes } from "../pi/notes/adapter.js";
 import { currentReset, currentWindowId, isCheckpointBackedReset, isWindowBoot, isWindowMarker, projectRootWindow, projectWindow, rootWindowId, type WindowMarker } from "./context-window.js";
 import { registerResetLifecycle } from "./reset-lifecycle.js";
 import { buildResetDrafts, resetTailCommitted } from "./reset-artifacts.js";

@@ -1,13 +1,13 @@
 import { VERSION, type ExtensionAPI, type ExtensionFactory, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { registerHistoryTools } from "./history/history-tools.js";
-import { registerNotesTools } from "./notes/tools.js";
+import { registerNotesTools } from "./pi/notes/tools.js";
 import { deriveThresholds } from "./context/thresholds.js";
 import { registerContext } from "./context/runtime.js";
 import { mergePiContextSettings } from "./settings.js";
 import { NOTE_TYPE, BOOT_TYPE, GUIDANCE_TYPE, WARNING_TYPE, RESET_MARKER_TYPE, CONTINUATION_TYPE, MAX_NOTE_BYTES, CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG, GUIDANCE_OPEN_TAG, PI_CONTEXT_SETTINGS_KEY, DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, WARNING_RUNWAY_TOKENS, CONTINUATION, WARNING_PROMPT, WARNING_CONTENT } from "./protocol.js";
 import { assertVirtualPath } from "./notes/address.js";
 export { historyFromSession } from "./history/history.js";
-export { notesFromSession } from "./notes/session-replay.js";
+export { notesFromSession } from "./pi/notes/session-replay.js";
 
 function registerPiContext(pi: ExtensionAPI, settingsManager?: SettingsManager): void {
 	const [major, minor] = VERSION.split(".").map(Number);

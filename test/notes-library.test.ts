@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createNotesStore, NoteError, type NotesContext } from "../src/notes/lib/index.js";
+import { createNotesStore, NoteError, type NotesContext } from "../src/notes/index.js";
 
 function fixture(t: test.TestContext) {
 	const home = mkdtempSync(join(tmpdir(), "notes-library-"));
@@ -22,9 +22,11 @@ test("standalone notes API persists metadata, edits, lists and searches full res
 	assert.equal(read.meta.access_count, 1);
 	assert.equal(notes.read("missing.md"), undefined);
 	const edited = notes.edit("checkpoint", [{ oldText: "alpha", newText: "beta" }]);
-	assert.deepEqual(edited.change, { before: "alpha\nneedle 😀", after: "beta\nneedle 😀" });
+	assert.deepEqual(edited.change, { kind: "body", before: "alpha\nneedle 😀", after: "beta\nneedle 😀" });
+	assert.equal(edited.resolvedScope, read.resolvedScope);
 	assert.equal(edited.applied, 1);
 	const metadataEdit = notes.edit("checkpoint", undefined, { stale: true });
+	assert.equal(metadataEdit.change.kind, "metadata");
 	assert.match(metadataEdit.change.before, /\nstale: false\n/);
 	assert.match(metadataEdit.change.after, /\nstale: true\n/);
 	assert.equal(metadataEdit.change.after.includes("needle"), false, "metadata-only diff excludes body");
@@ -43,6 +45,11 @@ test("standalone notes API persists metadata, edits, lists and searches full res
 	assert.equal(rewritten.meta.project, "project-12345678");
 	assert.equal(rewritten.meta.custom, "preserved");
 	assert.equal(rewritten.meta.stale, false);
+	const combined = moved.edit("checkpoint", [{ oldText: "new", newText: "final" }], { stale: true });
+	assert.equal(combined.change.kind, "file");
+	assert.match(combined.change.after, /\nstale: true\n/);
+	assert.match(combined.change.after, /final body$/);
+	assert.deepEqual(moved.edit("checkpoint", undefined, { stale: true }).change, { kind: "none", before: "", after: "" });
 });
 
 test("stores snapshot explicit identity and do not leak homes across instances", (t) => {
@@ -70,11 +77,14 @@ test("invalid addressing and failed edits leave stored bytes untouched", (t) => 
 	assert.throws(() => createNotesStore({ ...context, sessionId: "../escape" }));
 	assert.throws(() => notes.write("@project/../escape", "bad"));
 	assert.throws(() => notes.list({ scope: "agent", who: "../escape" }));
+	// The typed API disallows this; JavaScript callers must still receive a refusal.
+	// @ts-expect-error who cannot accompany project scope
+	assert.throws(() => notes.list({ scope: "project", who: "root" }), (error: unknown) => error instanceof NoteError && error.code === "invalid_scope");
 	notes.write("edit", "alpha\nbeta\nbeta");
 	const path = join(home, "pi/session/session-a/edit.md");
 	const before = readFileSync(path, "utf8");
-	assert.throws(() => notes.edit("edit", [{ oldText: "beta", newText: "B" }]), (error: unknown) => error instanceof NoteError && error.code === "ambiguous_edit" && error.line_numbers?.join(",") === "2,3");
-	assert.throws(() => notes.edit("edit", [{ oldText: "alpha", newText: "A" }, { oldText: "absent", newText: "X" }]), (error: unknown) => error instanceof NoteError && error.code === "no_match" && error.edit_index === 1);
+	assert.throws(() => notes.edit("edit", [{ oldText: "beta", newText: "B" }]), (error: unknown) => error instanceof NoteError && error.code === "ambiguous_edit" && error.lineNumbers?.join(",") === "2,3");
+	assert.throws(() => notes.edit("edit", [{ oldText: "alpha", newText: "A" }, { oldText: "absent", newText: "X" }]), (error: unknown) => error instanceof NoteError && error.code === "no_match" && error.editIndex === 1);
 	assert.equal(readFileSync(path, "utf8"), before);
 	assert.throws(() => notes.edit("absent", undefined, { stale: true }), (error: unknown) => error instanceof NoteError && error.code === "not_found");
 });

@@ -13,8 +13,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { parseNote } from "../src/notes/frontmatter.js";
-import { physicalPath, projectKey, scopeDir } from "../src/notes/paths.js";
-import { listNotes, type Scope } from "../src/notes/store.js";
+import { projectKey } from "../src/notes/paths.js";
+import type { Scope } from "../src/notes/index.js";
+import { listNotes, physicalPath, scopeDir } from "./helpers/notes.js";
 import { CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
 import { call, context, explicitBoot, installExtensionTestEnvironment, makeExtension, manager, resultJson, resultRead, runHandlers } from "./helpers/extension.js";
 

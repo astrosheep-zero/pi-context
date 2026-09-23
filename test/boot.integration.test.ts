@@ -5,8 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { historyFromSession, internal } from "../src/index.js";
-import { physicalPath } from "../src/notes/paths.js";
-import { listNotes } from "../src/notes/store.js";
+import { listNotes, physicalPath } from "./helpers/notes.js";
 import { CONTINUATION_TYPE, WARNING_TYPE } from "../src/protocol.js";
 import {
 	appendText,

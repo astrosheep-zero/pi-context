@@ -1,4 +1,4 @@
-import type { NotesHome, NotesSnapshot } from "../notes/notes-snapshot.js";
+import type { NotesHome, NotesSnapshot } from "../pi/notes/snapshot.js";
 import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, POCKET_AGENT_LIMIT, POCKET_HUMAN_LIMIT, POCKET_MODEL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "../protocol.js";
 
 /** Codex-style <context_window> identity block: the resolved agent and model names plus first/current/previous window ids. */

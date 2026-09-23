@@ -103,17 +103,40 @@ const matches = notes.search(["library"]);
 
 - `write(address, content, { origin?, stale? }?)` returns `{ meta }`. Default origin is `self`; overwriting preserves creation time, existing project ownership, and unknown metadata, and revives stale notes unless `stale: true` is supplied.
 - `read(address)` returns `{ meta, body, text, resolvedScope }` or `undefined`. **Reads update** `last_accessed` and `access_count` on disk; `text` includes frontmatter.
-- `edit(address, edits?, { origin?, stale?, replaceAll? }?)` returns `{ meta, applied, resolved_scope, change: { before, after } }`. Edits affect the body; metadata-only changes need no edits. Each replacement uses the evolving body in array order; the complete batch is written atomically only after every edit succeeds. `change` contains the relevant body/frontmatter/full-file diff inputs, not a rendered diff.
+- `edit(address, edits?, { origin?, stale?, replaceAll? }?)` returns `{ meta, applied, resolvedScope, change }`. Edits affect the body; metadata-only changes need no edits. Each replacement uses the evolving body in array order; the complete batch is written atomically only after every edit succeeds. `change` is a typed `{ kind, before, after }`: `kind` is `body`, `metadata`, or `file` to identify the diff inputs, or `none` with empty strings when neither body nor origin/stale changed. It is not a rendered diff.
 - `list({ pattern?, scope?, who? }?)` returns complete `NoteRow[]`, sorted by update time descending with address tie-breaking. Rows contain address, scope, virtual path, metadata, body, and body byte size. `scope` narrows the five-home view; `who` names a concrete agent/model home.
 - `search(queries: string[], { pattern?, scope?, who? }?)` returns complete `NoteSearchRow[]`, sorted by address. Matching is case-sensitive literal OR over body lines; matches contain one-based `line`, `text`, and `offsetChars` into the serialized read text. Neither listing nor search increments access metadata.
 
-The library returns full data, not tool envelopes or paginated/truncated output. `NoteError` exposes the existing named store refusals through `code`, with `line_numbers` for ambiguous edits and `edit_index` for a failed edit. Invalid addresses/identities and filesystem failures throw errors; only a missing `read` returns `undefined`. Notes remain markdown files with the existing frontmatter and size limits; writes use same-directory atomic rename, without cross-process locking. Foreign named homes can be read (including the access-metadata update), but their bodies cannot be written or edited through the store. These are cooperative address rules, not an OS security sandbox.
+`list` and `search` share the `NotesQuery` type. A merged query uses `{ pattern? }`; a single-home query adds `scope`. Only `scope: "agent" | "model"` accepts `who`. TypeScript rejects combinations such as `{ scope: "project", who: "root" }`, and JavaScript callers receive a runtime refusal.
+
+The library returns full data, not tool envelopes or paginated/truncated output. `NoteError` exposes the existing named store refusals through `code`, with `lineNumbers` for ambiguous edits and `editIndex` for a failed edit. Runtime API fields use camelCase; persisted metadata keeps its existing snake_case names. The Pi tools translate error fields back to their established wire names. Invalid addresses/identities and filesystem failures throw errors; only a missing `read` returns `undefined`. Notes remain markdown files with the existing frontmatter and size limits; writes use same-directory atomic rename, without cross-process locking. Foreign named homes can be read (including the access-metadata update), but their bodies cannot be written or edited through the store. These are cooperative address rules, not an OS security sandbox.
 
 Addresses use bare paths, `@project/`, `@human/`, `@self/`, `@model/`, or explicit `@agents/<slug>/` and `@models/<slug>/`. Relative self/model addresses resolve to the supplied identity; listing renders their concrete names. The disk layout remains `pi/session/<sessionId>/`, `project/<projectKey>/`, `human/`, `agents/<agent>/`, and `models/<model>/`. No data migration happens on library import or construction. Existing notes retain their metadata; new session notes record the supplied project key.
 
 ### Library and plugin boundary
 
-The implementation lives in `src/notes/lib/`, exposed through its public barrel. The Pi adapter supplies the root and live session/project/agent/model identity on each call. Tools and boot use this same storage implementation. Tool schemas, Pi-style edit diff rendering, wire budgets, pagination, boot selection, legacy activation migration, and session replay stay outside the library. Neutral address/frontmatter/path helpers are exported for integrations; internal source paths are not the supported library API.
+Ownership is explicit in the file tree:
+
+```text
+src/
+  notes/                 # host-independent library
+    index.ts             # deliberate public exports
+    context.ts           # explicit identity validation and snapshot
+    store.ts             # five storage operations
+    address.ts           # address parsing and matching
+    paths.ts             # disk layout and project identity
+    frontmatter.ts       # persisted metadata codec
+    constants.ts         # storage limits
+  pi/notes/              # Pi integration, not part of /notes
+    adapter.ts           # live identity, root defaults, activation migration
+    tools.ts             # schemas, diff rendering, output budgets
+    snapshot.ts          # boot's five-home snapshot
+    session-replay.ts    # historical Pi session operations
+```
+
+The public runtime exports are `createNotesStore`, `NoteError`, `projectKey(cwd)`, and `slugify(value)`, alongside the API's TypeScript types. `projectKey` provides the existing repository/worktree identity algorithm; `slugify` normalizes an agent/model name. Path/glob helpers, serialization, validation internals and constants are implementation details, not exported through `/notes`.
+
+The Pi adapter supplies the root and live session/project/agent/model identity on each call. Tools and boot use the same storage implementation. Tool schemas, Pi-style edit diff rendering, wire budgets, pagination, boot selection, legacy activation migration, and session replay stay outside the library. There are no parallel legacy store/path adapters. Internal source paths are not the supported library API.
 
 ## SDK integration
 

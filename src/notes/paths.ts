@@ -1,62 +1,107 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { existsSync, renameSync } from "node:fs";
-import { join } from "node:path";
-import { notesContextFromPi, notesRoot } from "./pi-adapter.js";
-import {
-	namespaceSlugs as libraryNamespaceSlugs,
-	noteFileName,
-	physicalPath as libraryPhysicalPath,
-	projectKey,
-	scopeDir as libraryScopeDir,
-	sessionHomesRoot as librarySessionHomesRoot,
-	slugify,
-	SLUG_PATTERN,
-	type Scope,
-} from "./lib/index.js";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve, sep } from "node:path";
+import type { NotesContext } from "./context.js";
 
-export type { Scope };
-export { noteFileName, projectKey, slugify, SLUG_PATTERN };
+export type Scope = "session" | "project" | "human" | "agent" | "model";
 
-/** Pi's notes root is resolved from the live host environment. */
-export { notesRoot };
+/** The one legal home-name shape: lowercase [a-z0-9-] runs separated by single dashes. */
+export const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
-export function sessionHomesRoot(home = notesRoot()): string {
-	return librarySessionHomesRoot(home);
+/** Slugify a caller-declared identity; identity is never inferred from note content. */
+export function slugify(value: string): string {
+	const slug = value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+	return slug.length > 0 ? slug : "root";
 }
 
-/** Current Pi agent identity, translated into the library's canonical slug form. */
-export function agentSlug(_ctx: ExtensionContext): string {
-	return slugify(process.env.PI_NOTES_AGENT ?? "root");
+/** `<basename(absGitRoot)-sha1(absGitRoot)[:8]>`, or the same formula over cwd with no git root. */
+export function projectKey(cwd: string): string {
+	const absolute = resolve(cwd);
+	const root = gitRoot(absolute) ?? absolute;
+	const digest = createHash("sha1").update(root).digest("hex").slice(0, 8);
+	return `${basename(root)}-${digest}`;
 }
 
-/** Current Pi model identity, resolved live so mid-session model changes retarget @model. */
-export function modelSlug(ctx: ExtensionContext): string {
-	const id = ctx.model?.id;
-	if (!id) return "default";
-	return slugify(id.split("/").pop() ?? id);
+/**
+ * Repository root behind one `.git` entry. A `.git` directory is the main checkout
+ * itself. A `.git` file is a worktree or submodule pointer: a linked worktree names
+ * `<main>/.git/worktrees/<name>` and resolves to `<main>`, so every worktree of one
+ * repository shares one project identity. Submodules, bare repositories, and separate
+ * git dirs keep the current directory.
+ */
+function repositoryRoot(dir: string): string {
+	let stats;
+	try {
+		stats = statSync(join(dir, ".git"));
+	} catch {
+		return dir;
+	}
+	if (stats.isDirectory()) return dir;
+	let pointer: string;
+	try {
+		pointer = readFileSync(join(dir, ".git"), "utf8");
+	} catch {
+		return dir;
+	}
+	const match = /^gitdir:\s*(.+)$/m.exec(pointer);
+	if (!match) return dir;
+	const parts = resolve(dir, match[1]!.trim()).split(sep);
+	const worktrees = parts.lastIndexOf("worktrees");
+	if (worktrees <= 0 || worktrees !== parts.length - 2) return dir;
+	const common = parts.slice(0, worktrees).join(sep);
+	return basename(common) === ".git" ? dirname(common) : dir;
 }
 
-/** Pi-context physical directory adapter for legacy host callers. */
-export function scopeDir(scope: Scope, ctx: ExtensionContext, who?: string): string {
-	return libraryScopeDir(scope, notesContextFromPi(ctx), who);
+/** Absolute repository root for cwd, walking upward until a directory holds a `.git` entry. */
+function gitRoot(cwd: string): string | undefined {
+	let dir = resolve(cwd);
+	for (;;) {
+		if (existsSync(join(dir, ".git"))) return repositoryRoot(dir);
+		const parent = dirname(dir);
+		if (parent === dir) return undefined;
+		dir = parent;
+	}
 }
 
-/** One-time activation migration remains host-side and never runs at library construction. */
-export function migrateLegacyHomes(home = notesRoot()): string | undefined {
-	const legacy = join(home, "personal");
-	const modern = join(home, "human");
-	if (!existsSync(legacy)) return undefined;
-	if (existsSync(modern)) return "both personal/ and human/ exist under the notes home; migrate by hand, no automatic merge";
-	renameSync(legacy, modern);
-	return undefined;
+/** Absolute directory holding the per-session note homes. */
+export function sessionHomesRoot(home: string): string {
+	return join(home, "pi", "session");
 }
 
-/** Host compatibility helper; namespace enumeration uses the current explicit root. */
-export function namespaceSlugs(namespace: "agents" | "models", home = notesRoot()): string[] {
-	return libraryNamespaceSlugs(namespace, home);
+/** Absolute directory holding one scope's notes. The context's home is already resolved. */
+export function scopeDir(scope: Scope, context: NotesContext, who?: string): string {
+	if (!["session", "project", "human", "agent", "model"].includes(scope)) throw new TypeError("invalid notes scope");
+	if (who !== undefined && (scope !== "agent" && scope !== "model" || !SLUG_PATTERN.test(who))) throw new TypeError("who must be a canonical agent/model slug");
+	if (scope === "human") return join(context.home, "human");
+	if (scope === "project") return join(context.home, "project", context.projectKey);
+	if (scope === "agent") return join(context.home, "agents", who ?? context.agent);
+	if (scope === "model") return join(context.home, "models", who ?? context.model);
+	return join(sessionHomesRoot(context.home), context.sessionId);
 }
 
-/** Pi-context physical file path adapter for existing boot, doctor, and tests. */
-export function physicalPath(scope: Scope, vpath: string, ctx: ExtensionContext, who?: string): string {
-	return libraryPhysicalPath(scope, vpath, notesContextFromPi(ctx), who);
+/** Every existing home directory of the agents/ or models/ namespace, as names. */
+export function namespaceSlugs(namespace: "agents" | "models", home: string): string[] {
+	try {
+		return readdirSync(join(home, namespace), { withFileTypes: true })
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => entry.name)
+			.sort();
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Notes are markdown files: a virtual path without an `.md` suffix gains one, an explicit
+ * `.md` is kept as-is, so `a/b` and `a/b.md` name the same physical file.
+ */
+export function noteFileName(vpath: string): string {
+	return vpath.endsWith(".md") ? vpath : `${vpath}.md`;
+}
+
+/** Absolute file path for a virtual path in a scope. Callers validate the vpath first. */
+export function physicalPath(scope: Scope, vpath: string, context: NotesContext, who?: string): string {
+	if (typeof vpath !== "string" || vpath.length === 0 || vpath.includes("\0") || vpath.includes("\\") || vpath.startsWith("/")) throw new TypeError("path must be a safe virtual relative path");
+	if (vpath.split("/").some((part) => part.length === 0 || part === "." || part === "..")) throw new TypeError("path contains an unsupported component");
+	return join(scopeDir(scope, context, who), ...noteFileName(vpath).split("/"));
 }

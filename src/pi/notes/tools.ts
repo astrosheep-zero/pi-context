@@ -1,10 +1,10 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, generateDiffString, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { localIso } from "./frontmatter.js";
-import { DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS, middleTruncate, output, outputRaw, page, prefixFit, readCharacterWindow, readWindowBlock, withinTextBudget } from "../tool-output.js";
-import { cursor, nullableString, positiveInteger, searchQueries, searchQuery } from "../tool-schema.js";
-import { createNotesStore, NoteError, type Origin } from "./lib/index.js";
-import { notesContextFromPi } from "./pi-adapter.js";
+import { localIso } from "../../notes/frontmatter.js";
+import { createNotesStore, NoteError, type NoteChange, type NoteReadResult, type NoteRow, type NoteSearchRow, type Origin } from "../../notes/index.js";
+import { DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS, middleTruncate, output, outputRaw, page, prefixFit, readCharacterWindow, readWindowBlock, withinTextBudget } from "../../tool-output.js";
+import { cursor, nullableString, positiveInteger, searchQueries, searchQuery } from "../../tool-schema.js";
+import { notesContextFromPi } from "./adapter.js";
 
 const ORIGIN = Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("self"), Type.Literal("external")], {
 	description: "Where the note's content came from. user: written or dictated by the human. self: written by you, the agent (default). external: anything else — third-party text, tool output, fetched material.",
@@ -14,11 +14,16 @@ const ADDRESS_DESCRIPTION = "Address forms are bare `<vpath>` for this session, 
 function failure(error: unknown) {
 	if (error instanceof NoteError) {
 		const payload: Record<string, unknown> = { error: error.message };
-		if (error.line_numbers) payload.line_numbers = error.line_numbers;
-		if (error.edit_index !== undefined) payload.edit_index = error.edit_index;
+		if (error.lineNumbers) payload.line_numbers = error.lineNumbers;
+		if (error.editIndex !== undefined) payload.edit_index = error.editIndex;
 		return output(payload);
 	}
 	throw error;
+}
+
+function renderDiff(change: NoteChange): string {
+	if (change.kind === "none") return "";
+	return generateDiffString(change.before, change.after).diff;
 }
 
 export function registerNotesTools(pi: ExtensionAPI) {
@@ -42,7 +47,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _update, ctx) {
 			try {
 				const { applied, change } = createNotesStore(notesContextFromPi(ctx)).edit(params.address, params.edits, { origin: params.origin as Origin | undefined, stale: params.stale, replaceAll: params.replace_all });
-				const diff = change.before === "" && change.after === "" ? "" : generateDiffString(change.before, change.after).diff;
+				const diff = renderDiff(change);
 				return output({ address: params.address, applied, diff });
 			} catch (error) { return failure(error); }
 		},
@@ -53,7 +58,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 		description: `Read a character window of a note file, frontmatter included. ${ADDRESS_DESCRIPTION} offset_chars is the code-point offset to start from (default 0) — a negative value counts back from the end — and limit_chars caps the window (default ${DEFAULT_READ_WINDOW_CHARS}, max ${MAX_READ_WINDOW_CHARS}). Each response delivers the longest fitting prefix of that window in the shared READ WINDOW block: concatenate only the content after the block to reconstruct the note.`,
 		parameters: Type.Object({ address: Type.String(), offset_chars: Type.Optional(Type.Integer({ description: "Code-point offset to start from (default 0). A negative value counts back from the end; the response echoes the resolved absolute offset. Pass the previous next_offset_chars back unchanged to continue." })), limit_chars: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_READ_WINDOW_CHARS, description: `Largest requested window in code points (default ${DEFAULT_READ_WINDOW_CHARS}). A window too large for the wire budget is cut short; next_offset_chars names where the next read resumes.` })) }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
-			let note: ReturnType<ReturnType<typeof createNotesStore>["read"]>;
+			let note: NoteReadResult | undefined;
 			try {
 				note = createNotesStore(notesContextFromPi(ctx)).read(params.address);
 			} catch (error) { return failure(error); }
@@ -73,7 +78,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 		description: `List note files as rows carrying address, updated_at, and stale, most recently updated first. ${ADDRESS_DESCRIPTION} Listings merge your five prefixes: this session, @project/, @human/, @self/, and @model/.`,
 		parameters: Type.Object({ pattern: nullableString(), cursor: cursor(), max_results: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
-			let rows: ReturnType<ReturnType<typeof createNotesStore>["list"]>;
+			let rows: NoteRow[];
 			try { rows = createNotesStore(notesContextFromPi(ctx)).list({ pattern: params.pattern ?? undefined }); } catch (error) { return failure(error); }
 			const files: Array<{ address: string; stale: boolean; updated_at: string; address_truncated?: boolean }> = rows.map((row) => ({ address: row.address, stale: row.meta.stale, updated_at: localIso(row.meta.updated_at) }));
 			return output(page(files, params.cursor ?? 0, "files", params.max_results, (file, fits) => {
@@ -90,7 +95,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 		parameters: Type.Object({ query: searchQuery(), pattern: nullableString(), cursor: cursor(), max_matches_per_file: positiveInteger(), max_files: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const queries = searchQueries(params.query);
-			let rows: ReturnType<ReturnType<typeof createNotesStore>["search"]>;
+			let rows: NoteSearchRow[];
 			try { rows = createNotesStore(notesContextFromPi(ctx)).search(queries, { pattern: params.pattern ?? undefined }); } catch (error) { return failure(error); }
 			const maxPerFile = params.max_matches_per_file ?? Number.POSITIVE_INFINITY;
 			const result: Array<{ address: string; updated_at: string; stale: boolean; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }>; address_truncated?: boolean }> = rows.map((row) => {

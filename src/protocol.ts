@@ -4,7 +4,7 @@ export const GUIDANCE_TYPE = "pi-context/guidance";
 export const WARNING_TYPE = "pi-context/warning";
 export const RESET_MARKER_TYPE = "pi-context/reset-marker";
 export const CONTINUATION_TYPE = "pi-context/continuation";
-export { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "./notes/lib/index.js";
+export { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "./notes/constants.js";
 export const POCKET_SESSION_LIMIT = 5;
 export const POCKET_PROJECT_LIMIT = 2;
 export const POCKET_HUMAN_LIMIT = 2;

@@ -1,6 +1,6 @@
-import type { SessionReader } from "../session-reader.js";
-import { MAX_NOTE_BYTES, NOTE_TYPE } from "../protocol.js";
-import { assertVirtualPath } from "./address.js";
+import type { SessionReader } from "../../session-reader.js";
+import { MAX_NOTE_BYTES, NOTE_TYPE } from "../../protocol.js";
+import { assertVirtualPath } from "../../notes/address.js";
 
 export type NoteFile = { text: string; stale: boolean; createdAt: number; updatedAt: number };
 export type NoteOperation = {

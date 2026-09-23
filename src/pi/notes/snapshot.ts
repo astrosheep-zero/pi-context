@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createNotesStore, type NoteRow, type Scope } from "./lib/index.js";
-import { notesContextFromPi } from "./pi-adapter.js";
+import { createNotesStore, type NoteRow, type NotesQuery, type Scope } from "../../notes/index.js";
+import { notesContextFromPi } from "./adapter.js";
 
 const NOTES_HOMES = [
 	{ scope: "session", label: "this session" },
@@ -19,6 +19,11 @@ export type NotesSnapshot = {
 	readonly unavailable: readonly NotesHome[];
 };
 
+function queryForScope(scope: Scope): NotesQuery {
+	if (scope === "agent" || scope === "model") return { scope };
+	return { scope };
+}
+
 /**
  * Acquire the five homes once for one boot. Only filesystem-style errno failures are isolated;
  * malformed note data and unrelated construction errors remain visible to the caller.
@@ -26,7 +31,7 @@ export type NotesSnapshot = {
 export function loadNotesSnapshot(ctx: ExtensionContext, loadHome?: NotesLoader): NotesSnapshot {
 	const openedAt = Date.now();
 	const store = createNotesStore(notesContextFromPi(ctx));
-	const load = loadHome ?? ((_context: ExtensionContext, scope: Scope) => store.list({ scope }));
+	const load = loadHome ?? ((_context: ExtensionContext, scope: Scope) => store.list(queryForScope(scope)));
 	const homes = new Map<Scope, readonly NoteRow[]>();
 	const unavailable: NotesHome[] = [];
 	for (const home of NOTES_HOMES) {

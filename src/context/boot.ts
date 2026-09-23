@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadNotesSnapshot, type NotesSnapshot } from "../notes/notes-snapshot.js";
-import { agentSlug, modelSlug } from "../notes/paths.js";
+import { agentSlug, modelSlug } from "../pi/notes/adapter.js";
+import { loadNotesSnapshot, type NotesSnapshot } from "../pi/notes/snapshot.js";
 import { BOOT_TYPE } from "../protocol.js";
 import { renderBootBlock } from "./prompts.js";
 import { currentReset, isWindowBoot, rootWindowId } from "./context-window.js";

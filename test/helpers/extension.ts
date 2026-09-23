@@ -17,9 +17,9 @@ import {
 	type TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import piContext, { createPiContext } from "../../src/index.js";
-import { loadNotesSnapshot } from "../../src/notes/notes-snapshot.js";
+import { loadNotesSnapshot } from "../../src/pi/notes/snapshot.js";
 import { renderBootBlock } from "../../src/context/prompts.js";
-import { agentSlug, modelSlug } from "../../src/notes/paths.js";
+import { agentSlug, modelSlug } from "../../src/pi/notes/adapter.js";
 import { rootWindowId } from "../../src/context/context-window.js";
 import { TOOL_OUTPUT_MAX_BYTES } from "../../src/tool-output.js";
 
