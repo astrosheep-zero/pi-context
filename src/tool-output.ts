@@ -1,3 +1,5 @@
+export { earliestMatchOffsetChars } from "./text-match.js";
+
 export const TOOL_OUTPUT_MAX_BYTES = 32 * 1024;
 export const DEFAULT_READ_WINDOW_CHARS = 12000;
 export const MAX_READ_WINDOW_CHARS = 50000;
@@ -123,20 +125,6 @@ export function readWindowBlock(identity: ReadonlyArray<readonly [string, string
 	const next = window.next_offset_chars === null ? "null" : String(window.next_offset_chars);
 	const fields = identity.map(([name, value]) => `${name}: ${value}`).join("\n");
 	return `--- READ WINDOW ---\n${fields}\nchars: [${window.offset_chars},${end}) of ${window.total_chars}\nnext_offset_chars: ${next}\n`;
-}
-
-/**
- * Code-point offset of the earliest occurrence of any of `queries` in `text`, or 0 when
- * none occurs. Shared by the two search tools so a match address is computed identically.
- */
-export function earliestMatchOffsetChars(text: string, queries: string[]): number {
-	let earliest = -1;
-	for (const query of queries) {
-		const index = text.indexOf(query);
-		if (index < 0) continue;
-		if (earliest < 0 || index < earliest) earliest = index;
-	}
-	return earliest <= 0 ? 0 : Array.from(text.slice(0, earliest)).length;
 }
 
 /** Shrink a single page item to fit; only invoked when that item alone exceeds the budget. */

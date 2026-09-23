@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { earliestMatchOffsetChars } from "../text-match.js";
 import { assertAddress, assertGlobPattern, addressFor, globToRegExp } from "./address.js";
 import { snapshotNotesContext, type NotesContext } from "./context.js";
 import { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "./constants.js";
@@ -179,17 +180,6 @@ function matchLineNumbers(body: string, needle: string): number[] {
 	return lines;
 }
 
-/** Code-point offset of the earliest query occurrence, matching the serialized read text. */
-function earliestMatchOffsetChars(text: string, queries: string[]): number {
-	let earliest = -1;
-	for (const query of queries) {
-		const index = text.indexOf(query);
-		if (index < 0) continue;
-		if (earliest < 0 || index < earliest) earliest = index;
-	}
-	return earliest <= 0 ? 0 : Array.from(text.slice(0, earliest)).length;
-}
-
 /** Every mutation uses a tmp file renamed into place in the same directory. */
 async function atomicWrite(path: string, content: string): Promise<void> {
 	await mkdir(dirname(path), { recursive: true });
@@ -348,11 +338,10 @@ export function createNotesStore(input: NotesContext): NotesStore {
 		});
 	}
 
-	async function list(options: NotesQuery = {}): Promise<NoteRow[]> {
-		const stableOptions = { ...options } as NotesQuery;
-		const matcher = matcherFor(normalizePattern(stableOptions.pattern, context));
-		const rows: NoteRow[] = [];
-		for (const home of await homesFor(context, stableOptions)) {
+	async function* scan(options: NotesQuery): AsyncGenerator<Omit<NoteRow, "sizeBytes">> {
+		const matcher = matcherFor(normalizePattern(options.pattern, context));
+		const homes = await homesFor(context, options);
+		for (const home of homes) {
 			const scope = home.scope;
 			const root = scopeDir(scope, context, home.who);
 			for (const path of await walkMarkdown(root)) {
@@ -362,8 +351,16 @@ export function createNotesStore(input: NotesContext): NotesStore {
 				const raw = await withPathQueue(fullPath, () => readFile(fullPath, "utf8"));
 				const { meta, body } = parseNote(raw);
 				meta.scope = scope;
-				rows.push({ address, scope, path, meta, body, sizeBytes: Buffer.byteLength(body, "utf8") });
+				yield { address, scope, path, meta, body };
 			}
+		}
+	}
+
+	async function list(options: NotesQuery = {}): Promise<NoteRow[]> {
+		const stableOptions = { ...options } as NotesQuery;
+		const rows: NoteRow[] = [];
+		for await (const row of scan(stableOptions)) {
+			rows.push({ ...row, sizeBytes: Buffer.byteLength(row.body, "utf8") });
 		}
 		rows.sort((a, b) => b.meta.updatedAt - a.meta.updatedAt || a.address.localeCompare(b.address));
 		return rows;
@@ -372,29 +369,19 @@ export function createNotesStore(input: NotesContext): NotesStore {
 	async function search(queries: string[], options: NotesQuery = {}): Promise<NoteSearchRow[]> {
 		const stableQueries = [...queries];
 		const stableOptions = { ...options } as NotesQuery;
-		const matcher = matcherFor(normalizePattern(stableOptions.pattern, context));
 		const rows: NoteSearchRow[] = [];
-		for (const home of await homesFor(context, stableOptions)) {
-			const scope = home.scope;
-			const root = scopeDir(scope, context, home.who);
-			for (const path of await walkMarkdown(root)) {
-				const address = addressFor(context, scope, path, home.who);
-				if (matcher && !matcher.test(address)) continue;
-				const fullPath = join(root, path);
-				const raw = await withPathQueue(fullPath, () => readFile(fullPath, "utf8"));
-				const { meta, body } = parseNote(raw);
-				meta.scope = scope;
-				const serializedBodyOffset = Array.from(serializeNote(accessedMeta(meta, scope, Date.now()), "")).length;
-				let baseChars = 0;
-				const matches: NoteMatch[] = [];
-				for (const [index, line] of body.split("\n").entries()) {
-					if (stableQueries.some((query) => line.includes(query))) {
-						matches.push({ line: index + 1, text: line, offsetChars: serializedBodyOffset + baseChars + earliestMatchOffsetChars(line, stableQueries) });
-					}
-					baseChars += Array.from(line).length + 1;
+		for await (const note of scan(stableOptions)) {
+			const { address, path, scope, meta, body } = note;
+			const serializedBodyOffset = Array.from(serializeNote(accessedMeta(meta, scope, Date.now()), "")).length;
+			let baseChars = 0;
+			const matches: NoteMatch[] = [];
+			for (const [index, line] of body.split("\n").entries()) {
+				if (stableQueries.some((query) => line.includes(query))) {
+					matches.push({ line: index + 1, text: line, offsetChars: serializedBodyOffset + baseChars + earliestMatchOffsetChars(line, stableQueries) });
 				}
-				if (matches.length > 0) rows.push({ address, path, scope, meta, matches });
+				baseChars += Array.from(line).length + 1;
 			}
+			if (matches.length > 0) rows.push({ address, path, scope, meta, matches });
 		}
 		rows.sort((a, b) => a.address.localeCompare(b.address));
 		return rows;

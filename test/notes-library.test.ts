@@ -101,6 +101,26 @@ test("stores snapshot explicit identity and do not leak homes across instances",
 	await assert.rejects(() => notes.write("@agents/visitor/hello", "overwrite"), (error: unknown) => error instanceof NoteError && error.code === "invalid_scope");
 });
 
+test("list and search share scoped pattern scans and search offsets count Unicode code points", async (t) => {
+	const { notes } = fixture(t);
+	await notes.write("shared.md", "😀 needle in session");
+	await notes.write("@project/shared.md", "needle in project");
+	await notes.write("@human/shared.md", "needle in human");
+	await notes.write("@project/elsewhere.md", "unrelated");
+
+	const pattern = "**/shared.md";
+	const listed = await notes.list({ pattern });
+	const searched = await notes.search(["needle"], { pattern });
+	const listedAddresses = listed.map((row) => row.address).sort();
+	const searchedAddresses = searched.map((row) => row.address).sort();
+	assert.deepEqual(searchedAddresses, ["@human/shared.md", "@project/shared.md", "shared.md"]);
+	assert.deepEqual(searchedAddresses, listedAddresses, "list and search traverse the same filtered homes and files");
+
+	const sessionMatch = searched.find((row) => row.address === "shared.md")!.matches[0]!;
+	const serialized = (await notes.read("shared.md"))!.text;
+	assert.ok(Array.from(serialized).slice(sessionMatch.offsetChars).join("").startsWith("needle"), "the absolute offset counts the emoji as one code point");
+});
+
 test("invalid addressing and failed edits leave stored bytes untouched without poisoning the queue", async (t) => {
 	const { home, context, notes } = fixture(t);
 	assert.throws(() => createNotesStore({ ...context, sessionId: "../escape" }));
