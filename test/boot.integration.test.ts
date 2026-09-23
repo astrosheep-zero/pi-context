@@ -94,7 +94,7 @@ test("the root boot and reset boot carry durable window identity", async () => {
 	assert.ok(rootText.includes("decisions.md"));
 	const decisionsMeta = (await listNotes(ctx, { scope: "session" })).find((row) => row.path === "decisions.md")?.meta;
 	assert.ok(decisionsMeta);
-	assert.match(rootText, /updated \d+s ago\)/, "boot note metadata carries a relative update time");
+	assert.match(rootText, /·  \d+s ago/, "boot note metadata carries a relative update time");
 	assert.ok(rootText.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG));
 
 	// Reset: the marker and boot are committed together at the turn boundary.

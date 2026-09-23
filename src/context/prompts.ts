@@ -36,8 +36,8 @@ function notesUnavailableNotice(snapshot: NotesSnapshot): string | undefined {
  * per home, and the session home is never peeked — a session MAP.md is an ordinary note. The
  * pocket then lists recent fresh notes under per-home quotas (POCKET_SESSION_LIMIT /
  * POCKET_PROJECT_LIMIT / POCKET_HUMAN_LIMIT / POCKET_AGENT_LIMIT / POCKET_MODEL_LIMIT),
- * most-recently-updated first within each home, one metadata line each: address, line count,
- * UTF-8 byte count, relative update time at window open. Bodies never render
+ * most-recently-updated first within each home, one metadata line each: address, body character
+ * count, relative update time at window open. Bodies never render
  * in the pocket; stale notes are excluded; MAP.md itself never takes a pocket seat.
  */
 function notesIndex(snapshot: NotesSnapshot): string {
@@ -62,7 +62,7 @@ function notesIndex(snapshot: NotesSnapshot): string {
 	if (recentNotes.length > 0) {
 		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (by prefix, most recent first within each: up to ${POCKET_SESSION_LIMIT} from this session, ${POCKET_PROJECT_LIMIT} from @project, ${POCKET_HUMAN_LIMIT} from @human, ${POCKET_AGENT_LIMIT} from @self, ${POCKET_MODEL_LIMIT} from @model). A note's content never appears here, so its name has to say what the note is about:`];
 		for (const row of recentNotes) {
-			lines.push(`- ${row.address} (${row.body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${relativeTime(row.meta.updatedAt, snapshot.openedAt)})`);
+			lines.push(`- ${row.address}  ·  ${Array.from(row.body).length} chars  ·  ${relativeTime(row.meta.updatedAt, snapshot.openedAt)}`);
 		}
 		sections.push(lines.join("\n"));
 	}

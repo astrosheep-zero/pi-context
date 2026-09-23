@@ -168,6 +168,23 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 	assert.ok(rendered.includes("PROJECT_MAP_BODY") && rendered.includes("AGENT_MAP_BODY"), "MAP residency comes from the snapshot");
 	assert.ok(rendered.includes("session.md") && rendered.includes("@human/human.md"), "pocket rows come from the same snapshot");
 	assert.equal(rendered.includes("SESSION_POCKET_BODY"), false, "pocket bodies stay excluded");
+	assert.match(rendered, /- session\.md  ·  19 chars  ·  \d+s ago/);
+	assert.equal(rendered.includes("UTF-8 bytes"), false, "pocket rows omit implementation-oriented byte counts");
+
+	const expanded = await loadNotesSnapshot(ctx, (_ctx, scope) => {
+		if (scope === "project" || scope === "human" || scope === "agent" || scope === "model") {
+			return Array.from({ length: 6 }, (_, i) => note(scope, `note-${i}.md`, `@${scope === "agent" ? "agents/root" : scope === "model" ? "models/default" : scope}/note-${i}.md`, `body ${i}`));
+		}
+		return rows.get(scope) ?? [];
+	});
+	const expandedText = renderBootBlock({ ...renderData, notes: expanded });
+	for (const prefix of ["@project", "@human", "@agents/root"]) {
+		for (let i = 0; i < 5; i++) assert.ok(expandedText.includes(`- ${prefix}/note-${i}.md  ·  `), `${prefix} includes note ${i}`);
+		assert.equal(expandedText.includes(`- ${prefix}/note-5.md  ·  `), false, `${prefix} is capped at five`);
+	}
+	for (let i = 0; i < 3; i++) assert.ok(expandedText.includes(`- @models/default/note-${i}.md  ·  `), `@model includes note ${i}`);
+	assert.equal(expandedText.includes("- @models/default/note-3.md  ·  "), false, "@model is capped at three");
+	assert.match(expandedText, /5 from @project, 5 from @human, 5 from @self, 3 from @model/);
 
 	const readFailure = (code: string): NodeJS.ErrnoException => Object.assign(new Error("scripted read failure"), { code });
 	const oneFailed = await loadNotesSnapshot(ctx, (_ctx, scope) => {
