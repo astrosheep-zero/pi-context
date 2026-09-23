@@ -1,46 +1,33 @@
-I am dreaming over my notes. They are plain markdown files in five kinds of home:
+# Dream
 
-- `pi/session/<session-id>/`: one session's working record; bare `<vpath>` addresses the current session.
-- `project/<project-key>/`: one project's durable knowledge; `@project/<vpath>` addresses the current project.
-- `human/`: the human's cross-project preferences and rules; `@human/<vpath>`.
-- `agents/<agent-name>/`: one agent's own durable notes; `@self/<vpath>` resolves to the current agent.
-- `models/<model-name>/`: observations about one model's behavior; `@model/<vpath>` resolves to the current model.
+I am reviewing my notes: keeping what is useful, connecting what belongs together, and leaving a clearer record for whoever comes next. Notes are record, not memory.
 
-These directories are relative to the notes store, not the project checkout. Read concrete files across homes; relative addresses such as `@project`, `@self`, and `@model` do not identify every home in the store. Do not invent a project, agent, or model identity when it is unknown.
+## Scope
 
-## Choose scope before reading
+Work within the readable sources and writable homes established for this run. Do not broaden that scope while exploring. If a boundary is unclear, ask before crossing it.
 
-Use the working directory where this dream was invoked, not a directory you enter later. Resolve it and the notes-store root to real paths before checking containment.
+A project dream draws from that project's material, project notes, and session notes identified as belonging to the project; it organizes only that project's notes. A store-wide dream may inspect across homes, but authorship and write permissions still apply. Unknown ownership is a coverage gap to report, not a reason to guess or repair ownership.
 
-- **Inside the notes store:** you may inspect the store across homes, subject to the write and authorship restrictions below.
-- **In a project, outside the notes store:** extract knowledge from the current project's material, the current conversation, and all session notes whose frontmatter `project` field exactly matches this project's key. You may inspect session note frontmatter to find matching notes, but read bodies only for matching notes. Missing or invalid project metadata means unknown ownership: skip those notes and report the coverage gap; do not infer ownership from note contents, session IDs, or old Pi session records. Do not create, repair, or backfill metadata. Organize and write only this project's notes and map. Do not read other projects' notes, human notes, or agent/model notes; do not write or promote into those homes. The current project is its enclosing Git root, or the invocation directory if there is no Git root. Locate its existing `project/<project-key>/` home using pi-context's project identity, not a guessed basename. If the home cannot be identified unambiguously, ask before writing.
+The homes serve different readers:
 
-Changing directories to read notes or run tools never upgrades a project-only dream to a store-wide dream. These scope limits apply to inspection, extraction, consolidation, promotion, and map maintenance. Lock, report, and Git audit artifacts are infrastructure, not permission to dream over other homes.
+- Session notes are a trip's working record. Read them as sources where permitted; never edit them, even after promoting a useful finding.
+- Project notes hold knowledge for whoever next works on that project.
+- Human notes hold the human's cross-project preferences and standing rules. Do not turn project facts or your own lessons into rules in the human's voice.
+- Agent notes belong to their author. Other agents' notes are read-only unless the human authorizes revision.
+- Model notes describe the substrate's behavior. Other models' notes are read-only unless the human authorizes revision.
 
-Every note has this frontmatter block:
+## Review and consolidate
 
-```yaml
----
-origin: user | self | external
-status: active
-stale: false
-created_at: <timestamp>
-updated_at: <timestamp>
-last_accessed: <timestamp>
-access_count: 0
----
-```
+1. **Leave stable notes alone.** Change a note to incorporate new evidence, resolve a verified error, merge a genuine duplicate, or split an oversized file—not merely to shorten or rephrase it. No change is a valid outcome.
+2. **Verify only what the proposed change depends on.** Before correcting or promoting a conclusion, check the relevant evidence as needed. Do not revalidate every stable note or turn dream into a source-code audit. An unavailable referent is unverified, not proof that it is dead; do not promote an unsupported claim as current fact.
+3. **Merge only genuine duplicates.** Supersede a note only when both notes have the same topic and kind (checkpoint, design, log…), and the survivor is strictly newer or more specific. Name the shared topic in the survivor. Otherwise keep both and record any unresolved conflict.
+4. **Preserve meaning and provenance.** Keep facts, conditions, exceptions, uncertainty, authorship, and sources. When promoting a finding, cite its source. Do not relabel agent-authored material as human-authored. If its destination or authority is unclear, propose the promotion instead.
+5. **Keep notes manageable.** Aim below about 200 lines / 8KB per note. Split oversized notes by topic with one-line cross-links. Checkpoints may exceed the budget: trim prose, never facts.
+6. **Keep maps useful.** Each writable home's MAP.md lists its durable notes, one line per entry, with an unambiguous address and a short gist in your own words. Add promoted notes and drop stale entries. Session notes are never mapped. Maps follow the same size budget.
+7. **Preserve the record.** Never physically delete notes. After merging, mark the absorbed note stale only if it is writable. Preserve existing metadata and provenance. Map entry lines are yours to maintain within the writable scope.
 
-## Dream rules
+## Report
 
-1. **Probe before you trust.** Before keeping or promoting a note, verify its world referents with read-only file tools: paths in the body — do they still exist? branches — still present? Dead referents are why a note gets merged away or marked stale, never promoted. An unavailable referent is unverified, not proof that it is dead.
-2. **Merge threshold.** Supersede another note only when all three hold: same topic (name it in the survivor's body), same kind of note (checkpoint/design/log…), and the survivor is strictly newer or strictly more specific. Otherwise keep both and record the open conflict in the survivor.
-3. **Size budget.** Keep every note under ~200 lines / ~8KB. Oversized notes get split by topic with a one-line cross-link in each. Use a real note address where its home is unambiguous; otherwise cite the concrete store-relative file path. Checkpoints may exceed the budget — trim prose, never facts.
-4. **Keep the maps.** Each writable home's `MAP.md` maps that home's durable notes: one line per entry — its address or unambiguous file path and a short gist in your own words, never a mechanical body slice. Project facts stay with their project; human preferences belong in `human/`; agent-specific learning and model-specific observations keep their own homes. Session notes are never mapped — the pocket covers them. When an authorized promotion crosses homes, move its map line to the destination; when a writable note goes stale, drop its line. Maps obey the same size budget as any note.
-5. **Jurisdiction.** Stay within the scope chosen above. Only a store-wide dream may read across the whole store, including session homes, to extract durable knowledge. A project-only dream also reads session notes with matching project metadata, and writes only its project notes. `pi/session/**` is a live agent's write-ahead log: never write or edit anything there, including frontmatter or stale markers. Other agents' and models' homes are read-only unless the human explicitly authorizes their revision. Do not widen project knowledge into human rules or put your own lessons in the human's voice. Preserve authorship, provenance, conditions, and scope. If the destination or authority is unclear, propose the promotion instead of doing it. In writable homes, map entry lines are yours to maintain, but prose that carries rules or guidance is not — flag it in your report instead of rewriting it.
-6. **Leave stable notes alone.** Change notes to incorporate new evidence, resolve verified errors, merge genuine duplicates, or split oversized files—not merely to shorten or rephrase them. Preserve facts, conditions, exceptions, and uncertainty. No change is a valid outcome.
-7. **Keep the audit honest.** Nothing is physically deleted. Note writes require an exclusive dream lock and a successful baseline snapshot, followed by a report and final audit snapshot. The dream CLI supplies these; another entry point must establish them before writing rather than assume they exist. A blocked lock or failed baseline means inspect only. Report partial writes and audit failures, and release only your own lock; never force-unlock another run.
+Give a concise report grouped by home: what you inspected, changed, promoted, and left unresolved. Mention coverage gaps and partial failures. If no notes changed, say so. Distinguish actual note changes from execution or audit artifacts; do not claim success for an incomplete run.
 
-Read the files and merge genuinely duplicate notes in writable homes by editing the survivor, then set `stale: true` in the absorbed note's frontmatter if it is writable. Session notes remain untouched even when promoted; record their source in the destination. Preserve existing frontmatter keys and provenance; do not relabel agent-authored material as human-authored. Stale notes remain readable.
-
-Do not write skill ideas as files. Put skill ideas and unresolved questions in your final assistant message as proposals for the human. Group your concise report by home: what you inspected, changed, promoted, and left unresolved. If you made no note writes, say so. Distinguish note changes from lock, report, and audit artifacts.
+Put skill ideas and unresolved questions in the final message as proposals for the human, not new skill files.

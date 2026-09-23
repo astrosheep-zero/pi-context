@@ -127,9 +127,9 @@ Removing a lock while a holder is running is outside the supported cooperative p
 
 The package also provides `/skill:dream` for reviewing notes in the current agent session. The skill reads the same `playbook.md` used by the `dream` CLI; there is only one set of dream instructions.
 
-Scope comes from the invocation directory: inside the notes store, dream may inspect across homes; in a project, it extracts from that project's material and all session notes with matching project metadata, and organizes only that project's notes. New session notes record their project key in the frontmatter `project` field; older notes without that field remain untouched and are skipped in project-only discovery. There is no migration or backfill. Changing directories later does not broaden the scope.
+Scope comes from the invocation directory: inside the notes store, dream may inspect across homes; in a project, it extracts from that project's material and all session notes with matching project metadata, and organizes only that project's notes. New session notes record their project key in the frontmatter `project` field. Standard linked Git worktrees resolve to the main checkout's repository root, sharing its project key and `@project/` home. Older metadata and homes remain untouched by the code: there is no automatic migration or backfill; existing data can be migrated manually. Notes without project metadata are skipped in project-only discovery. Changing directories later does not broaden the scope.
 
-The skill does not start another model or install the CLI's runtime safeguards. Before writing notes, it requires an exclusive dream lock and Git audit snapshots in the notes store. If those safeguards cannot be established, it remains read-only. Session records and unapproved homes stay untouched.
+The skill stays in the current agent session. Its wrapper and shared playbook describe the dreamer's task, not runtime setup: the execution entry point is responsible for supplying readable/writable scope and establishing write permission, including locking and Git audit safeguards. The CLI supplies its own safeguards; the bare skill does not install them. Without an established scope and write permission, the dreamer asks rather than improvising runtime setup. Session records and unapproved homes stay untouched.
 
 ## Documentation
 

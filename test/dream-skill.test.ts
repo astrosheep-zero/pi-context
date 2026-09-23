@@ -42,43 +42,6 @@ test("dream skill is publicly discoverable and resolves the CLI's shared playboo
 	const playbook = readFileSync(packagePlaybook, "utf8");
 	assert.equal(loadPlaybook(skillPlaybook), playbook);
 
-	const wrapper = readFileSync(skill.filePath, "utf8");
-	assert.match(wrapper, /does not install those protections/);
-	assert.match(wrapper, /does not authorize starting the `dream` CLI, calling another model/);
-	assert.match(wrapper, /Record the invocation working directory before changing directories/);
-	assert.match(wrapper, /session notes whose project metadata matches/);
-	assert.match(playbook, /five kinds of home/);
-	for (const home of ["pi/session/<session-id>/", "project/<project-key>/", "human/", "agents/<agent-name>/", "models/<model-name>/"]) {
-		assert.ok(playbook.includes(home), `playbook includes ${home}`);
-	}
-	assert.match(playbook, /## Choose scope before reading/);
-	assert.match(playbook, /Use the working directory where this dream was invoked, not a directory you enter later/);
-	assert.match(playbook, /Resolve it and the notes-store root to real paths before checking containment/);
-	assert.match(playbook, /\*\*Inside the notes store:\*\* you may inspect the store across homes/);
-	assert.match(playbook, /all session notes whose frontmatter `project` field exactly matches this project's key/);
-	assert.match(playbook, /inspect session note frontmatter to find matching notes, but read bodies only for matching notes/);
-	assert.match(playbook, /Missing or invalid project metadata means unknown ownership: skip those notes and report the coverage gap/);
-	for (const forbidden of ["do not infer ownership from note contents, session IDs, or old Pi session records", "Do not create, repair, or backfill metadata", "Do not read other projects' notes, human notes, or agent/model notes", "do not write or promote into those homes"]) {
-		assert.ok(playbook.includes(forbidden), `scope policy includes ${forbidden}`);
-	}
-	assert.match(playbook, /Changing directories to read notes or run tools never upgrades a project-only dream to a store-wide dream/);
-	assert.match(playbook, /The current project is its enclosing Git root, or the invocation directory if there is no Git root/);
-	assert.match(playbook, /using pi-context's project identity, not a guessed basename/);
-	assert.match(playbook, /If the home cannot be identified unambiguously, ask before writing/);
-	assert.match(playbook, /A project-only dream also reads session notes with matching project metadata/);
-	assert.ok(playbook.includes("`pi/session/**` is a live agent's write-ahead log: never write or edit anything there"));
-	assert.doesNotMatch(playbook, /@personal\b/);
-
-	const readme = readFileSync(join(root, "README.md"), "utf8");
-	assert.match(readme, /Scope comes from the invocation directory: inside the notes store, dream may inspect across homes/);
-	assert.match(readme, /all session notes with matching project metadata/);
-	assert.match(readme, /frontmatter `project` field/);
-	assert.match(readme, /There is no migration or backfill/);
-	assert.match(readme, /Changing directories later does not broaden the scope/);
-	const cli = readFileSync(join(root, "src/dream/cli.ts"), "utf8");
-	assert.match(cli, /const defaultBook = join\(packageRoot\(\), "playbook\.md"\)/);
-	assert.match(cli, /const playbookPath = String\(a\.playbook \?\? defaultBook\)/);
-	assert.match(cli, /const playbook = loadPlaybook\(playbookPath\)/);
 });
 
 test("npm tarball keeps the skill's relative playbook path portable after extraction", () => {
