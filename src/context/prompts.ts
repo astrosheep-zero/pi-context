@@ -62,7 +62,7 @@ function notesIndex(snapshot: NotesSnapshot): string {
 	if (recentNotes.length > 0) {
 		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (by prefix, most recent first within each: up to ${POCKET_SESSION_LIMIT} from this session, ${POCKET_PROJECT_LIMIT} from @project, ${POCKET_HUMAN_LIMIT} from @human, ${POCKET_AGENT_LIMIT} from @self, ${POCKET_MODEL_LIMIT} from @model). A note's content never appears here, so its name has to say what the note is about:`];
 		for (const row of recentNotes) {
-			lines.push(`- ${row.address} (${row.body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${relativeTime(row.meta.updated_at, snapshot.openedAt)})`);
+			lines.push(`- ${row.address} (${row.body.split("\n").length} lines, ${row.sizeBytes} UTF-8 bytes, updated ${relativeTime(row.meta.updatedAt, snapshot.openedAt)})`);
 		}
 		sections.push(lines.join("\n"));
 	}

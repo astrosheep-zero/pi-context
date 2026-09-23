@@ -21,10 +21,16 @@ export function sendContinuation(pi: ExtensionAPI): void {
 
 /**
  * The closed, ordered reset shape: retain-none native checkpoint, marker, matching boot,
- * continuation. This is the one source of the reset message and new window identity.
+ * continuation. The boot snapshot is acquired asynchronously after capturing this identity.
  */
-export function buildResetDrafts(ctx: ExtensionContext, notifyIncompleteNotes?: IncompleteNotesNotifier) {
-	const sessionPrefix = ctx.sessionManager.getSessionId().slice(0, 8);
+export async function buildResetDrafts(
+	ctx: ExtensionContext,
+	notifyIncompleteNotes?: IncompleteNotesNotifier,
+	isCurrent: () => boolean = () => true,
+): Promise<[SessionBoundaryDraft, SessionBoundaryDraft, SessionBoundaryDraft, SessionBoundaryDraft]> {
+	const sessionId = ctx.sessionManager.getSessionId();
+	const previousId = currentWindowId(ctx);
+	const sessionPrefix = sessionId.slice(0, 8);
 	const usedWindowIds = new Set(
 		ctx.sessionManager.getBranch().filter(isWindowMarker).map((entry) => entry.data.windowId),
 	);
@@ -32,13 +38,13 @@ export function buildResetDrafts(ctx: ExtensionContext, notifyIncompleteNotes?: 
 	do {
 		windowId = `pcw:${sessionPrefix}:${randomUUID().slice(0, 8)}`;
 	} while (usedWindowIds.has(windowId));
-	const boot = buildBootMessage(ctx, windowId, currentWindowId(ctx), notifyIncompleteNotes);
+	const boot = await buildBootMessage(ctx, windowId, previousId, notifyIncompleteNotes, isCurrent);
 	return [
 		{ type: "compaction", summary: "", firstKeptEntryId: null },
 		{ type: "custom", customType: RESET_MARKER_TYPE, data: { windowId } },
 		{ type: "custom_message", customType: BOOT_TYPE, content: boot.content, display: false, details: { windowId } },
 		{ type: "custom_message", customType: CONTINUATION_TYPE, content: CONTINUATION, display: false },
-	] satisfies [SessionBoundaryDraft, SessionBoundaryDraft, SessionBoundaryDraft, SessionBoundaryDraft];
+	];
 }
 
 /**
@@ -79,9 +85,19 @@ export function resetTailCommitted(ctx: ExtensionContext, markerId: string, wind
 }
 
 /** Emit only the reset artifacts an incomplete tail is missing, in the closed order. */
-export function repairResetTail(pi: ExtensionAPI, ctx: ExtensionContext, marker: WindowMarker, notifyIncompleteNotes?: IncompleteNotesNotifier): void {
+export async function repairResetTail(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	marker: WindowMarker,
+	notifyIncompleteNotes?: IncompleteNotesNotifier,
+	isCurrent: () => boolean = () => true,
+): Promise<void> {
 	const tail = inspectResetTail(ctx, marker.id, marker.data.windowId);
 	if (!tail || (tail.boot && tail.continuation)) return;
-	if (!tail.boot) sendBoot(pi, buildBootMessage(ctx, marker.data.windowId, previousWindowId(ctx, marker.id), notifyIncompleteNotes));
-	if (!tail.continuation) sendContinuation(pi);
+	const boot = tail.boot ? undefined : await buildBootMessage(ctx, marker.data.windowId, previousWindowId(ctx, marker.id), notifyIncompleteNotes, isCurrent);
+	if (!isCurrent()) return;
+	const latest = inspectResetTail(ctx, marker.id, marker.data.windowId);
+	if (!latest) return;
+	if (!latest.boot && boot) sendBoot(pi, boot);
+	if (!latest.continuation && (latest.boot || boot)) sendContinuation(pi);
 }

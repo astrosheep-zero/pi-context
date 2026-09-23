@@ -29,12 +29,12 @@ function renderDiff(change: NoteChange): string {
 export function registerNotesTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_write", label: "Notes write",
-		description: `Create or replace a note as a real markdown file, and name it for what it holds: a fresh window sees only an index entry, never the note itself. ${ADDRESS_DESCRIPTION} Keep notes small and split by topic — by what the note is about, never by who said it (authorship is origin's job); a rewrite replaces the body whole while preserving created_at and every other frontmatter key. stale: true marks the note closed so it leaves the boot index but stays readable and searchable.`,
+		description: `Create or replace a note as a real markdown file, and name it for what it holds: a fresh window sees only an index entry, never the note itself. ${ADDRESS_DESCRIPTION} Keep notes small and split by topic — by what the note is about, never by who said it (authorship is origin's job); a rewrite replaces the body whole while preserving createdAt and every other frontmatter key. stale: true marks the note closed so it leaves the boot index but stays readable and searchable.`,
 		parameters: Type.Object({ address: Type.String(), content: Type.String(), origin: ORIGIN, stale: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), executionMode: "sequential",
 		async execute(_id, params, _signal, _update, ctx) {
 			const content = params.content;
 			try {
-				createNotesStore(notesContextFromPi(ctx)).write(params.address, content, { origin: (params.origin ?? "self") as Origin, stale: params.stale });
+				await createNotesStore(notesContextFromPi(ctx)).write(params.address, content, { origin: (params.origin ?? "self") as Origin, stale: params.stale });
 				return output({ address: params.address, written: true });
 			} catch (error) { return failure(error); }
 		},
@@ -46,7 +46,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 		parameters: Type.Object({ address: Type.String(), edits: Type.Optional(Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }, { additionalProperties: false }))), origin: ORIGIN, stale: Type.Optional(Type.Boolean()), replace_all: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), executionMode: "sequential",
 		async execute(_id, params, _signal, _update, ctx) {
 			try {
-				const { applied, change } = createNotesStore(notesContextFromPi(ctx)).edit(params.address, params.edits, { origin: params.origin as Origin | undefined, stale: params.stale, replaceAll: params.replace_all });
+				const { applied, change } = await createNotesStore(notesContextFromPi(ctx)).edit(params.address, params.edits, { origin: params.origin as Origin | undefined, stale: params.stale, replaceAll: params.replace_all });
 				const diff = renderDiff(change);
 				return output({ address: params.address, applied, diff });
 			} catch (error) { return failure(error); }
@@ -60,7 +60,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _update, ctx) {
 			let note: NoteReadResult | undefined;
 			try {
-				note = createNotesStore(notesContextFromPi(ctx)).read(params.address);
+				note = await createNotesStore(notesContextFromPi(ctx)).read(params.address);
 			} catch (error) { return failure(error); }
 			if (!note) return output({ error: "note not found", address: params.address });
 			const text = note.text;
@@ -79,8 +79,8 @@ export function registerNotesTools(pi: ExtensionAPI) {
 		parameters: Type.Object({ pattern: nullableString(), cursor: cursor(), max_results: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			let rows: NoteRow[];
-			try { rows = createNotesStore(notesContextFromPi(ctx)).list({ pattern: params.pattern ?? undefined }); } catch (error) { return failure(error); }
-			const files: Array<{ address: string; stale: boolean; updated_at: string; address_truncated?: boolean }> = rows.map((row) => ({ address: row.address, stale: row.meta.stale, updated_at: localIso(row.meta.updated_at) }));
+			try { rows = await createNotesStore(notesContextFromPi(ctx)).list({ pattern: params.pattern ?? undefined }); } catch (error) { return failure(error); }
+			const files: Array<{ address: string; stale: boolean; updated_at: string; address_truncated?: boolean }> = rows.map((row) => ({ address: row.address, stale: row.meta.stale, updated_at: localIso(row.meta.updatedAt) }));
 			return output(page(files, params.cursor ?? 0, "files", params.max_results, (file, fits) => {
 				if (fits(file)) return file;
 				const address = middleTruncate(file.address, (candidate) => fits({ ...file, address: candidate, address_truncated: true }));
@@ -96,11 +96,11 @@ export function registerNotesTools(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _update, ctx) {
 			const queries = searchQueries(params.query);
 			let rows: NoteSearchRow[];
-			try { rows = createNotesStore(notesContextFromPi(ctx)).search(queries, { pattern: params.pattern ?? undefined }); } catch (error) { return failure(error); }
+			try { rows = await createNotesStore(notesContextFromPi(ctx)).search(queries, { pattern: params.pattern ?? undefined }); } catch (error) { return failure(error); }
 			const maxPerFile = params.max_matches_per_file ?? Number.POSITIVE_INFINITY;
 			const result: Array<{ address: string; updated_at: string; stale: boolean; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }>; address_truncated?: boolean }> = rows.map((row) => {
 				const matches = row.matches.map((match) => ({ line: match.line, text: match.text, truncated: false, offset_chars: match.offsetChars }));
-				return { address: row.address, updated_at: localIso(row.meta.updated_at), stale: row.meta.stale, matches_total: matches.length, matches: matches.slice(0, maxPerFile) };
+				return { address: row.address, updated_at: localIso(row.meta.updatedAt), stale: row.meta.stale, matches_total: matches.length, matches: matches.slice(0, maxPerFile) };
 			});
 			const fitFile = (file: (typeof result)[number], fits: (candidate: (typeof result)[number]) => boolean) => {
 				if (fits(file)) return file;

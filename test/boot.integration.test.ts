@@ -78,14 +78,14 @@ test("the root boot and reset boot carry durable window identity", async () => {
 	await call(captured, "notes_write", { path: "decisions.md", content: "use terra" }, ctx);
 
 	// Root window: session_start persists the boot block without triggering a turn.
-	runHandlers(captured, "session_start", { reason: "startup" }, ctx);
+	await runHandlers(captured, "session_start", { reason: "startup" }, ctx);
 	assert.equal(captured.sent.length, 1);
 	const rootBoot = captured.sent[0];
 	assert.equal(rootBoot?.message.customType, internal.BOOT_TYPE);
 	assert.equal(rootBoot?.message.display, false, "boot block stays out of the TUI");
 	assert.equal(rootBoot?.options?.triggerTurn, false);
 	assert.equal(noticesOf(ctx).length, 0, "initial boot is silent");
-	runHandlers(captured, "session_start", { reason: "reload" }, ctx);
+	await runHandlers(captured, "session_start", { reason: "reload" }, ctx);
 	assert.equal(noticesOf(ctx).length, 0, "reload is silent");
 	assert.deepEqual(rootBoot?.message.details, { windowId: `pcw:${sessionManager.getSessionId().slice(0, 8)}:root` });
 	const rootText = typeof rootBoot?.message.content === "string" ? rootBoot.message.content : "";
@@ -95,7 +95,7 @@ test("the root boot and reset boot carry durable window identity", async () => {
 	assert.match(rootText, new RegExp(`First context window id: pcw:${sessionManager.getSessionId().slice(0, 8)}:root`));
 	assert.match(rootText, new RegExp(`Current context window id: pcw:${sessionManager.getSessionId().slice(0, 8)}:root`));
 	assert.ok(rootText.includes("decisions.md"));
-	const decisionsMeta = listNotes(ctx, { scope: "session" }).find((row) => row.path === "decisions.md")?.meta;
+	const decisionsMeta = (await listNotes(ctx, { scope: "session" })).find((row) => row.path === "decisions.md")?.meta;
 	assert.ok(decisionsMeta);
 	assert.match(rootText, /updated \d+s ago\)/, "boot note metadata carries a relative update time");
 	assert.ok(rootText.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG));
@@ -105,8 +105,8 @@ test("the root boot and reset boot carry durable window identity", async () => {
 	assert.equal(noticesOf(ctx).length, 0, "requesting a reset does not announce success");
 	const boundary = await commitTurnEndBoundary(captured, sessionManager, ctx);
 	assert.equal(boundary.continue, true);
-	runHandlers(captured, "turn_start", {}, ctx);
-	runHandlers(captured, "agent_settled", {}, ctx);
+	await runHandlers(captured, "turn_start", {}, ctx);
+	await runHandlers(captured, "agent_settled", {}, ctx);
 	assert.equal(noticesOf(ctx).filter((notice) => notice.message.includes("memory cleared")).length, 1, "the committed reset is announced once");
 	const entries = sessionManager.getBranch();
 	const marker = entries.find((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
@@ -119,7 +119,30 @@ test("the root boot and reset boot carry durable window identity", async () => {
 	assert.ok(continuation && continuation.type === "custom_message" && continuation.display === false, "the resumed run is represented by one hidden continuation");
 });
 
-test("a marker tail with only metadata repairs its missing boot and continuation without moving the boundary", () => {
+test("an aborted async boot repair emits no boot, continuation, or incomplete-notes notice", async () => {
+	const notesHome = process.env.PI_NOTES_HOME;
+	assert.ok(notesHome);
+	rmSync(notesHome, { recursive: true, force: true });
+	writeFileSync(notesHome, "not a directory");
+	const sessionManager = manager();
+	const windowId = "pcw:aborted-boot-repair";
+	sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId });
+	const captured = makeExtension(sessionManager);
+	const ctx = context(sessionManager);
+	const controller = new AbortController();
+	ctx.signal = controller.signal;
+	const sessionStart = captured.handlers.get("session_start")?.[0];
+	assert.ok(sessionStart);
+	const pending = sessionStart({ reason: "startup" } as never, ctx);
+	controller.abort();
+	await pending;
+
+	assert.equal(captured.sent.length, 0, "aborted snapshot work cannot append the reset boot or continuation");
+	assert.equal(noticesOf(ctx).some((notice) => notice.message.includes("notes index incomplete")), false, "aborted snapshot work cannot notify about missing homes");
+	assert.equal(sessionManager.getBranch().some((entry) => entry.type === "custom_message" && [internal.BOOT_TYPE, CONTINUATION_TYPE].includes(entry.customType)), false);
+});
+
+test("a marker tail with only metadata repairs its missing boot and continuation without moving the boundary", async () => {
 	const sessionManager = manager(true);
 	const windowId = "pcw:metadata-tail";
 	const markerId = sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId });
@@ -128,7 +151,7 @@ test("a marker tail with only metadata repairs its missing boot and continuation
 	const captured = makeExtension(sessionManager);
 	const ctx = context(sessionManager);
 
-	runHandlers(captured, "session_start", { reason: "startup" }, ctx);
+	await runHandlers(captured, "session_start", { reason: "startup" }, ctx);
 	const branch = sessionManager.getBranch();
 	const markerIndex = branch.findIndex((entry) => entry.id === markerId);
 	const bootEntries = branch.filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE && entry.details && typeof entry.details === "object" && (entry.details as { windowId?: unknown }).windowId === windowId);
@@ -144,14 +167,14 @@ test("a marker tail with only metadata repairs its missing boot and continuation
 	assert.equal(noticesOf(ctx).length, 0, "repairing a reset tail is not a new reset");
 });
 
-test("a bare marker tail repairs the full ordered reset shape", () => {
+test("a bare marker tail repairs the full ordered reset shape", async () => {
 	const sessionManager = manager(true);
 	const windowId = "pcw:bare-marker";
 	const markerId = sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId });
 	const captured = makeExtension(sessionManager);
 	const ctx = context(sessionManager);
 
-	runHandlers(captured, "session_start", { reason: "startup" }, ctx);
+	await runHandlers(captured, "session_start", { reason: "startup" }, ctx);
 	assert.equal(captured.sent.length, 2, "a bare marker emits a boot and a continuation");
 	const branch = sessionManager.getBranch();
 	const markerIndex = branch.findIndex((entry) => entry.id === markerId);
@@ -161,7 +184,7 @@ test("a bare marker tail repairs the full ordered reset shape", () => {
 	assert.ok(continuationIndex > bootIndex, "the repaired continuation follows its boot");
 });
 
-test("a marker tail that already carries a boot repairs only its missing continuation, once", () => {
+test("a marker tail that already carries a boot repairs only its missing continuation, once", async () => {
 	const sessionManager = manager(true);
 	const windowId = "pcw:missing-continuation";
 	const markerId = sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId });
@@ -170,18 +193,18 @@ test("a marker tail that already carries a boot repairs only its missing continu
 	const captured = makeExtension(sessionManager);
 	const ctx = context(sessionManager);
 
-	runHandlers(captured, "session_start", { reason: "startup" }, ctx);
+	await runHandlers(captured, "session_start", { reason: "startup" }, ctx);
 	assert.equal(captured.sent.length, 1, "only the missing continuation is emitted");
 	assert.equal(captured.sent[0]?.message.customType, CONTINUATION_TYPE);
 	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE).length, 1, "the existing boot is never duplicated");
 	assert.ok(sessionManager.getBranch().findIndex((entry) => entry.id === markerId) >= 0);
 
-	runHandlers(captured, "session_start", { reason: "reload" }, ctx);
+	await runHandlers(captured, "session_start", { reason: "reload" }, ctx);
 	assert.equal(captured.sent.length, 1, "a complete reset tail is idempotent");
 	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === CONTINUATION_TYPE).length, 1);
 });
 
-test("a marker tail followed by real conversation is never repaired", () => {
+test("a marker tail followed by real conversation is never repaired", async () => {
 	const sessionManager = manager(true);
 	const windowId = "pcw:unsafe-tail";
 	sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId });
@@ -189,7 +212,7 @@ test("a marker tail followed by real conversation is never repaired", () => {
 	const captured = makeExtension(sessionManager);
 	const ctx = context(sessionManager);
 
-	runHandlers(captured, "session_start", { reason: "startup" }, ctx);
+	await runHandlers(captured, "session_start", { reason: "startup" }, ctx);
 	assert.equal(captured.sent.length, 0, "an unsafe marker tail emits nothing");
 	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE).length, 0, "no boot is appended after real work");
 	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === CONTINUATION_TYPE).length, 0, "no continuation is appended after real work");
@@ -232,7 +255,7 @@ test("pi-context command toggles future work, /wipe-memory starts close-out, and
 	const low = context(sessionManager, undefined, { tokens: 170_000, contextWindow: 200_000, percent: 85 });
 
 	// On by default: session_start persists the root boot block.
-	runHandlers(captured, "session_start", { reason: "startup" }, low);
+	await runHandlers(captured, "session_start", { reason: "startup" }, low);
 	assert.equal(captured.sent.length, 1);
 	assert.equal(captured.sent[0]?.message.customType, internal.BOOT_TYPE);
 
@@ -240,7 +263,7 @@ test("pi-context command toggles future work, /wipe-memory starts close-out, and
 	assert.match(notices[0]?.message ?? "", /off/);
 	assert.equal(await runContextHook(captured, low), undefined, "no guidance while off");
 	assert.equal(sentOf(captured, internal.GUIDANCE_TYPE).length, 0, "no guidance persisted while off");
-	runHandlers(captured, "session_start", { reason: "startup" }, low);
+	await runHandlers(captured, "session_start", { reason: "startup" }, low);
 	assert.equal(captured.sent.length, 1, "no new boot block is persisted while off");
 	const offResult = resultJson<{ error?: string }>(await call(captured, "wipe_memory", {}, low));
 	assert.match(offResult.error ?? "", /off/, "wipe_memory refuses while off");

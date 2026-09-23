@@ -53,7 +53,7 @@ test("the visible countdown ends at the warning line, clamps at zero, and preser
 	});
 	const sm = manager();
 	const captured = makeExtension(sm);
-	runHandlers(captured, "session_tree", {}, context(sm, undefined, undefined, true, fixture.cwd, true));
+	await runHandlers(captured, "session_tree", {}, context(sm, undefined, undefined, true, fixture.cwd, true));
 	const readBudget = async (tokens: number | null, trusted = true) => {
 		const ctx = context(sm, undefined, { tokens, contextWindow: 200_000, percent: tokens === null ? null : tokens / 2000 }, true, fixture.cwd, trusted);
 		return resultJson<{ remaining_tokens: number | null }>(await call(captured, "get_context_remaining", {}, ctx)).remaining_tokens;
@@ -66,7 +66,7 @@ test("the visible countdown ends at the warning line, clamps at zero, and preser
 	const absent = context(sm, undefined, undefined, true, fixture.cwd);
 	assert.equal(resultJson<{ remaining_tokens: number | null }>(await call(captured, "get_context_remaining", {}, absent)).remaining_tokens, null);
 	const untrusted = context(sm, undefined, { tokens: 72_563, contextWindow: 200_000, percent: 36.2815 }, true, fixture.cwd, false);
-	runHandlers(captured, "session_start", {}, untrusted);
+	await runHandlers(captured, "session_start", {}, untrusted);
 	assert.equal(await readBudget(72_563, false), 98_765, "session start reloads the global reserve when the project is untrusted");
 });
 
@@ -83,7 +83,7 @@ test("absent pi-context key or margins reproduce the default reminder threshold 
 		const captured = makeExtension(sm);
 		// Thresholds are resolved once per session and cached; branch navigation clears the
 		// cache without emitting a boot block, so the next read uses this fixture.
-		runHandlers(captured, "session_tree", {}, context(sm, undefined, undefined, true, fixture.cwd));
+		await runHandlers(captured, "session_tree", {}, context(sm, undefined, undefined, true, fixture.cwd));
 		const window = 200_000;
 		const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
 		const first = at(40_961);
@@ -106,7 +106,7 @@ test("project pi-context reminder margin and reserve override global per key", a
 	// Project reserve wins: reminder = 50000 + 40000 (project margin).
 	const sm = manager();
 	const captured = makeExtension(sm);
-	runHandlers(captured, "session_tree", {}, context(sm, undefined, undefined, true, fixture.cwd));
+	await runHandlers(captured, "session_tree", {}, context(sm, undefined, undefined, true, fixture.cwd));
 	const window = 300_000;
 	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
 	assert.equal(await runContextHook(captured, at(90_001)), undefined, "nothing injected above the project-derived reminder");
@@ -122,7 +122,7 @@ test("an invalid reminder margin degrades to its default with one warning and ne
 	const sm = manager();
 	const captured = makeExtension(sm);
 	const ctx = context(sm, undefined, undefined, true, fixture.cwd);
-	assert.doesNotThrow(() => runHandlers(captured, "session_start", { reason: "startup" }, ctx));
+	await assert.doesNotReject(() => runHandlers(captured, "session_start", { reason: "startup" }, ctx));
 	const notices = noticesOf(ctx).filter((notice) => notice.type === "warning");
 	assert.equal(notices.length, 1, "one warning for the offending key");
 	assert.equal(notices[0]?.type, "warning");
@@ -150,6 +150,6 @@ test("the warning supersedes the early reminder when usage jumps across both thr
 	assert.deepEqual(warningResult?.messages.map((message) => (message as { customType?: string }).customType), [internal.WARNING_TYPE]);
 	await commitTurnEndBoundary(captured, sm, ctx);
 	const reloaded = makeExtension(sm);
-	runHandlers(reloaded, "context", {}, ctx);
+	await runHandlers(reloaded, "context", {}, ctx);
 	assert.equal(reloaded.sent.length, 0, "persisted warning also suppresses a late reminder after reload");
 });

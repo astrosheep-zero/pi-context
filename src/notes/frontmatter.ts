@@ -13,14 +13,14 @@ export type NoteMeta = {
 	origin: Origin;
 	status: NoteStatus;
 	stale: boolean;
-	created_at: number;
-	updated_at: number;
-	last_accessed: number;
-	access_count: number;
-	source_window?: string;
+	createdAt: number;
+	updatedAt: number;
+	lastAccessed: number;
+	accessCount: number;
+	sourceWindow?: string;
 	supersedes?: string;
-	recurrence_count?: number;
-	recurrence_windows?: string[];
+	recurrenceCount?: number;
+	recurrenceWindows?: string[];
 	/** Project ownership on newly-created session notes; legacy/invalid values are preserved as-is. */
 	project?: unknown;
 	[key: string]: unknown;
@@ -29,9 +29,10 @@ export type NoteMeta = {
 const SCOPES: readonly Scope[] = ["session", "project", "human", "agent", "model"];
 const ORIGINS: readonly Origin[] = ["user", "self", "external"];
 const STATUSES: readonly NoteStatus[] = ["active", "superseded", "pending", "archived"];
-const TIMESTAMP_KEYS = ["created_at", "updated_at", "last_accessed"] as const;
+const TIMESTAMP_KEYS = ["createdAt", "updatedAt", "lastAccessed"] as const;
+const LEGACY_KNOWN_KEYS = ["created_at", "updated_at", "last_accessed", "access_count", "source_window", "recurrence_count", "recurrence_windows"] as const;
 /** Emission order, exactly the Design's key list. */
-const KNOWN_KEYS = ["origin", "status", "stale", "created_at", "updated_at", "last_accessed", "access_count", "source_window", "supersedes", "recurrence_count", "recurrence_windows"] as const;
+const KNOWN_KEYS = ["origin", "status", "stale", "createdAt", "updatedAt", "lastAccessed", "accessCount", "sourceWindow", "supersedes", "recurrenceCount", "recurrenceWindows"] as const;
 
 const pad2 = (value: number) => String(value).padStart(2, "0");
 
@@ -98,7 +99,7 @@ function parseFrontmatter(raw: string): { fields: Record<string, unknown>; body:
 		}
 	}
 	if (close === -1) return { fields: {}, body: raw };
-	const fields: Record<string, unknown> = {};
+	const fields = Object.create(null) as Record<string, unknown>;
 	for (let index = 1; index < close; index++) {
 		const line = lines[index]!;
 		const match = /^([A-Za-z_][A-Za-z0-9_-]*):(.*)$/.exec(line);
@@ -124,10 +125,13 @@ function parseFrontmatter(raw: string): { fields: Record<string, unknown>; body:
 
 /**
  * Parse a note file. Missing known keys take the Design defaults (status active, stale false,
- * access_count 0, timestamps now); unknown keys are carried through untouched.
+ * accessCount 0, timestamps now); unknown keys are carried through untouched. Known
+ * snake_case metadata is refused because it requires the explicit manual migration.
  */
 export function parseNote(raw: string, now = Date.now()): { meta: NoteMeta; body: string } {
 	const { fields, body } = parseFrontmatter(raw);
+	const legacyKeys = LEGACY_KNOWN_KEYS.filter((key) => Object.hasOwn(fields, key));
+	if (legacyKeys.length > 0) throw new Error(`legacy note metadata ${legacyKeys.join(", ")} requires manual migration to camelCase before this note can be used`);
 	const meta = { ...fields } as Record<string, unknown>;
 	// scope is a legacy on-disk field: store callers derive it from the file's home and
 	// overwrite it after parsing, so an absent or outdated value just falls back.
@@ -136,7 +140,7 @@ export function parseNote(raw: string, now = Date.now()): { meta: NoteMeta; body
 	meta.status = isStatus(meta.status) ? meta.status : "active";
 	meta.stale = meta.stale === true;
 	for (const key of TIMESTAMP_KEYS) meta[key] = toEpoch(meta[key], now);
-	meta.access_count = typeof meta.access_count === "number" && Number.isFinite(meta.access_count) ? meta.access_count : 0;
+	meta.accessCount = typeof meta.accessCount === "number" && Number.isFinite(meta.accessCount) ? meta.accessCount : 0;
 	return { meta: meta as NoteMeta, body };
 }
 

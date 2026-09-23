@@ -260,6 +260,53 @@ test("reset construction failure preserves incoming and budget drafts without co
 	assert.match(notices.at(-1)?.message ?? "", /could not build reset/);
 });
 
+test("a stale async reset is discarded after a lifecycle switch without staging a notice", async () => {
+	const sessionManager = Manager.inMemory("/private/tmp/pi-context-stale-reset-test");
+	const handlers = new Map<string, Handler[]>();
+	const api = {
+		on(name: string, handler: Handler) {
+			const list = handlers.get(name) ?? [];
+			list.push(handler);
+			handlers.set(name, list);
+			return () => {};
+		},
+	} as unknown as ExtensionAPI;
+	const ctx = {
+		sessionManager,
+		model: undefined,
+		signal: undefined,
+		hasPendingMessages: () => false,
+		ui: { notify() {} },
+	} as unknown as ExtensionContext;
+	let resolveBuild!: (drafts: SessionBoundaryDraft[]) => void;
+	const pendingBuild = new Promise<SessionBoundaryDraft[]>((resolve) => { resolveBuild = resolve; });
+	let readyCount = 0;
+	const lifecycle = registerResetLifecycle(api, {
+		isEnabled: () => true,
+		budget: {
+			automaticResetEnabled: () => true,
+			hardReserveDue: () => false,
+			consumeTurnEnd: () => [],
+			clear: () => {},
+		},
+		buildReset: () => pendingBuild,
+		onResetReady: () => { readyCount++; },
+	});
+	const windowId = `pcw:${sessionManager.getSessionId().slice(0, 8)}:root`;
+	lifecycle.request(windowId);
+	const incoming: SessionBoundaryDraft = { type: "custom_message", customType: "foreign/boundary", content: "preserve me", display: false };
+	const turnEnd = handlers.get("turn_end")?.[0];
+	const sessionTree = handlers.get("session_tree")?.[0];
+	assert.ok(turnEnd && sessionTree);
+	const pending = turnEnd(fakeBoundaryEvent([incoming]), ctx);
+	await sessionTree({}, ctx);
+	resolveBuild([{ type: "custom_message", customType: internal.BOOT_TYPE, content: "stale", display: false }]);
+	const result = resultEntries([await pending]);
+	assert.deepEqual(result.entries, [incoming], "a switched lifecycle keeps incoming drafts but discards stale reset drafts");
+	assert.equal(result.continue, false);
+	assert.equal(readyCount, 0, "stale reset work cannot stage a success notice");
+});
+
 test("a queued success clears an overflow failure before settle recovery can reset", async () => {
 	const sessionManager = Manager.inMemory("/private/tmp/pi-context-queued-overflow-test");
 	const handlers = new Map<string, Handler[]>();

@@ -31,7 +31,7 @@ function freshRoot(): string {
 function setUpdatedAt(scope: Scope, path: string, ctx: ReturnType<typeof context>, timestamp: number): void {
 	const file = physicalPath(scope, path, ctx);
 	const raw = readFileSync(file, "utf8");
-	writeFileSync(file, raw.replace(/^updated_at: .*$/m, `updated_at: ${new Date(timestamp).toISOString()}`));
+	writeFileSync(file, raw.replace(/^updatedAt: .*$/m, `updatedAt: ${new Date(timestamp).toISOString()}`));
 }
 
 type Meta = Record<string, unknown>;
@@ -81,11 +81,11 @@ test("write lands a real markdown file with harness frontmatter and a pure body"
 	const raw = readFileSync(file, "utf8");
 	assert.match(raw, /^---\n/, "the file opens with frontmatter");
 	assert.match(raw, /\n---\n\nhello$/, "frontmatter is followed by a blank line and the exact body");
-	for (const [key, value] of [["origin", "self"], ["status", "active"], ["stale", "false"], ["access_count", "0"]]) {
+	for (const [key, value] of [["origin", "self"], ["status", "active"], ["stale", "false"], ["accessCount", "0"]]) {
 		assert.match(raw, new RegExp(`^${key}: ${value}$`, "m"), `frontmatter carries ${key}=${value}`);
 	}
 	assert.equal(/^scope:/m.test(raw), false, "scope is derived from the file home, never persisted");
-	for (const key of ["created_at", "updated_at", "last_accessed"]) {
+	for (const key of ["createdAt", "updatedAt", "lastAccessed"]) {
 		assert.match(raw, new RegExp(`^${key}: \\d{4}-\\d{2}-\\d{2}T`, "m"), `frontmatter renders ${key} via localIso`);
 	}
 	assert.equal(parseNote(raw).meta.project, projectKey(ctx.cwd), "a newly-created session note records its existing project key");
@@ -145,7 +145,7 @@ test("session-note project ownership is per note, persistent across sessions, an
 	assert.equal(parseNote(readFileSync(physicalPath("session", "new-from-project-b.md", movedContext), "utf8")).meta.project, projectB, "only a newly-created session note uses the current project key");
 	await call(firstCaptured, "notes_write", { path: "project-note.md", content: "project home note", scope: "project" }, movedContext);
 	assert.equal(parseNote(readFileSync(physicalPath("project", "project-note.md", movedContext), "utf8")).meta.project, undefined, "project-home notes do not receive session ownership metadata");
-	assert.equal(listNotes(movedContext, { scope: "session" }).length, 2, "project ownership remains frontmatter, not a separate note");
+	assert.equal((await listNotes(movedContext, { scope: "session" })).length, 2, "project ownership remains frontmatter, not a separate note");
 });
 
 test("linked git worktrees share the main checkout's project key", () => {
@@ -167,7 +167,7 @@ test("linked git worktrees share the main checkout's project key", () => {
 	assert.equal(scopeDir("project", context(manager(), undefined, undefined, true, worktree)), scopeDir("project", context(manager(), undefined, undefined, true, main)), "@project uses the same physical home from both checkouts");
 });
 
-test("legacy and invalid session project metadata stays unknown without read/write backfill", async () => {
+test("legacy metadata is refused for explicit manual migration; invalid project ownership stays unknown", async () => {
 	freshRoot();
 	const session = manager();
 	const captured = makeExtension(session);
@@ -185,24 +185,22 @@ access_count: 0
 ---
 
 legacy body`);
-	assert.equal(parseNote(readFileSync(legacyFile, "utf8")).meta.project, undefined);
-	assert.equal(listNotes(ctx, { scope: "session" })[0]?.meta.project, undefined, "listing a legacy note does not backfill project ownership");
-	await call(captured, "notes_read", { path: "legacy.md" }, ctx);
-	assert.equal(parseNote(readFileSync(legacyFile, "utf8")).meta.project, undefined, "reading a legacy note does not backfill project ownership");
-	await call(captured, "notes_write", { path: "legacy.md", content: "legacy overwritten" }, ctx);
-	assert.equal(parseNote(readFileSync(legacyFile, "utf8")).meta.project, undefined, "overwriting a legacy note does not migrate it");
-	await call(captured, "notes_edit", { path: "legacy.md", edits: [{ oldText: "overwritten", newText: "edited" }] }, ctx);
-	assert.equal(parseNote(readFileSync(legacyFile, "utf8")).meta.project, undefined, "editing a legacy note does not backfill ownership");
+	assert.throws(() => parseNote(readFileSync(legacyFile, "utf8")), /legacy note metadata .*requires manual migration/);
+	const legacyBytes = readFileSync(legacyFile, "utf8");
+	await assert.rejects(() => listNotes(ctx, { scope: "session" }), /requires manual migration/);
+	await assert.rejects(() => call(captured, "notes_read", { path: "legacy.md" }, ctx), /requires manual migration/);
+	await assert.rejects(() => call(captured, "notes_write", { path: "legacy.md", content: "legacy overwritten" }, ctx), /requires manual migration/);
+	assert.equal(readFileSync(legacyFile, "utf8"), legacyBytes, "refusal preserves the unmigrated file byte-for-byte");
 
 	const invalidFile = physicalPath("session", "invalid.md", ctx);
 	writeFileSync(invalidFile, `---
 origin: self
 status: active
 stale: false
-created_at: 2026-01-01T00:00:00.000+00:00
-updated_at: 2026-01-01T00:00:00.000+00:00
-last_accessed: 2026-01-01T00:00:00.000+00:00
-access_count: 0
+createdAt: 2026-01-01T00:00:00.000+00:00
+updatedAt: 2026-01-01T00:00:00.000+00:00
+lastAccessed: 2026-01-01T00:00:00.000+00:00
+accessCount: 0
 project: 17
 ---
 
@@ -211,7 +209,7 @@ invalid owner`);
 	assert.notEqual(parseNote(readFileSync(invalidFile, "utf8")).meta.project, projectKey(ctx.cwd), "invalid ownership does not match the current project key");
 	await call(captured, "notes_write", { path: "invalid.md", content: "still invalid" }, ctx);
 	assert.equal(parseNote(readFileSync(invalidFile, "utf8")).meta.project, 17, "an invalid value remains unknown and is not replaced with cwd-derived ownership");
-	assert.equal(existsSync(join(scopeDir("session", ctx), ".session.json")), false, "legacy and new notes use no ownership sidecar");
+	assert.equal(existsSync(join(scopeDir("session", ctx), ".session.json")), false, "new notes use no ownership sidecar");
 });
 
 test("edit is body-scoped with named failures and a replace_all escape hatch", async () => {
@@ -392,7 +390,7 @@ test("Pi adapter resolves agent and switched model identity on each notes call a
 		await call(captured, "notes_write", { address: "@model/private.md", content: "second model note" }, ctx);
 		const listed = resultJson<Listed>(await call(captured, "notes_list", {}, ctx));
 		assert.deepEqual(listed.files.map((row) => row.address).sort(), ["@agents/test-agent/private.md", "@models/second-model/private.md"]);
-		const boot = explicitBoot(ctx, "test-window", undefined);
+		const boot = await explicitBoot(ctx, "test-window", undefined);
 		assert.ok(boot.includes("@models/second-model/private.md"));
 		assert.equal(boot.includes("@models/first-model/private.md"), false);
 		assert.match(resultRead(await call(captured, "notes_read", { address: "@models/first-model/private.md" }, ctx)).content, /first model note$/);
@@ -403,7 +401,7 @@ test("Pi adapter resolves agent and switched model identity on each notes call a
 });
 
 const FRONTMATTER = (body: string) =>
-	`---\norigin: self\nstatus: active\nstale: false\ncreated_at: 2026-01-01T00:00:00.000+00:00\nupdated_at: 2026-01-01T00:00:00.000+00:00\nlast_accessed: 2026-01-01T00:00:00.000+00:00\naccess_count: 0\n---\n\n${body}`;
+	`---\norigin: self\nstatus: active\nstale: false\ncreatedAt: 2026-01-01T00:00:00.000+00:00\nupdatedAt: 2026-01-01T00:00:00.000+00:00\nlastAccessed: 2026-01-01T00:00:00.000+00:00\naccessCount: 0\n---\n\n${body}`;
 
 async function withAgent(name: string | undefined, run: () => Promise<void>): Promise<void> {
 	const previous = process.env.PI_NOTES_AGENT;

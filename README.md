@@ -86,13 +86,13 @@ const context: NotesContext = {
   model: "my-model",              // canonical lowercase slug
 };
 const notes = createNotesStore(context);
-notes.write("@project/decisions.md", "Use a shared notes library.", { origin: "user" });
-notes.edit("@project/decisions.md", [
+await notes.write("@project/decisions.md", "Use a shared notes library.", { origin: "user" });
+await notes.edit("@project/decisions.md", [
   { oldText: "shared", newText: "host-independent" },
 ]);
-const note = notes.read("@project/decisions.md"); // full text/body/metadata, or undefined
-const files = notes.list({ pattern: "@project/**" });
-const matches = notes.search(["library"]);
+const note = await notes.read("@project/decisions.md"); // full text/body/metadata, or undefined
+const files = await notes.list({ pattern: "@project/**" });
+const matches = await notes.search(["library"]);
 ```
 
 `/notes` ships JavaScript and TypeScript declarations. It does not import Pi or read `PI_*` environment variables. Pi packages are optional peers: a notes-only installation does not install them. Using the plugin, root SDK entry, or `dream` CLI still requires Pi. This is a filesystem library for Node, not a browser storage API.
@@ -101,17 +101,17 @@ const matches = notes.search(["library"]);
 
 `createNotesStore(context)` snapshots the five required identity fields; changing the supplied object afterward does not retarget the store. It resolves `home` once, validates identity components, and creates no files until an operation needs to write. Create a new store to change identity. Multiple stores can use independent roots and identities without changing process environment.
 
-- `write(address, content, { origin?, stale? }?)` returns `{ meta }`. Default origin is `self`; overwriting preserves creation time, existing project ownership, and unknown metadata, and revives stale notes unless `stale: true` is supplied.
-- `read(address)` returns `{ meta, body, text, resolvedScope }` or `undefined`. **Reads update** `last_accessed` and `access_count` on disk; `text` includes frontmatter.
-- `edit(address, edits?, { origin?, stale?, replaceAll? }?)` returns `{ meta, applied, resolvedScope, change }`. Edits affect the body; metadata-only changes need no edits. Each replacement uses the evolving body in array order; the complete batch is written atomically only after every edit succeeds. `change` is a typed `{ kind, before, after }`: `kind` is `body`, `metadata`, or `file` to identify the diff inputs, or `none` with empty strings when neither body nor origin/stale changed. It is not a rendered diff.
-- `list({ pattern?, scope?, who? }?)` returns complete `NoteRow[]`, sorted by update time descending with address tie-breaking. Rows contain address, scope, virtual path, metadata, body, and body byte size. `scope` narrows the five-home view; `who` names a concrete agent/model home.
-- `search(queries: string[], { pattern?, scope?, who? }?)` returns complete `NoteSearchRow[]`, sorted by address. Matching is case-sensitive literal OR over body lines; matches contain one-based `line`, `text`, and `offsetChars` into the serialized read text. Neither listing nor search increments access metadata.
+- `write(address, content, { origin?, stale? }?)` returns `Promise<{ meta }>`. Default origin is `self`; overwriting preserves creation time, existing project ownership, and unknown metadata, and revives stale notes unless `stale: true` is supplied.
+- `read(address)` returns `Promise<{ meta, body, text, resolvedScope } | undefined>`. **Reads update** `lastAccessed` and `accessCount` on disk; `text` includes frontmatter.
+- `edit(address, edits?, { origin?, stale?, replaceAll? }?)` returns `Promise<{ meta, applied, resolvedScope, change }>`. Edits affect the body; metadata-only changes need no edits. Each replacement uses the evolving body in array order; the complete batch is written atomically only after every edit succeeds. `change` is a typed `{ kind, before, after }`: `kind` is `body`, `metadata`, or `file` to identify the diff inputs, or `none` with empty strings when neither body nor origin/stale changed. It is not a rendered diff.
+- `list({ pattern?, scope?, who? }?)` returns `Promise<NoteRow[]>`, sorted by update time descending with address tie-breaking. Rows contain address, scope, virtual path, metadata, body, and body byte size. `scope` narrows the five-home view; `who` names a concrete agent/model home.
+- `search(queries: string[], { pattern?, scope?, who? }?)` returns `Promise<NoteSearchRow[]>`, sorted by address. Matching is case-sensitive literal OR over body lines; matches contain one-based `line`, `text`, and `offsetChars` into the serialized read text. Neither listing nor search increments access metadata.
 
 `list` and `search` share the `NotesQuery` type. A merged query uses `{ pattern? }`; a single-home query adds `scope`. Only `scope: "agent" | "model"` accepts `who`. TypeScript rejects combinations such as `{ scope: "project", who: "root" }`, and JavaScript callers receive a runtime refusal.
 
-The library returns full data, not tool envelopes or paginated/truncated output. `NoteError` exposes the existing named store refusals through `code`, with `lineNumbers` for ambiguous edits and `editIndex` for a failed edit. Runtime API fields use camelCase; persisted metadata keeps its existing snake_case names. The Pi tools translate error fields back to their established wire names. Invalid addresses/identities and filesystem failures throw errors; only a missing `read` returns `undefined`. Notes remain markdown files with the existing frontmatter and size limits; writes use same-directory atomic rename, without cross-process locking. Foreign named homes can be read (including the access-metadata update), but their bodies cannot be written or edited through the store. These are cooperative address rules, not an OS security sandbox.
+The library returns full data, not tool envelopes or paginated/truncated output. `NoteError` exposes the existing named store refusals through `code`, with `lineNumbers` for ambiguous edits and `editIndex` for a failed edit. Runtime API fields and known persisted note metadata use camelCase; Pi tool wire fields such as `updated_at`, `offset_chars`, and `replace_all` retain their established names. A note carrying a known legacy snake_case metadata key is refused with an explicit manual-migration-required error; import and construction never migrate note data. Invalid addresses/identities and filesystem failures reject; only a missing `read` returns `undefined`. Notes remain markdown files with the existing size limits and same-directory atomic rename. Same-file read/modify/write work is serialized by absolute physical filename across all store instances in this process (including `.md` address aliases); symlink/case aliases and cross-process locking are not guaranteed. `list` and `search` asynchronously traverse homes and serialize each discovered file read against pending mutations, but are not global snapshots and may not discover a file created after traversal. Foreign named homes can be read (including the access-metadata update), but their bodies cannot be written or edited through the store. These are cooperative address rules, not an OS security sandbox.
 
-Addresses use bare paths, `@project/`, `@human/`, `@self/`, `@model/`, or explicit `@agents/<slug>/` and `@models/<slug>/`. Relative self/model addresses resolve to the supplied identity; listing renders their concrete names. The disk layout remains `pi/session/<sessionId>/`, `project/<projectKey>/`, `human/`, `agents/<agent>/`, and `models/<model>/`. No data migration happens on library import or construction. Existing notes retain their metadata; new session notes record the supplied project key.
+Addresses use bare paths, `@project/`, `@human/`, `@self/`, `@model/`, or explicit `@agents/<slug>/` and `@models/<slug>/`. Relative self/model addresses resolve to the supplied identity; listing renders their concrete names. The disk layout remains `pi/session/<sessionId>/`, `project/<projectKey>/`, `human/`, `agents/<agent>/`, and `models/<model>/`. No data migration happens on library import or construction. Notes already using camelCase metadata retain their metadata; known legacy snake_case keys require the root-coordinated manual migration before use. New session notes record the supplied project key.
 
 ### Library and plugin boundary
 
@@ -134,7 +134,7 @@ src/
     session-replay.ts    # historical Pi session operations
 ```
 
-The public runtime exports are `createNotesStore`, `NoteError`, `projectKey(cwd)`, and `slugify(value)`, alongside the API's TypeScript types. `projectKey` provides the existing repository/worktree identity algorithm; `slugify` normalizes an agent/model name. Path/glob helpers, serialization, validation internals and constants are implementation details, not exported through `/notes`.
+The public runtime exports are `createNotesStore`, `NoteError`, `projectKey(cwd)`, and `slugify(value)`, alongside the API's TypeScript types. The factory and `projectKey` remain synchronous; `projectKey` provides the existing repository/worktree identity algorithm, while `slugify` normalizes an agent/model name. The five store methods return promises and use asynchronous filesystem operations. Path/glob helpers, serialization, validation internals and constants are implementation details, not exported through `/notes`.
 
 The Pi adapter supplies the root and live session/project/agent/model identity on each call. Tools and boot use the same storage implementation. Tool schemas, Pi-style edit diff rendering, wire budgets, pagination, boot selection, legacy activation migration, and session replay stay outside the library. There are no parallel legacy store/path adapters. Internal source paths are not the supported library API.
 

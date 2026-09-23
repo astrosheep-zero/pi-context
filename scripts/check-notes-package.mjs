@@ -36,17 +36,17 @@ const invalidQueries: NotesQuery[] = [
 void invalidQueries;
 const context: NotesContext = { home: "./notes", sessionId: "consumer", projectKey: "example-12345678", agent: "root", model: "test" };
 const notes: NotesStore = createNotesStore(context);
-notes.write("@project/hello.md", "hello", { origin: "user" });
-const edited = notes.edit("@project/hello.md", [{ oldText: "hello", newText: "hello world" }]);
+await notes.write("@project/hello.md", "hello", { origin: "user" });
+const edited = await notes.edit("@project/hello.md", [{ oldText: "hello", newText: "hello world" }]);
 const before: string = edited.change.before;
 const change: NoteChange = edited.change;
 if (change.kind === "none") { const empty: "" = change.before; void empty; }
 if (edited.resolvedScope !== "project" || edited.change.kind !== "body") throw new Error("incorrect edit result");
-notes.list({ scope: "project" });
-notes.search(["world"], { scope: "agent", who: "root" });
-const body: string | undefined = notes.read("@project/hello.md")?.body;
-const matches: number = notes.search(["world"])[0]?.matches.length ?? 0;
-const address: string | undefined = notes.list()[0]?.address;
+await notes.list({ scope: "project" });
+await notes.search(["world"], { scope: "agent", who: "root" });
+const body: string | undefined = (await notes.read("@project/hello.md"))?.body;
+const matches: number = (await notes.search(["world"]))[0]?.matches.length ?? 0;
+const address: string | undefined = (await notes.list())[0]?.address;
 const error = new NoteError("not_found", "missing", { editIndex: 0, lineNumbers: [1] });
 if (error.editIndex !== 0 || error.lineNumbers?.[0] !== 1) throw error;
 if (body !== "hello world" || before !== "hello" || matches !== 1 || address !== "@project/hello.md") throw error;

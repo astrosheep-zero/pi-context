@@ -13,7 +13,9 @@ type BudgetOwner = {
 type ResetOptions = {
 	isEnabled: () => boolean;
 	budget: BudgetOwner;
-	buildReset: (ctx: ExtensionContext) => SessionBoundaryDraft[];
+	buildReset: (ctx: ExtensionContext, isCurrent: () => boolean) => SessionBoundaryDraft[] | Promise<SessionBoundaryDraft[]>;
+	getLifecycleGeneration?: () => number;
+	onResetReady?: (ctx: ExtensionContext, drafts: readonly SessionBoundaryDraft[]) => void;
 };
 
 function isAbort(message: AgentMessage, outcome: string | undefined, ctx: ExtensionContext): boolean {
@@ -171,19 +173,31 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
  */
 export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) {
 	let sessionActive = true;
+	let lifecycleGeneration = 0;
 	let control = initialResetControl();
 
 	const clear = () => { control = reduceResetControl(control, { type: "clear" }).state; };
-	const resetBoundaryResult = (entries: SessionBoundaryDraft[], ctx: ExtensionContext) => {
+	const resetBoundaryResult = async (entries: SessionBoundaryDraft[], ctx: ExtensionContext) => {
+		const generation = lifecycleGeneration;
+		const outerGeneration = options.getLifecycleGeneration?.();
+		const sessionId = ctx.sessionManager.getSessionId();
+		const windowId = currentWindowId(ctx);
+		const isCurrent = () => sessionActive && lifecycleGeneration === generation &&
+			(outerGeneration === undefined || options.getLifecycleGeneration?.() === outerGeneration) && options.isEnabled() &&
+			ctx.signal?.aborted !== true && ctx.sessionManager.getSessionId() === sessionId && currentWindowId(ctx) === windowId;
+		let resetDrafts: SessionBoundaryDraft[];
 		try {
-			return { entries: [...entries, ...options.buildReset(ctx)], continue: true as const };
+			resetDrafts = await options.buildReset(ctx, isCurrent);
 		} catch (error) {
-			ctx.ui.notify(`pi-context: could not build reset (${String(error)}).`, "warning");
+			if (isCurrent()) ctx.ui.notify(`pi-context: could not build reset (${String(error)}).`, "warning");
 			return entries.length > 0 ? { entries } : undefined;
 		}
+		if (!isCurrent()) return entries.length > 0 ? { entries } : undefined;
+		options.onResetReady?.(ctx, resetDrafts);
+		return { entries: [...entries, ...resetDrafts], continue: true as const };
 	};
 
-	pi.on("turn_end", (event, ctx) => {
+	pi.on("turn_end", async (event, ctx) => {
 		if (!sessionActive) return undefined;
 		const aborted = isAbort(event.message, event.outcome, ctx);
 		const stagedBudgetEntries = options.budget.consumeTurnEnd(ctx);
@@ -203,11 +217,11 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 			},
 		});
 		control = decision.state;
-		if (decision.effect === "commit-boundary") return resetBoundaryResult(entries, ctx);
+		if (decision.effect === "commit-boundary") return await resetBoundaryResult(entries, ctx);
 		return entries.length > 0 ? { entries } : undefined;
 	});
 
-	pi.on("agent_before_settle", (event: AgentBeforeSettleEvent, ctx) => {
+	pi.on("agent_before_settle", async (event: AgentBeforeSettleEvent, ctx) => {
 		if (!sessionActive) return undefined;
 		const decision = reduceResetControl(control, {
 			type: "before_settle",
@@ -222,7 +236,7 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 		});
 		control = decision.state;
 		if (decision.effect !== "commit-boundary" && decision.effect !== "recover-overflow") return undefined;
-		return resetBoundaryResult(event.entries, ctx);
+		return await resetBoundaryResult(event.entries, ctx);
 	});
 
 	pi.on("session_before_compact", (event, ctx) => {
@@ -244,9 +258,9 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 	pi.on("agent_settled", () => {
 		control = reduceResetControl(control, { type: "settled" }).state;
 	});
-	pi.on("session_start", () => { clear(); sessionActive = true; });
-	pi.on("session_tree", clear);
-	pi.on("session_shutdown", () => { clear(); options.budget.clear(); sessionActive = false; });
+	pi.on("session_start", () => { lifecycleGeneration++; clear(); sessionActive = true; });
+	pi.on("session_tree", () => { lifecycleGeneration++; clear(); });
+	pi.on("session_shutdown", () => { lifecycleGeneration++; clear(); options.budget.clear(); sessionActive = false; });
 
 	return {
 		closeOut(windowId: string, source: ResetRequestSource) {

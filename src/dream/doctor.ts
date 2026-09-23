@@ -27,10 +27,13 @@ export function doctor(home: string): string[] {
 			if (fields.has(field[1]!)) report(path, `duplicate metadata key ${field[1]}; keep one value`);
 			fields.set(field[1]!, field[2]!.replace(/^(["'])(.*)\1$/, "$2"));
 		}
-		for (const [key, valid] of Object.entries({ origin: /^(user|self|external)$/, status: /^(active|superseded|pending|archived)$/, stale: /^(true|false)$/, access_count: /^\d+$/ })) {
+		for (const [key, valid] of Object.entries({ origin: /^(user|self|external)$/, status: /^(active|superseded|pending|archived)$/, stale: /^(true|false)$/, accessCount: /^\d+$/ })) {
 			if (!valid.test(fields.get(key) ?? "")) report(path, `missing/invalid ${key}; repair frontmatter`);
 		}
-		for (const key of ["created_at", "updated_at", "last_accessed"]) {
+		for (const [legacy, current] of [["created_at", "createdAt"], ["updated_at", "updatedAt"], ["last_accessed", "lastAccessed"], ["access_count", "accessCount"], ["source_window", "sourceWindow"], ["recurrence_count", "recurrenceCount"], ["recurrence_windows", "recurrenceWindows"]]) {
+			if (fields.has(legacy)) report(path, `legacy metadata key ${legacy}; manually migrate to ${current}`);
+		}
+		for (const key of ["createdAt", "updatedAt", "lastAccessed"]) {
 			const value = fields.get(key);
 			if (!value || !Number.isFinite(Date.parse(value))) report(path, `missing/invalid ${key}; use an ISO timestamp`);
 		}

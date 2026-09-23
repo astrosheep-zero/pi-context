@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { NotesContext } from "../../notes/context.js";
 import { createNotesStore, type NoteRow, type NotesQuery, type Scope } from "../../notes/index.js";
 import { notesContextFromPi } from "./adapter.js";
 
@@ -11,7 +12,7 @@ const NOTES_HOMES = [
 ] as const satisfies ReadonlyArray<{ scope: Scope; label: string }>;
 
 export type NotesHome = (typeof NOTES_HOMES)[number];
-export type NotesLoader = (ctx: ExtensionContext, scope: Scope) => NoteRow[];
+export type NotesLoader = (ctx: ExtensionContext, scope: Scope) => NoteRow[] | Promise<NoteRow[]>;
 export type NotesSnapshot = {
 	/** Wall-clock instant captured when this boot began; rendering never consults Date.now(). */
 	readonly openedAt: number;
@@ -28,15 +29,15 @@ function queryForScope(scope: Scope): NotesQuery {
  * Acquire the five homes once for one boot. Only filesystem-style errno failures are isolated;
  * malformed note data and unrelated construction errors remain visible to the caller.
  */
-export function loadNotesSnapshot(ctx: ExtensionContext, loadHome?: NotesLoader): NotesSnapshot {
+export async function loadNotesSnapshot(ctx: ExtensionContext, loadHome?: NotesLoader, identity: NotesContext = notesContextFromPi(ctx)): Promise<NotesSnapshot> {
 	const openedAt = Date.now();
-	const store = createNotesStore(notesContextFromPi(ctx));
+	const store = createNotesStore(identity);
 	const load = loadHome ?? ((_context: ExtensionContext, scope: Scope) => store.list(queryForScope(scope)));
 	const homes = new Map<Scope, readonly NoteRow[]>();
 	const unavailable: NotesHome[] = [];
 	for (const home of NOTES_HOMES) {
 		try {
-			homes.set(home.scope, load(ctx, home.scope));
+			homes.set(home.scope, await load(ctx, home.scope));
 		} catch (error) {
 			const code = typeof error === "object" && error !== null ? (error as NodeJS.ErrnoException).code : undefined;
 			if (typeof code !== "string" || !/^E[A-Z0-9_]+$/.test(code) || code.startsWith("ERR_")) throw error;

@@ -6,7 +6,7 @@ import { migrateLegacyHomes } from "../pi/notes/adapter.js";
 import { currentReset, currentWindowId, isCheckpointBackedReset, isWindowBoot, isWindowMarker, projectRootWindow, projectWindow, rootWindowId, type WindowMarker } from "./context-window.js";
 import { registerResetLifecycle } from "./reset-lifecycle.js";
 import { buildResetDrafts, resetTailCommitted } from "./reset-artifacts.js";
-import { WARNING_CONTENT, WARNING_TYPE } from "../protocol.js";
+import { BOOT_TYPE, WARNING_CONTENT, WARNING_TYPE } from "../protocol.js";
 import { ensureBoot, type IncompleteNotesNotifier } from "./boot.js";
 
 declare const __PI_CONTEXT_BUILD__: { version: string; sourceHash: string };
@@ -23,6 +23,7 @@ function branchHasWindowMarker(ctx: ExtensionContext, fromId?: string): boolean 
 /** Register the context-window runtime and its context-owned commands/tools. */
 export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsManager): void {
 	let enabled = true;
+	let lifecycleGeneration = 0;
 	let missingBootNotice: string | undefined;
 	const incompleteNotesNotified = new Set<string>();
 	const pendingResetNotices = new Set<string>();
@@ -55,16 +56,22 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 
 	const budget = registerBudget(pi, () => enabled, settingsManager, (windowId) => resets.closeOut(windowId, "automatic"));
 
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
+		const generation = ++lifecycleGeneration;
 		if (!enabled) return;
 		missingBootNotice = undefined;
 		pendingResetNotices.clear();
-		ensureBoot(pi, ctx, notifyIncompleteNotes);
+		await ensureBoot(pi, ctx, notifyIncompleteNotes, () => generation === lifecycleGeneration && enabled);
 	});
-	pi.on("session_tree", (_event, ctx) => {
+	pi.on("session_tree", async (_event, ctx) => {
+		const generation = ++lifecycleGeneration;
 		missingBootNotice = undefined;
 		pendingResetNotices.clear();
-		if (enabled) ensureBoot(pi, ctx, notifyIncompleteNotes);
+		if (enabled) await ensureBoot(pi, ctx, notifyIncompleteNotes, () => generation === lifecycleGeneration && enabled);
+	});
+	pi.on("session_shutdown", () => {
+		lifecycleGeneration++;
+		pendingResetNotices.clear();
 	});
 
 	// Pi's branch summarizer receives raw entries and bypasses context_with_system. Do not
@@ -106,9 +113,12 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 			const arg = args.trim().toLowerCase();
 			if (arg === "on") {
 				enabled = true;
-				ensureBoot(pi, cmdCtx, notifyIncompleteNotes);
+				const generation = ++lifecycleGeneration;
+				await ensureBoot(pi, cmdCtx, notifyIncompleteNotes, () => generation === lifecycleGeneration && enabled);
 			} else if (arg === "off") {
 				enabled = false;
+				lifecycleGeneration++;
+				pendingResetNotices.clear();
 				budget.clear();
 				resets.clear();
 			} else if (arg !== "") {
@@ -155,10 +165,14 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 
 	const resets = registerResetLifecycle(pi, {
 		isEnabled: () => enabled,
-		buildReset: (ctx) => {
-			const drafts = buildResetDrafts(ctx, notifyIncompleteNotes);
-			pendingResetNotices.add(drafts[2].details.windowId);
-			return drafts;
+		buildReset: (ctx, isCurrent) => buildResetDrafts(ctx, notifyIncompleteNotes, isCurrent),
+		getLifecycleGeneration: () => lifecycleGeneration,
+		onResetReady: (_ctx, drafts) => {
+			const boot = drafts.find((draft) => draft.type === "custom_message" && draft.customType === BOOT_TYPE);
+			if (boot?.type === "custom_message" && boot.details && typeof boot.details === "object") {
+				const windowId = (boot.details as { windowId?: unknown }).windowId;
+				if (typeof windowId === "string") pendingResetNotices.add(windowId);
+			}
 		},
 		budget,
 	});

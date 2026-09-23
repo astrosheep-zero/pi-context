@@ -12,6 +12,6 @@ export function scopeDir(scope: Scope, ctx: ExtensionContext, who?: string): str
 	return coreScopeDir(scope, notesContextFromPi(ctx), who);
 }
 
-export function listNotes(ctx: ExtensionContext, query: NotesQuery = {}): NoteRow[] {
+export function listNotes(ctx: ExtensionContext, query: NotesQuery = {}): Promise<NoteRow[]> {
 	return createNotesStore(notesContextFromPi(ctx)).list(query);
 }

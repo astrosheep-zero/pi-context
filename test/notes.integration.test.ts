@@ -34,7 +34,7 @@ test("notes_list is most-recently-updated first across merged scopes", async () 
 	const put = (scope: "session" | "project" | "human", path: string, updated: number) => {
 		const file = physicalPath(scope, path, ctx);
 		mkdirSync(dirname(file), { recursive: true });
-		writeFileSync(file, `---\nscope: ${scope}\norigin: self\nstatus: active\nstale: false\ncreated_at: ${localIso(updated - 1000)}\nupdated_at: ${localIso(updated)}\nlast_accessed: ${localIso(updated)}\naccess_count: 0\n---\n\nbody`);
+		writeFileSync(file, `---\nscope: ${scope}\norigin: self\nstatus: active\nstale: false\ncreatedAt: ${localIso(updated - 1000)}\nupdatedAt: ${localIso(updated)}\nlastAccessed: ${localIso(updated)}\naccessCount: 0\n---\n\nbody`);
 	};
 	const base = 1_700_000_000_000;
 	put("session", "b.md", base + 10);
@@ -65,11 +65,11 @@ test("notes are real files that persist across sessions and round-trip Unicode",
 	const read = resultRead(rawRead);
 	assert.equal(read.details.address, "@human/checkpoint/进度.md");
 	assert.equal(read.content, "Café", "a negative offset reads the body tail in one call");
-	const searched = resultJson<{ files: Array<{ path: string; created_at: unknown; updated_at: unknown; matches: Array<{ line: number }> }> }>(
+	const searched = resultJson<{ files: Array<{ path: string; updated_at: unknown; matches: Array<{ line: number }> }> }>(
 		await call(restoredCaptured, "notes_search", { query: "Café", scope: "human" }, restoredCtx),
 	);
 	assert.equal(searched.files[0]?.matches[0]?.line, 2);
-	const listedFiles = resultJson<{ files: Array<{ path: string; created_at: unknown; updated_at: unknown }> }>(
+	const listedFiles = resultJson<{ files: Array<{ path: string; updated_at: unknown }> }>(
 		await call(restoredCaptured, "notes_list", { pattern: "checkpoint/**", scope: "human" }, restoredCtx),
 	);
 	assert.equal(listedFiles.files.length, 1, "glob ** crosses into the checkpoint directory");
@@ -79,7 +79,6 @@ test("notes are real files that persist across sessions and round-trip Unicode",
 		await call(restoredCaptured, "notes_list", { pattern: "*", scope: "human" }, restoredCtx)
 	);
 	assert.equal(rootOnly.files.length, 0, "glob * stays within one segment");
-	assert.equal(searched.files[0]?.created_at, listedFiles.files[0]?.created_at, "note tools agree on the timestamp format");
 	assert.equal(searched.files[0]?.updated_at, listedFiles.files[0]?.updated_at);
 	await assert.rejects(() => call(captured, "notes_write", { path: "../escape", content: "x" }, ctx), /unsupported component/);
 });
@@ -94,38 +93,38 @@ test("stale lifecycle: writes and metadata-only edits close and revive a note", 
 	// metadata-only: content unchanged, flag set, applied 0
 	const markOnly = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { path: "journal.md", stale: true }, ctx));
 	assert.equal(markOnly.applied, 0);
-	assert.equal(listNotes(ctx, { scope: "session" })[0]?.meta.stale, true);
+	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.stale, true);
 	assert.equal(resultRead(await call(captured, "notes_read", { path: "journal.md" }, ctx)).content.endsWith("log line"), true, "mark-only leaves content unchanged");
 
 	// explicit revive
 	const revived = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { path: "journal.md", stale: false }, ctx));
-	assert.equal(listNotes(ctx, { scope: "session" })[0]?.meta.stale, false, "stale:false revives");
+	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.stale, false, "stale:false revives");
 
 	// write+stale closure then plain write revival
 	await call(captured, "notes_write", { path: "journal.md", content: "final", stale: true }, ctx);
-	assert.equal(listNotes(ctx, { scope: "session" })[0]?.meta.stale, true);
+	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.stale, true);
 	await call(captured, "notes_write", { path: "journal.md", content: "reopened" }, ctx);
-	assert.equal(listNotes(ctx, { scope: "session" })[0]?.meta.stale, false, "writing without stale revives");
+	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.stale, false, "writing without stale revives");
 
 	// metadata-only on a missing path is the typed not-found arm
 	const missing = resultJson<{ error?: string }>(await call(captured, "notes_edit", { path: "missing.md", stale: true }, ctx));
 	assert.equal(missing.error, "note not found");
 });
 
-test("the filesystem notes loader treats an absent home as empty but surfaces a real directory read failure", () => {
+test("the filesystem notes loader treats an absent home as empty but surfaces a real directory read failure", async () => {
 	const sm = manager();
 	const ctx = context(sm);
-	assert.deepEqual(listNotes(ctx, { scope: "human" }), [], "a home that has not been created is empty");
+	assert.deepEqual(await listNotes(ctx, { scope: "human" }), [], "a home that has not been created is empty");
 	const blockedHome = scopeDir("human", ctx);
 	writeFileSync(blockedHome, "not a directory");
-	assert.throws(
+	await assert.rejects(
 		() => listNotes(ctx, { scope: "human" }),
 		(error: unknown) => (error as NodeJS.ErrnoException).code === "ENOTDIR",
 		"a non-ENOENT directory failure is not swallowed as an empty home",
 	);
 });
 
-test("boot note acquisition is one closed snapshot and isolates one or all failed homes", () => {
+test("boot note acquisition is one closed snapshot and isolates one or all failed homes", async () => {
 	const sm = manager();
 	const ctx = context(sm);
 	const updated = Date.now();
@@ -140,10 +139,10 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 			origin: "self",
 			status: "active",
 			stale: false,
-			created_at: updated,
-			updated_at: updated,
-			last_accessed: updated,
-			access_count: 0,
+			createdAt: updated,
+			updatedAt: updated,
+			lastAccessed: updated,
+			accessCount: 0,
 		},
 	});
 	const rows = new Map<Scope, NoteRow[]>([
@@ -154,7 +153,7 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 		["model", [note("model", "model.md", "@models/default/model.md", "MODEL_POCKET_BODY")]],
 	]);
 	const calls = new Map<Scope, number>();
-	const snapshot = loadNotesSnapshot(ctx, (_ctx, scope) => {
+	const snapshot = await loadNotesSnapshot(ctx, (_ctx, scope) => {
 		calls.set(scope, (calls.get(scope) ?? 0) + 1);
 		return rows.get(scope) ?? [];
 	});
@@ -174,7 +173,7 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 	assert.equal(rendered.includes("SESSION_POCKET_BODY"), false, "pocket bodies stay excluded");
 
 	const readFailure = (code: string): NodeJS.ErrnoException => Object.assign(new Error("scripted read failure"), { code });
-	const oneFailed = loadNotesSnapshot(ctx, (_ctx, scope) => {
+	const oneFailed = await loadNotesSnapshot(ctx, (_ctx, scope) => {
 		if (scope === "human") throw readFailure("EIO");
 		return rows.get(scope) ?? [];
 	});
@@ -189,7 +188,7 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 	assert.ok(oneFailedText.includes("PROJECT_MAP_BODY") && oneFailedText.includes("notes_list can retry after recovery"), "healthy homes and the recovery notice survive one failure");
 	assert.equal(oneFailedText.includes("HUMAN_POCKET_BODY"), false, "the failed home's index is omitted");
 
-	const allFailed = loadNotesSnapshot(ctx, (_ctx, scope) => {
+	const allFailed = await loadNotesSnapshot(ctx, (_ctx, scope) => {
 		throw readFailure(scope === "session" ? "EACCES" : "EIO");
 	});
 	assert.equal(allFailed.unavailable.length, 5);
@@ -204,21 +203,21 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 	assert.ok(allFailedText.includes("pcw:test:root") && allFailedText.includes("pcw:test:next"), "identity survives an all-home failure");
 	assert.ok(allFailedText.includes("Your memory resets whenever the context window fills"), "protocol survives an all-home failure");
 	assert.equal(allFailedText.includes("scripted read failure"), false, "the model-facing notice does not expose OS/error details");
-	assert.throws(
+	await assert.rejects(
 		() => loadNotesSnapshot(ctx, () => { throw new TypeError("programmer failure"); }),
 		(error: unknown) => error instanceof TypeError,
 		"unrelated TypeError construction failures remain visible",
 	);
-	assert.throws(
+	await assert.rejects(
 		() => loadNotesSnapshot(ctx, () => { throw Object.assign(new Error("invalid argument"), { code: "ERR_INVALID_ARG_TYPE" }); }),
 		(error: unknown) => (error as NodeJS.ErrnoException).code === "ERR_INVALID_ARG_TYPE",
 		"Node ERR_* failures are not treated as filesystem errno failures",
 	);
 });
 
-test("the boot block gives awake agents the notes-home file layout", () => {
+test("the boot block gives awake agents the notes-home file layout", async () => {
 	const session = manager();
-	const rendered = explicitBoot(context(session), "pcw:test:root", undefined);
+	const rendered = await explicitBoot(context(session), "pcw:test:root", undefined);
 	assert.equal(rendered.includes(process.env.PI_NOTES_HOME ?? ""), false, "the absolute notes home is never exposed");
 	assert.match(rendered, /bare <vpath>.*@project\/<vpath>.*@human\/<vpath>/);
 });

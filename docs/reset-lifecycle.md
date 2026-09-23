@@ -22,7 +22,7 @@ A new boundary is ordered as:
 
 The raw session branch is preserved for history. New checkpoint-backed branches use Pi's canonical retain-none projection, which preserves the empty summary wrapper and system/tool state while excluding earlier conversational context. Older marker-only sessions use marker slicing as a narrow compatibility fallback. A marker is trusted as checkpoint-backed only when it directly follows an empty native compaction whose `firstKeptEntryId` is the compaction's own ID; a generic preceding compaction is not enough.
 
-`turn_end` is the sole composer for completed turns. It preserves incoming entries, consumes current-window budget drafts, and appends the ordered reset boundary only when the reducer requests one. `agent_before_settle` handles successful close-out fallback after Pi has drained queued work. Pi owns the ensuing continuation and request scheduling. Boundary construction failures notify and preserve already-collected entries without claiming a continuation.
+`turn_end` is the sole composer for completed turns. It preserves incoming entries, consumes current-window budget drafts, and appends the ordered reset boundary only when the reducer requests one. `agent_before_settle` handles successful close-out fallback after Pi has drained queued work. Pi owns the ensuing continuation and request scheduling. Reset construction awaits the asynchronous notes snapshot; the handler captures its session/window generation before awaiting, then rechecks generation, session, window, enabled state, and abort status before returning drafts. A stale completion is discarded while incoming/budget entries survive, and success notices are staged only after that guard. Construction failures notify only while the initiating lifecycle is still current and preserve already-collected entries without claiming a continuation.
 
 ## Reducer state
 
@@ -58,7 +58,7 @@ Budget drafts are instance-local and are consumed at turn end. They are discarde
 
 `context_with_system` selects the active boot by durable `details.windowId`. For a verified native checkpoint, Pi's canonical projection is used directly; for a legacy marker-only reset, the compatibility projection slices at the matching boot. The projection preserves system/tool state and later prompt patches. If the boot is absent, the runtime aborts safely instead of sending raw history. Usage estimation uses the same checkpoint-aware projection decision.
 
-Startup/tree repair is narrow: it may complete a repairable marker tail when later conversation does not make the missing metadata ambiguous. Legacy marker-only tails remain supported; repair never moves a boundary or promotes an arbitrary compaction to a retain-none checkpoint. `/tree` summary generation is suppressed with an empty summary when either branch crosses a reset, because the raw summary generator bypasses the provider projection.
+Startup/tree repair is narrow: it may complete a repairable marker tail when later conversation does not make the missing metadata ambiguous. It awaits the notes snapshot and rechecks lifecycle/window identity before sending a repaired boot or continuation. Legacy marker-only tails remain supported; repair never moves a boundary or promotes an arbitrary compaction to a retain-none checkpoint. `/tree` summary generation is suppressed with an empty summary when either branch crosses a reset, because the raw summary generator bypasses the provider projection.
 
 ## Validation and known limits
 

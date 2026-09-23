@@ -182,14 +182,14 @@ export function makeExtension(sessionManager: SessionManager, settingsManager?: 
 	return captured;
 }
 
-export function explicitBoot(ctx: ExtensionContext, currentWindowId: string, previousWindowId: string | undefined): string {
+export async function explicitBoot(ctx: ExtensionContext, currentWindowId: string, previousWindowId: string | undefined): Promise<string> {
 	return renderBootBlock({
 		agentName: agentSlug(ctx),
 		modelName: modelSlug(ctx),
 		firstWindowId: rootWindowId(ctx.sessionManager.getSessionId()),
 		currentWindowId,
 		previousWindowId,
-		notes: loadNotesSnapshot(ctx),
+		notes: await loadNotesSnapshot(ctx),
 	});
 }
 
@@ -353,11 +353,11 @@ export async function runManualCompact(captured: Captured, ctx: ExtensionContext
 	return (await handler(event as never, ctx)) as CompactionHookResult;
 }
 
-export function runHandlers(captured: Captured, name: string, event: unknown, ctx: ExtensionContext): void {
+export async function runHandlers(captured: Captured, name: string, event: unknown, ctx: ExtensionContext): Promise<void> {
 	const isIdle = ctx.isIdle;
 	if (name === "agent_settled") ctx.isIdle = () => true;
 	try {
-		for (const handler of captured.handlers.get(name) ?? []) handler(event as never, ctx);
+		for (const handler of captured.handlers.get(name) ?? []) await handler(event as never, ctx);
 	} finally { ctx.isIdle = isIdle; }
 }
 

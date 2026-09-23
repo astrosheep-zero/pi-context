@@ -18,6 +18,6 @@ const boot = renderBootBlock({
 	modelName: modelSlug(ctx as never),
 	firstWindowId: rootWindowId(ctx.sessionManager.getSessionId()),
 	currentWindowId: "pcw:smoke:current",
-	notes: loadNotesSnapshot(ctx as never),
+	notes: await loadNotesSnapshot(ctx as never),
 });
 console.log(boot);

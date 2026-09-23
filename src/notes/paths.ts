@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import type { NotesContext } from "./context.js";
 
@@ -80,9 +81,9 @@ export function scopeDir(scope: Scope, context: NotesContext, who?: string): str
 }
 
 /** Every existing home directory of the agents/ or models/ namespace, as names. */
-export function namespaceSlugs(namespace: "agents" | "models", home: string): string[] {
+export async function namespaceSlugs(namespace: "agents" | "models", home: string): Promise<string[]> {
 	try {
-		return readdirSync(join(home, namespace), { withFileTypes: true })
+		return (await readdir(join(home, namespace), { withFileTypes: true }))
 			.filter((entry) => entry.isDirectory())
 			.map((entry) => entry.name)
 			.sort();
