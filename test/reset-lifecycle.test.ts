@@ -372,9 +372,9 @@ test("reset-control: close-out phases deduplicate, span turns, and upgrade to a 
 	assert.equal(noteTurn.effect, "none");
 	assert.deepEqual(noteTurn.state.request, first.state.request, "note/tool turns do not consume close-out");
 	const tool = reduceResetControl(noteTurn.state, { type: "tool_request", windowId });
-	assert.deepEqual(tool.state.request, { phase: "tool-requested", windowId });
+	assert.deepEqual(tool.state.request, { phase: "tool-requested", windowId, source: "manual" });
 	const commit = reduceResetControl(tool.state, { type: "turn_end", facts: turnEndFacts() });
-	assert.equal(commit.effect, "commit-boundary");
+	assert.equal(commit.effect, "commit-boundary-stop");
 	assert.deepEqual(commit.state, initialResetControl());
 });
 
@@ -382,7 +382,7 @@ test("reset-control: fallback is normal-stop only; hard reserve remains safety",
 	const windowId = "pcw:test:window";
 	const manual = reduceResetControl(initialResetControl(), { type: "close_out", windowId, source: "manual" }).state;
 	const fallback = reduceResetControl(manual, { type: "before_settle", facts: beforeSettleFacts() });
-	assert.equal(fallback.effect, "commit-boundary", "manual close-out works even when automatic resets are disabled");
+	assert.equal(fallback.effect, "commit-boundary-stop", "manual close-out stops after the reset is committed");
 	assert.deepEqual(fallback.state, initialResetControl());
 
 	const automatic = reduceResetControl(initialResetControl(), { type: "close_out", windowId, source: "automatic" }).state;

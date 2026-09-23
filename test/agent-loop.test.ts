@@ -401,8 +401,7 @@ test("real AgentSession: manual close-out spans note turns and commits its check
 			}
 			if (request === 3) return assistant(fixture, [{ type: "toolCall", id: "manual-note-b", name: "notes_write", arguments: { address: "manual-b.md", content: "MANUAL_NOTE_BETA" } }], "toolUse");
 			if (request === 4) return assistant(fixture, [{ type: "toolCall", id: "manual-wipe", name: "wipe_memory", arguments: {} }], "toolUse");
-			assertFreshRequest(fixture, request - 1, "MANUAL_CLOSEOUT_OLD_SENTINEL");
-			return assistant(fixture, [{ type: "text", text: "new window resumed" }]);
+			assert.fail("/wipe-memory must stop after committing the reset instead of starting a fresh model request");
 		},
 	});
 	try {
@@ -410,7 +409,7 @@ test("real AgentSession: manual close-out spans note turns and commits its check
 		await fixture.session.waitForIdle();
 		await fixture.session.prompt("/wipe-memory");
 		await fixture.session.waitForIdle();
-		assert.equal(fixture.requests.length, 5, "two note turns, explicit wipe, and one fresh continuation run");
+		assert.equal(fixture.requests.length, 4, "two note turns and explicit wipe finish without a fresh continuation request");
 		assert.equal(resetMarkers(fixture).length, 1);
 		const branch = fixture.sessionManager.getBranch();
 		const warningIndex = branch.findIndex((entry) => entry.type === "custom_message" && entry.customType === WARNING_TYPE);
@@ -461,7 +460,7 @@ test("real AgentSession: repeated manual commands share one pending window and n
 		releaseResponse();
 		await Promise.all([first, second]);
 		await fixture.session.waitForIdle();
-		assert.equal(fixture.requests.length, 2, "duplicate command waits do not schedule a second fresh-window request");
+		assert.equal(fixture.requests.length, 1, "duplicate command waits do not schedule another model request");
 		assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === WARNING_TYPE).length, 1, "the same pending-window warning is deduplicated");
 		assert.equal(resetMarkers(fixture).length, 1, "normal stop commits exactly one reset");
 		assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "compaction").length, 1);
@@ -533,10 +532,9 @@ test("real AgentSession: steering and follow-up queued during fallback reach the
 			releaseResponse();
 			await command;
 			await fixture.session.waitForIdle();
-			assert.equal(fixture.requests.length, 3, `${delivery} runs once before one fresh continuation`);
+			assert.equal(fixture.requests.length, 2, `${delivery} runs once before the reset and does not start a fresh continuation`);
 			assert.equal(resetMarkers(fixture).length, 1, `${delivery} does not duplicate the fallback reset`);
 			assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "message" && JSON.stringify(entry.message).includes("QUEUED_DURING_FALLBACK")).length, 1);
-			assertFreshRequest(fixture, 2, "QUEUED_DURING_FALLBACK");
 		} finally {
 			releaseResponse();
 			fixture.close();
@@ -565,8 +563,8 @@ test("real AgentSession: a reset survives all notes-home read failures with an i
 		const boot = fixture.sessionManager.getBranch().find((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && entry.details && typeof entry.details === "object" && (entry.details as { windowId?: unknown }).windowId === windowId);
 		assert.ok(boot && boot.type === "custom_message");
 		const bootText = typeof boot.content === "string" ? boot.content : JSON.stringify(boot.content);
-		assert.ok(bootText.includes("Notes index incomplete"));
-		assert.ok(bootText.includes("notes_list can retry after recovery"));
+		assert.ok(bootText.includes("## The human | @human\n： this drawer wouldn't open — ask notes_list to try again"));
+		assert.equal(bootText.match(/this drawer wouldn't open/g)?.length, 5, "each failed section gets one recovery line");
 		assert.ok(bootText.includes("<context_window_protocol>"));
 	} finally {
 		fixture.close();

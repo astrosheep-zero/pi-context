@@ -7,7 +7,7 @@
 | Trigger | Behavior |
 | --- | --- |
 | `wipe_memory` tool | Mark the current window tool-requested. At `turn_end`, after the complete tool batch and any accepted budget drafts, append the reset boundary and ask Pi to continue. Repeated requests for that window deduplicate. |
-| `/wipe-memory` | Capture the current window, wait for idle, and stop if another invocation has already moved the branch to a new window. Arm a manual close-out, persist the shared hidden warning, and trigger an ordinary model turn. The agent can write notes/use tools over several turns. A `wipe_memory` call commits at `turn_end`; otherwise a successful normal stop commits at `agent_before_settle` after queued messages drain. |
+| `/wipe-memory` | Capture the current window, wait for idle, and stop if another invocation has already moved the branch to a new window. Arm a manual close-out, persist the shared hidden warning, and trigger an ordinary model turn. The agent can write notes/use tools over several turns. A `wipe_memory` call commits at `turn_end`; otherwise a successful normal stop commits at `agent_before_settle` after queued messages drain. The committed reset stops the run; it does not start a fresh model answer. |
 | Budget warning | When automatic compaction is enabled and remaining active-window budget reaches reserve plus the warning runway, put the same hidden warning in the request and arm an automatic close-out. An explicit `wipe_memory` commits the boundary; a successful normal stop is the fallback. |
 | Hard reserve | Independent safety path: if automatic resets are enabled and completed-turn usage reaches Pi's reserve, commit a boundary at `turn_end`. |
 | Abort or error | Never count as successful close-out. Abort clears lifecycle state. An ordinary close-out error is dropped without reset; provider-overflow recovery remains separately bounded. |
@@ -32,7 +32,7 @@ The raw session branch is preserved for history. New checkpoint-backed branches 
 | --- | --- |
 | `{ phase: "none" }` | No close-out/tool request is pending. |
 | `{ phase: "close-out", windowId, source }` | Manual or automatic warning close-out remains armed across ordinary note/tool turns. |
-| `{ phase: "tool-requested", windowId }` | A direct `wipe_memory` request will commit after its complete turn batch. |
+| `{ phase: "tool-requested", windowId, source }` | A direct `wipe_memory` request will commit after its complete turn batch. Manual command close-outs use `source: "manual"` and stop after committing; direct tool requests continue in the fresh window. |
 | `overflow: "idle"` | No overflow recovery is pending. |
 | `overflow: "pending"` | An overflow failure may recover once at pre-settlement. |
 | `overflow: "pending-spent"` | Recovery was already spent in this failure chain. |

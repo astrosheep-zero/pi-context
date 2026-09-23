@@ -29,10 +29,11 @@ function isOverflowLike(message: AgentMessage, ctx: ExtensionContext): boolean {
 }
 
 export type ResetRequestSource = "manual" | "automatic";
+type ToolResetRequestSource = ResetRequestSource | "tool";
 export type ResetRequest =
 	| { readonly phase: "none" }
 	| { readonly phase: "close-out"; readonly windowId: string; readonly source: ResetRequestSource }
-	| { readonly phase: "tool-requested"; readonly windowId: string };
+	| { readonly phase: "tool-requested"; readonly windowId: string; readonly source: ToolResetRequestSource };
 export type ResetOverflowPhase = "idle" | "pending" | "pending-spent" | "spent";
 
 export interface ResetControlState {
@@ -82,6 +83,7 @@ export type ResetControlEffect =
 	| "close-out-armed"
 	| "already-pending"
 	| "commit-boundary"
+	| "commit-boundary-stop"
 	| "recover-overflow";
 
 export interface ResetControlResult {
@@ -110,7 +112,8 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 		case "tool_request": {
 			const request = state.request;
 			if (request.phase === "tool-requested" && request.windowId === event.windowId) return { state, effect: "already-pending" };
-			return { state: { ...state, request: { phase: "tool-requested", windowId: event.windowId } }, effect: "close-out-armed" };
+			const source: ToolResetRequestSource = request.phase === "close-out" ? request.source : "tool";
+			return { state: { ...state, request: { phase: "tool-requested", windowId: event.windowId, source } }, effect: "close-out-armed" };
 		}
 		case "turn_end": {
 			const facts = event.facts;
@@ -131,7 +134,8 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 			// A direct tool request commits after the whole tool batch. The budget cutoff is
 			// a separate hard-reserve safety path; ordinary close-out waits for settlement.
 			if (request.phase === "tool-requested" || facts.hardReserveDue) {
-				return { state: { request: NO_REQUEST, overflow: "idle" }, effect: "commit-boundary" };
+				const stopAfterReset = request.phase === "tool-requested" && request.source === "manual";
+				return { state: { request: NO_REQUEST, overflow: "idle" }, effect: stopAfterReset ? "commit-boundary-stop" : "commit-boundary" };
 			}
 			return { state: { request, overflow: "idle" }, effect: "none" };
 		}
@@ -156,7 +160,7 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 			if (request.source === "automatic" && !facts.automaticResetEnabled) {
 				return { state: { ...state, request: NO_REQUEST }, effect: "none" };
 			}
-			return { state: { request: NO_REQUEST, overflow: "idle" }, effect: "commit-boundary" };
+			return { state: { request: NO_REQUEST, overflow: "idle" }, effect: request.source === "manual" ? "commit-boundary-stop" : "commit-boundary" };
 		}
 		case "settled":
 			return { state: initialResetControl(), effect: "none" };
@@ -177,7 +181,7 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 	let control = initialResetControl();
 
 	const clear = () => { control = reduceResetControl(control, { type: "clear" }).state; };
-	const resetBoundaryResult = async (entries: SessionBoundaryDraft[], ctx: ExtensionContext) => {
+	const resetBoundaryResult = async (entries: SessionBoundaryDraft[], ctx: ExtensionContext, continueAfterReset: boolean) => {
 		const generation = lifecycleGeneration;
 		const outerGeneration = options.getLifecycleGeneration?.();
 		const sessionId = ctx.sessionManager.getSessionId();
@@ -194,7 +198,7 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 		}
 		if (!isCurrent()) return entries.length > 0 ? { entries } : undefined;
 		options.onResetReady?.(ctx, resetDrafts);
-		return { entries: [...entries, ...resetDrafts], continue: true as const };
+		return { entries: [...entries, ...resetDrafts], continue: continueAfterReset };
 	};
 
 	pi.on("turn_end", async (event, ctx) => {
@@ -217,7 +221,7 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 			},
 		});
 		control = decision.state;
-		if (decision.effect === "commit-boundary") return await resetBoundaryResult(entries, ctx);
+		if (decision.effect === "commit-boundary" || decision.effect === "commit-boundary-stop") return await resetBoundaryResult(entries, ctx, decision.effect === "commit-boundary");
 		return entries.length > 0 ? { entries } : undefined;
 	});
 
@@ -235,8 +239,8 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 			},
 		});
 		control = decision.state;
-		if (decision.effect !== "commit-boundary" && decision.effect !== "recover-overflow") return undefined;
-		return await resetBoundaryResult(event.entries, ctx);
+		if (decision.effect !== "commit-boundary" && decision.effect !== "commit-boundary-stop" && decision.effect !== "recover-overflow") return undefined;
+		return await resetBoundaryResult(event.entries, ctx, decision.effect !== "commit-boundary-stop");
 	});
 
 	pi.on("session_before_compact", (event, ctx) => {

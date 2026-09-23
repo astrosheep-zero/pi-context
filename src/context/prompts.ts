@@ -14,6 +14,7 @@ function identityBlock(agentName: string, modelName: string, firstWindowId: stri
 
 function relativeTime(timestamp: number, now: number): string {
 	const seconds = Math.trunc((timestamp - now) / 1000);
+	if (seconds === 0) return "just now";
 	const [unit, size] = ([["d", 86400], ["h", 3600], ["m", 60], ["s", 1]] as const)
 		.find(([unit, size]) => Math.abs(seconds) >= size || unit === "s")!;
 	const amount = `${Math.abs(Math.trunc(seconds / size))}${unit}`;
@@ -24,53 +25,37 @@ function rowsFor(snapshot: NotesSnapshot, scope: NotesHome["scope"]) {
 	return snapshot.homes.get(scope) ?? [];
 }
 
-function notesUnavailableNotice(snapshot: NotesSnapshot): string | undefined {
-	if (snapshot.unavailable.length === 0) return undefined;
-	const homes = snapshot.unavailable.map((home) => home.label).join(", ");
-	return `Notes index incomplete: index for ${homes} unavailable during boot; notes_list can retry after recovery.`;
-}
-
-/**
- * Boot notes index. Map residency ("地图在场"): fresh MAP.md bodies from the human, project,
- * own-agent, and current-model homes are all injected, broadest first; stale maps are skipped
- * per home, and the session home is never peeked — a session MAP.md is an ordinary note. The
- * pocket then lists recent fresh notes under per-home quotas (POCKET_SESSION_LIMIT /
- * POCKET_PROJECT_LIMIT / POCKET_HUMAN_LIMIT / POCKET_AGENT_LIMIT / POCKET_MODEL_LIMIT),
- * most-recently-updated first within each home, one metadata line each: address, body character
- * count, relative update time at window open. Bodies never render
- * in the pocket; stale notes are excluded; MAP.md itself never takes a pocket seat.
- */
-function notesIndex(snapshot: NotesSnapshot): string {
-	const sections: string[] = [];
-	// Map residency ("地图在场"): scope-native maps, fresh ones injected broadest-first.
-	// A session MAP.md is an ordinary note, never resident; stale maps skip independently.
-	for (const scope of ["human", "project", "agent", "model"] as const) {
-		const toc = rowsFor(snapshot, scope).find((row) => row.path === "MAP.md");
-		if (toc && !toc.meta.stale) {
-			if (toc.body.length > 0) sections.push(toc.body);
-		}
-	}
-	// listNotes is most-recently-updated first within each home. Per-home quotas keep session
-	// churn from evicting the durable homes; maps never take pocket seats.
-	const recentNotes = [
-		...rowsFor(snapshot, "session").filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_SESSION_LIMIT),
-		...rowsFor(snapshot, "project").filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_PROJECT_LIMIT),
-		...rowsFor(snapshot, "human").filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_HUMAN_LIMIT),
-		...rowsFor(snapshot, "agent").filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_AGENT_LIMIT),
-		...rowsFor(snapshot, "model").filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, POCKET_MODEL_LIMIT),
+/** One closed boot snapshot, grouped by who or what the notes belong to. */
+function notesIndex(snapshot: NotesSnapshot, agentName: string, modelName: string): string {
+	const homes: ReadonlyArray<{ scope: NotesHome["scope"]; label: string; limit: number }> = [
+		{ scope: "human", label: "The human | @human", limit: POCKET_HUMAN_LIMIT },
+		{ scope: "agent", label: `You | @self → @agents/${agentName}`, limit: POCKET_AGENT_LIMIT },
+		{ scope: "model", label: `Your model | @model → @models/${modelName}`, limit: POCKET_MODEL_LIMIT },
+		{ scope: "project", label: "This project | @project", limit: POCKET_PROJECT_LIMIT },
+		{ scope: "session", label: "This session", limit: POCKET_SESSION_LIMIT },
 	];
-	if (recentNotes.length > 0) {
-		const lines = [`You find ${recentNotes.length} crumpled note${recentNotes.length === 1 ? "" : "s"} in your pocket (by prefix, most recent first within each: up to ${POCKET_SESSION_LIMIT} from this session, ${POCKET_PROJECT_LIMIT} from @project, ${POCKET_HUMAN_LIMIT} from @human, ${POCKET_AGENT_LIMIT} from @self, ${POCKET_MODEL_LIMIT} from @model). A note's content never appears here, so its name has to say what the note is about:`];
-		for (const row of recentNotes) {
-			lines.push(`- ${row.address}  ·  ${Array.from(row.body).length} chars  ·  ${relativeTime(row.meta.updatedAt, snapshot.openedAt)}`);
+	const sections: string[] = [];
+	for (const home of homes) {
+		if (snapshot.unavailable.some((failed) => failed.scope === home.scope)) {
+			sections.push(`## ${home.label}\n： this drawer wouldn't open — ask notes_list to try again`);
+			continue;
 		}
-		sections.push(lines.join("\n"));
+		const rows = rowsFor(snapshot, home.scope);
+		const map = rows.find((row) => row.path === "MAP.md" && !row.meta.stale);
+		const recent = rows.filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, home.limit);
+		if (!map?.body && recent.length === 0) continue;
+		const contents = [`## ${home.label}`];
+		if (map?.body) contents.push(`●  MAP.md\n${map.body}`);
+		if (recent.length > 0) {
+			contents.push(`●  Recent notes\n${recent.map((row) =>
+				`- ${row.address} | ${Array.from(row.body).length} chars | ${relativeTime(row.meta.updatedAt, snapshot.openedAt)}`
+			).join("\n")}`);
+		}
+		sections.push(contents.join("\n\n"));
 	}
-	return sections.join("\n\n");
-}
-
-function notesHomeBlock(): string {
-	return "Note addresses: bare <vpath> is this session; @project/<vpath> is this project; @human/<vpath> is the human's cross-project notes; @self/<vpath> is your own (current agent); @model/<vpath> is the current model's. @self and @model resolve to who is running now. Any other @ prefix, or @ inside a vpath, is a hard error; there is no fallback across prefixes. Anything not matching these is a plain file — use the file tools.";
+	return `# Your notes\n\n${sections.length > 0
+		? sections.join("\n\n")
+		: "： None yet. A blank slate is a fine place to start — just don't finish there."}`;
 }
 
 /**
@@ -89,12 +74,8 @@ export type BootRenderData = {
 export function renderBootBlock(data: BootRenderData): string {
 	const parts: string[] = [];
 	parts.push(identityBlock(data.agentName, data.modelName, data.firstWindowId, data.currentWindowId, data.previousWindowId));
-	parts.push(notesHomeBlock());
-	const incomplete = notesUnavailableNotice(data.notes);
-	if (incomplete) parts.push(incomplete);
-	const index = notesIndex(data.notes);
-	if (index) parts.push(index);
 	parts.push(PROTOCOL_BLOCK);
+	parts.push(notesIndex(data.notes, data.agentName, data.modelName));
 	return parts.join("\n\n");
 }
 
