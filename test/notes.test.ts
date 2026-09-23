@@ -70,7 +70,7 @@ test("write lands a real markdown file with harness frontmatter and a pure body"
 	const sessionId = session.getSessionId();
 
 	const result = resultJson<{ address: string; written: true }>(
-		await call(captured, "notes_write", { path: "a/b.md", content: "hello" }, ctx),
+		await call(captured, "notes_write", { address: "a/b.md", content: "hello" }, ctx),
 	);
 	assert.deepEqual(Object.keys(result).sort(), ["address", "written"]);
 	const file = physicalPath("session", "a/b.md", ctx);
@@ -92,7 +92,7 @@ test("write lands a real markdown file with harness frontmatter and a pure body"
 	assert.equal(existsSync(join(scopeDir("session", ctx), ".session.json")), false, "ownership is stored in note frontmatter, not a sidecar");
 
 	// A leading YAML block in user content is stripped from the body.
-	await call(captured, "notes_write", { path: "stripped.md", content: "---\nscope: human\nnonsense: true\n---\nreal body" }, ctx);
+	await call(captured, "notes_write", { address: "stripped.md", content: "---\nscope: human\nnonsense: true\n---\nreal body" }, ctx);
 	const stripped = readFileSync(physicalPath("session", "stripped.md", ctx), "utf8");
 	assert.match(stripped, /\n---\n\nreal body$/, "the injected block is not part of the body");
 	assert.equal(stripped.includes("nonsense"), false, "the injected block never reaches the file");
@@ -111,37 +111,37 @@ test("session-note project ownership is per note, persistent across sessions, an
 	const firstSession = manager();
 	const firstCaptured = makeExtension(firstSession);
 	const firstCtx = context(firstSession, undefined, undefined, true, cwdA);
-	await call(firstCaptured, "notes_write", { path: "first.md", content: "first project session" }, firstCtx);
+	await call(firstCaptured, "notes_write", { address: "first.md", content: "first project session" }, firstCtx);
 	const firstFile = physicalPath("session", "first.md", firstCtx);
 	assert.equal(parseNote(readFileSync(firstFile, "utf8")).meta.project, projectA);
 
 	const secondSession = manager();
 	const secondCaptured = makeExtension(secondSession);
 	const secondCtx = context(secondSession, undefined, undefined, true, cwdA);
-	await call(secondCaptured, "notes_write", { path: "second.md", content: "same project, another session" }, secondCtx);
+	await call(secondCaptured, "notes_write", { address: "second.md", content: "same project, another session" }, secondCtx);
 	const secondFile = physicalPath("session", "second.md", secondCtx);
 	assert.equal(parseNote(readFileSync(secondFile, "utf8")).meta.project, projectA, "another session in the same project carries the matching key");
 
 	const thirdSession = manager();
 	const thirdCaptured = makeExtension(thirdSession);
 	const thirdCtx = context(thirdSession, undefined, undefined, true, cwdB);
-	await call(thirdCaptured, "notes_write", { path: "third.md", content: "different project" }, thirdCtx);
+	await call(thirdCaptured, "notes_write", { address: "third.md", content: "different project" }, thirdCtx);
 	const thirdFile = physicalPath("session", "third.md", thirdCtx);
 	assert.equal(parseNote(readFileSync(thirdFile, "utf8")).meta.project, projectB);
 	const projectASessions = [firstFile, secondFile, thirdFile].filter((file) => parseNote(readFileSync(file, "utf8")).meta.project === projectA);
 	assert.deepEqual(projectASessions.sort(), [firstFile, secondFile].sort(), "exact frontmatter project matching recognizes only sessions from the same project");
 
 	const movedContext = context(firstSession, undefined, undefined, true, cwdB);
-	await call(firstCaptured, "notes_write", { path: "first.md", content: "overwritten from another cwd" }, movedContext);
+	await call(firstCaptured, "notes_write", { address: "first.md", content: "overwritten from another cwd" }, movedContext);
 	assert.equal(parseNote(readFileSync(firstFile, "utf8")).meta.project, projectA, "overwriting an existing note does not silently reassign it");
-	await call(firstCaptured, "notes_edit", { path: "first.md", edits: [{ oldText: "overwritten", newText: "edited" }] }, movedContext);
+	await call(firstCaptured, "notes_edit", { address: "first.md", edits: [{ oldText: "overwritten", newText: "edited" }] }, movedContext);
 	assert.equal(parseNote(readFileSync(firstFile, "utf8")).meta.project, projectA, "editing an existing note preserves its original project key");
-	await call(firstCaptured, "notes_read", { path: "first.md" }, movedContext);
+	await call(firstCaptured, "notes_read", { address: "first.md" }, movedContext);
 	assert.equal(parseNote(readFileSync(firstFile, "utf8")).meta.project, projectA, "reading preserves existing project ownership");
 
-	await call(firstCaptured, "notes_write", { path: "new-from-project-b.md", content: "new note", scope: "session" }, movedContext);
+	await call(firstCaptured, "notes_write", { address: "new-from-project-b.md", content: "new note" }, movedContext);
 	assert.equal(parseNote(readFileSync(physicalPath("session", "new-from-project-b.md", movedContext), "utf8")).meta.project, projectB, "only a newly-created session note uses the current project key");
-	await call(firstCaptured, "notes_write", { path: "project-note.md", content: "project home note", scope: "project" }, movedContext);
+	await call(firstCaptured, "notes_write", { address: "@project/project-note.md", content: "project home note" }, movedContext);
 	assert.equal(parseNote(readFileSync(physicalPath("project", "project-note.md", movedContext), "utf8")).meta.project, undefined, "project-home notes do not receive session ownership metadata");
 	assert.equal((await listNotes(movedContext, { scope: "session" })).length, 2, "project ownership remains frontmatter, not a separate note");
 });
@@ -186,8 +186,8 @@ legacy body`);
 	assert.throws(() => parseNote(readFileSync(legacyFile, "utf8")), /legacy note metadata .*requires manual migration/);
 	const legacyBytes = readFileSync(legacyFile, "utf8");
 	await assert.rejects(() => listNotes(ctx, { scope: "session" }), /requires manual migration/);
-	await assert.rejects(() => call(captured, "notes_read", { path: "legacy.md" }, ctx), /requires manual migration/);
-	await assert.rejects(() => call(captured, "notes_write", { path: "legacy.md", content: "legacy overwritten" }, ctx), /requires manual migration/);
+	await assert.rejects(() => call(captured, "notes_read", { address: "legacy.md" }, ctx), /requires manual migration/);
+	await assert.rejects(() => call(captured, "notes_write", { address: "legacy.md", content: "legacy overwritten" }, ctx), /requires manual migration/);
 	assert.equal(readFileSync(legacyFile, "utf8"), legacyBytes, "refusal preserves the unmigrated file byte-for-byte");
 
 	const invalidFile = physicalPath("session", "invalid.md", ctx);
@@ -205,7 +205,7 @@ project: 17
 invalid owner`);
 	assert.equal(parseNote(readFileSync(invalidFile, "utf8")).meta.project, 17);
 	assert.notEqual(parseNote(readFileSync(invalidFile, "utf8")).meta.project, projectKey(ctx.cwd), "invalid ownership does not match the current project key");
-	await call(captured, "notes_write", { path: "invalid.md", content: "still invalid" }, ctx);
+	await call(captured, "notes_write", { address: "invalid.md", content: "still invalid" }, ctx);
 	assert.equal(parseNote(readFileSync(invalidFile, "utf8")).meta.project, 17, "an invalid value remains unknown and is not replaced with cwd-derived ownership");
 	assert.equal(existsSync(join(scopeDir("session", ctx), ".session.json")), false, "new notes use no ownership sidecar");
 });
@@ -216,29 +216,29 @@ test("edit is body-scoped with named failures and a replace_all escape hatch", a
 	const captured = makeExtension(session);
 	const ctx = context(session);
 
-	await call(captured, "notes_write", { path: "edit.md", content: "alpha\nbeta\nbeta\ngamma" }, ctx);
+	await call(captured, "notes_write", { address: "edit.md", content: "alpha\nbeta\nbeta\ngamma" }, ctx);
 	const ambiguous = resultJson<{ error: string; line_numbers?: number[] }>(
-		await call(captured, "notes_edit", { path: "edit.md", edits: [{ oldText: "beta", newText: "B" }] }, ctx),
+		await call(captured, "notes_edit", { address: "edit.md", edits: [{ oldText: "beta", newText: "B" }] }, ctx),
 	);
 	assert.match(ambiguous.error, /occurs 2 times/);
 	assert.deepEqual(ambiguous.line_numbers, [2, 3], "the multi-match error carries every match line number");
 
 	const missing = resultJson<{ error: string; edit_index?: number }>(
-		await call(captured, "notes_edit", { path: "edit.md", edits: [{ oldText: "absent", newText: "x" }] }, ctx),
+		await call(captured, "notes_edit", { address: "edit.md", edits: [{ oldText: "absent", newText: "x" }] }, ctx),
 	);
 	assert.equal(missing.edit_index, 0, "a zero-match anchor names the failing edit index");
 
 	const all = resultJson<{ address: string; applied: number; diff: string; meta: Meta }>(
-		await call(captured, "notes_edit", { path: "edit.md", edits: [{ oldText: "beta", newText: "B" }], replace_all: true }, ctx),
+		await call(captured, "notes_edit", { address: "edit.md", edits: [{ oldText: "beta", newText: "B" }], replace_all: true }, ctx),
 	);
 	assert.equal(all.applied, 1);
 	assert.equal(all.address, "edit.md");
 	assertNoPublicScope(all, "notes_edit");
-	assert.equal(resultRead(await call(captured, "notes_read", { path: "edit.md" }, ctx)).content.endsWith("alpha\nB\nB\ngamma"), true, "replace_all replaces every occurrence");
+	assert.equal(resultRead(await call(captured, "notes_read", { address: "edit.md" }, ctx)).content.endsWith("alpha\nB\nB\ngamma"), true, "replace_all replaces every occurrence");
 
 	// An anchor that occurs only in frontmatter is not matched: edits are body-only.
 	const frontmatterOnly = resultJson<{ edit_index?: number }>(
-		await call(captured, "notes_edit", { path: "edit.md", edits: [{ oldText: "scope", newText: "x" }] }, ctx),
+		await call(captured, "notes_edit", { address: "edit.md", edits: [{ oldText: "scope", newText: "x" }] }, ctx),
 	);
 	assert.equal(frontmatterOnly.edit_index, 0, "a frontmatter-only anchor is not a body match");
 });
@@ -249,33 +249,33 @@ test("nothing-to-do, not-found, atomic batches, and replace_all zero-match are n
 	const captured = makeExtension(session);
 	const ctx = context(session);
 
-	const nameOnly = resultJson<{ error: string }>(await call(captured, "notes_edit", { path: "edit.md" }, ctx));
+	const nameOnly = resultJson<{ error: string }>(await call(captured, "notes_edit", { address: "edit.md" }, ctx));
 	assert.match(nameOnly.error, /nothing to do/, "neither edits nor setters is a named error");
 
-	await call(captured, "notes_write", { path: "edit.md", content: "alpha\nbeta" }, ctx);
-	const empty = resultJson<{ error: string }>(await call(captured, "notes_edit", { path: "edit.md", edits: [] }, ctx));
+	await call(captured, "notes_write", { address: "edit.md", content: "alpha\nbeta" }, ctx);
+	const empty = resultJson<{ error: string }>(await call(captured, "notes_edit", { address: "edit.md", edits: [] }, ctx));
 	assert.match(empty.error, /nothing to do/, "an empty edits list with no setters is also nothing to do");
 
-	const editMissing = resultJson<{ error: string }>(await call(captured, "notes_edit", { path: "missing.md", stale: true }, ctx));
+	const editMissing = resultJson<{ error: string }>(await call(captured, "notes_edit", { address: "missing.md", stale: true }, ctx));
 	assert.equal(editMissing.error, "note not found");
-	const readMissing = resultJson<{ error: string; path: string }>(await call(captured, "notes_read", { path: "missing.md" }, ctx));
+	const readMissing = resultJson<{ error: string; address: string }>(await call(captured, "notes_read", { address: "missing.md" }, ctx));
 	assert.equal(readMissing.error, "note not found");
-	assert.equal(readMissing.path, "missing.md");
+	assert.equal(readMissing.address, "missing.md");
 
 	const file = physicalPath("session", "edit.md", ctx);
 	const before = readFileSync(file, "utf8");
 	const failed = resultJson<{ error: string; edit_index?: number }>(
-		await call(captured, "notes_edit", { path: "edit.md", edits: [{ oldText: "alpha", newText: "A" }, { oldText: "absent", newText: "x" }] }, ctx),
+		await call(captured, "notes_edit", { address: "edit.md", edits: [{ oldText: "alpha", newText: "A" }, { oldText: "absent", newText: "x" }] }, ctx),
 	);
 	assert.equal(failed.edit_index, 1, "the failing edit is named");
 	assert.equal(readFileSync(file, "utf8"), before, "a failing batch leaves the file byte-identical, frontmatter included");
 
-	const applied = resultJson<{ applied: number }>(await call(captured, "notes_edit", { path: "edit.md", edits: [{ oldText: "alpha", newText: "A" }, { oldText: "beta", newText: "B" }] }, ctx));
+	const applied = resultJson<{ applied: number }>(await call(captured, "notes_edit", { address: "edit.md", edits: [{ oldText: "alpha", newText: "A" }, { oldText: "beta", newText: "B" }] }, ctx));
 	assert.equal(applied.applied, 2);
-	assert.equal(resultRead(await call(captured, "notes_read", { path: "edit.md" }, ctx)).content.endsWith("A\nB"), true);
+	assert.equal(resultRead(await call(captured, "notes_read", { address: "edit.md" }, ctx)).content.endsWith("A\nB"), true);
 
 	const zero = resultJson<{ error: string; edit_index?: number }>(
-		await call(captured, "notes_edit", { path: "edit.md", edits: [{ oldText: "zzz", newText: "y" }], replace_all: true }, ctx),
+		await call(captured, "notes_edit", { address: "edit.md", edits: [{ oldText: "zzz", newText: "y" }], replace_all: true }, ctx),
 	);
 	assert.equal(zero.edit_index, 0, "replace_all with zero matches is the same zero-match error, not a silent no-op");
 });
@@ -324,9 +324,9 @@ test("list and search merge scopes and carry addresses; the path jail rejects es
 	const captured = makeExtension(session);
 	const ctx = context(session);
 
-	await call(captured, "notes_write", { path: "one.md", content: "needle one", scope: "session" }, ctx);
-	await call(captured, "notes_write", { path: "two.md", content: "needle two", scope: "project" }, ctx);
-	await call(captured, "notes_write", { path: "three.md", content: "needle three", scope: "human" }, ctx);
+	await call(captured, "notes_write", { address: "one.md", content: "needle one" }, ctx);
+	await call(captured, "notes_write", { address: "@project/two.md", content: "needle two" }, ctx);
+	await call(captured, "notes_write", { address: "@human/three.md", content: "needle three" }, ctx);
 
 	const listed = resultJson<Listed>(await call(captured, "notes_list", {}, ctx));
 	assert.deepEqual([...listed.files].map((file) => file.address).sort(), ["@human/three.md", "@project/two.md", "one.md"], "every merged row carries its full address");
@@ -334,7 +334,7 @@ test("list and search merge scopes and carry addresses; the path jail rejects es
 		assert.deepEqual(Object.keys(row).sort(), ["address", "stale", "updated_at"]);
 		assert.equal(row.stale, false);
 	}
-	const scoped = resultJson<Listed>(await call(captured, "notes_list", { scope: "human" }, ctx));
+	const scoped = resultJson<Listed>(await call(captured, "notes_list", { pattern: "@human/**" }, ctx));
 	assert.deepEqual(scoped.files.map((file) => file.address), ["@human/three.md"], "an address-pattern filter narrows the set");
 
 	const searched = resultJson<Searched>(await call(captured, "notes_search", { query: "needle" }, ctx));
@@ -351,7 +351,7 @@ test("list and search merge scopes and carry addresses; the path jail rejects es
 	const escaped = ["../evil", "/abs", "a\\b"];
 	for (const tool of ["notes_write", "notes_edit", "notes_read"] as const) {
 		for (const path of escaped) {
-			await assert.rejects(() => call(captured, tool, { path, content: "x", edits: [{ oldText: "a", newText: "b" }] }, ctx), `${tool} rejects ${path}`);
+			await assert.rejects(() => call(captured, tool, { address: path, content: "x", edits: [{ oldText: "a", newText: "b" }] }, ctx), `${tool} rejects ${path}`);
 		}
 	}
 	await assert.rejects(() => call(captured, "notes_list", { pattern: "bad\\glob" }, ctx), /backslash/);

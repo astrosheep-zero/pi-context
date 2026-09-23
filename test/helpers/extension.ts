@@ -235,38 +235,13 @@ export async function call(
 ): Promise<AgentToolResult<unknown>> {
 	const tool = captured.tools.get(name);
 	assert.ok(tool, `registered ${name}`);
-	// Most pre-redesign coverage names session notes by their bare address. Keep these old
-	// fixture call sites readable while routing the direct tool invocation through its new
-	// address-shaped input; contract-specific tests below pass address themselves.
-	const noteCall = name === "notes_write" || name === "notes_edit" || name === "notes_read";
-	if (noteCall && "path" in params && !("address" in params)) {
-		const { path, scope, ...rest } = params;
-		assert.equal(typeof path, "string", "legacy note fixture path is a string");
-		const address = scope === "project" ? `@project/${path}` : scope === "human" ? `@human/${path}` : path;
-		return tool.execute("call-1", { ...rest, address }, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
-	}
-	if ((name === "notes_list" || name === "notes_search") && params.scope === "human") {
-		const { scope: _scope, pattern, ...rest } = params;
-		return tool.execute("call-1", { ...rest, pattern: `@human/${typeof pattern === "string" ? pattern : "**"}` }, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
-	}
-	if ((name === "notes_list" || name === "notes_search") && params.scope === "session") {
-		const { scope: _scope, pattern, ...rest } = params;
-		return tool.execute("call-1", { ...rest, pattern: typeof pattern === "string" ? pattern : "*.md" }, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
-	}
 	return tool.execute("call-1", params, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
 }
 
 export function resultJson<T>(result: AgentToolResult<unknown>): T {
 	const text = result.content[0];
 	assert.ok(text && text.type === "text", "tool result carries text");
-	const value = JSON.parse(text.text) as Record<string, unknown>;
-	const suffix = (address: string) => address.startsWith("@project/") ? address.slice("@project/".length) : address.startsWith("@human/") ? address.slice("@human/".length) : address;
-	const legacyPath = (row: Record<string, unknown>) => {
-		if (typeof row.address === "string" && row.path === undefined) Object.defineProperty(row, "path", { value: suffix(row.address), enumerable: false });
-	};
-	legacyPath(value);
-	if (Array.isArray(value.files)) for (const file of value.files) if (file && typeof file === "object") legacyPath(file as Record<string, unknown>);
-	return value as T;
+	return JSON.parse(text.text) as T;
 }
 
 /** Assert the delivered wire text fits the tool-output budget, header included for raw reads. */
@@ -302,35 +277,6 @@ export function resultRead(result: AgentToolResult<unknown>): ReadWindow {
 	return { header, content, offset_chars, total_chars, next_offset_chars, details: (result.details ?? {}) as Record<string, unknown> };
 }
 
-/**
- * Assert a value is a local-time ISO 8601 string with an explicit numeric offset (never "Z")
- * and that Date.parse restores the stored epoch milliseconds. No time zone is assumed.
- */
-export function assertLocalIso(value: unknown, epochMs: number, message: string): void {
-	assert.equal(typeof value, "string", message);
-	assert.match(value as string, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/, message);
-	assert.equal(Date.parse(value as string), epochMs, `${message}: Date.parse restores the stored epoch ms`);
-}
-
-/** Assert the text contains a well-formed local ISO timestamp and return it, without pinning surrounding wording. */
-export function assertIsoTimestamp(text: string, message: string): string {
-	const match = text.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}/);
-	assert.ok(match, message);
-	assert.equal(Number.isNaN(Date.parse(match[0])), false, `${message}: timestamp parses`);
-	return match[0];
-}
-
-/** Assert `actual` is a middle-truncation of `original`: same head, same tail, strictly fewer characters. */
-export function assertTruncationOf(original: string, actual: string): void {
-	const match = actual.match(/^([\s\S]*)…\[truncated \d+ chars\]…([\s\S]*)$/);
-	assert.ok(match, "truncated value carries the middle-truncation marker");
-	const head = match[1] as string;
-	const tail = match[2] as string;
-	assert.ok(original.startsWith(head), "truncation keeps the original head");
-	assert.ok(original.endsWith(tail), "truncation keeps the original tail");
-	assert.ok(head.length + tail.length < original.length, "truncation actually removes characters");
-}
-
 export async function runManualCompact(captured: Captured, ctx: ExtensionContext): Promise<CompactionHookResult> {
 	const handler = captured.handlers.get("session_before_compact")?.[0];
 	assert.ok(handler, "session_before_compact handler registered");
@@ -359,22 +305,6 @@ export async function runHandlers(captured: Captured, name: string, event: unkno
 	try {
 		for (const handler of captured.handlers.get(name) ?? []) await handler(event as never, ctx);
 	} finally { ctx.isIdle = isIdle; }
-}
-
-export async function runHandlersAsync(captured: Captured, name: string, event: unknown, ctx: ExtensionContext): Promise<unknown[]> {
-	const results: unknown[] = [];
-	for (const handler of captured.handlers.get(name) ?? []) results.push(await handler(event as never, ctx));
-	return results;
-}
-
-export function completeRequestedCompaction(ctx: ExtensionContext): void {
-	const requests = (ctx as ExtensionContext & { compactionRequests: Array<Parameters<ExtensionContext["compact"]>[0]> }).compactionRequests;
-	const options = requests.shift();
-	assert.ok(options?.onComplete, "a reset request has a completion callback");
-	const isIdle = ctx.isIdle;
-	ctx.isIdle = () => true;
-	try { options.onComplete({} as Parameters<NonNullable<typeof options.onComplete>>[0]); }
-	finally { ctx.isIdle = isIdle; }
 }
 
 export async function runCommand(captured: Captured, name: string, args: string, ctx: ExtensionContext): Promise<Notice[]> {

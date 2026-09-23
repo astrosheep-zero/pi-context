@@ -97,23 +97,23 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	assert.equal(readParts.join(""), historyText);
 
 	for (let index = 0; index < 100; index++) {
-		await call(captured, "notes_write", { path: `page-${"x".repeat(120)}-${index}.md`, content: Array.from({ length: 1000 }, (_, line) => `needle ${line} ${"z".repeat(30)}`).join("\n") }, ctx);
+		await call(captured, "notes_write", { address: `page-${"x".repeat(120)}-${index}.md`, content: Array.from({ length: 1000 }, (_, line) => `needle ${line} ${"z".repeat(30)}`).join("\n") }, ctx);
 	}
 	const listPages: string[] = [];
 	let listOffset = 0;
 	let listNext: number | null = 0;
 	while (listNext !== null) {
-		const result = resultJson<{ files: Array<{ path: string }>; next_cursor: number | null }>(await call(captured, "notes_list", { max_results: 300, cursor: listOffset }, ctx));
+		const result = resultJson<{ files: Array<{ address: string }>; next_cursor: number | null }>(await call(captured, "notes_list", { max_results: 300, cursor: listOffset }, ctx));
 		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
-		listPages.push(...result.files.map((file) => file.path)); listNext = result.next_cursor; if (listNext !== null) listOffset = listNext;
+		listPages.push(...result.files.map((file) => file.address)); listNext = result.next_cursor; if (listNext !== null) listOffset = listNext;
 	}
 	assert.deepEqual([...listPages].sort((a, b) => a.localeCompare(b)), Array.from({ length: 100 }, (_, index) => `page-${"x".repeat(120)}-${index}.md`).sort((a, b) => a.localeCompare(b)));
 	assert.equal(listNext, null);
-	const searchFiles: Array<{ path: string; matches: Array<{ line: number; text: string }> }> = [];
+	const searchFiles: Array<{ address: string; matches: Array<{ line: number; text: string }> }> = [];
 	let notesSearchOffset = 0;
 	let notesSearchNext: number | null = 0;
 	while (notesSearchNext !== null) {
-		const result = resultJson<{ files: Array<{ path: string; matches: Array<{ line: number; text: string }> }>; next_cursor: number | null }>(await call(captured, "notes_search", { query: "needle", max_matches_per_file: 100, max_files: 300, cursor: notesSearchOffset }, ctx));
+		const result = resultJson<{ files: Array<{ address: string; matches: Array<{ line: number; text: string }> }>; next_cursor: number | null }>(await call(captured, "notes_search", { query: "needle", max_matches_per_file: 100, max_files: 300, cursor: notesSearchOffset }, ctx));
 		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
 		searchFiles.push(...result.files); notesSearchNext = result.next_cursor; if (notesSearchNext !== null) notesSearchOffset = notesSearchNext;
 	}
@@ -123,7 +123,7 @@ test("paged tool outputs stay bounded and cursors reconstruct history and notes"
 	let noteOffset = 0;
 	let noteNext: number | null = 0;
 	while (noteNext !== null) {
-		const raw = await call(captured, "notes_read", { path: `page-${"x".repeat(120)}-0.md`, offset_chars: noteOffset }, ctx);
+		const raw = await call(captured, "notes_read", { address: `page-${"x".repeat(120)}-0.md`, offset_chars: noteOffset }, ctx);
 		assertWithinBudget(raw, `notes_read page at ${noteOffset}`);
 		const result = resultRead(raw);
 		// The window is a plain prefix of the file, so the pages join by plain concatenation.
@@ -168,7 +168,7 @@ test("a page cap limits the page, not the enumerable set: cursors stay truthful 
 	assert.equal(searchTail.next_cursor, null);
 
 	// notes_search: max_files caps the page, not the matched files.
-	for (let index = 0; index < 7; index++) await call(captured, "notes_write", { path: `needle-${index}.md`, content: "needle" }, ctx);
+	for (let index = 0; index < 7; index++) await call(captured, "notes_write", { address: `needle-${index}.md`, content: "needle" }, ctx);
 	const notes = async (params: Record<string, unknown>) => resultJson<{ files: unknown[]; next_cursor: number | null }>(await call(captured, "notes_search", params, ctx));
 	const notesFirst = await notes({ query: "needle", max_files: 3 });
 	assert.equal(notesFirst.files.length, 3);
@@ -200,19 +200,19 @@ test("multi-query search: OR semantics, dedupe, and bare-string backward compati
 	assert.deepEqual(await historyIds({ query: "alpha" }), orIds.filter((id) => id !== betaId), "history: a bare string still behaves exactly as before");
 	assert.deepEqual(await historyIds({ query: "alpha" }), await historyIds({ query: ["alpha"] }), "history: bare string equals the single-element list");
 
-	await call(captured, "notes_write", { path: "both.md", content: "alpha beta\nunrelated" }, ctx);
-	await call(captured, "notes_write", { path: "alpha.md", content: "alpha only" }, ctx);
-	await call(captured, "notes_write", { path: "beta.md", content: "beta only" }, ctx);
-	await call(captured, "notes_write", { path: "gamma.md", content: "gamma only" }, ctx);
+	await call(captured, "notes_write", { address: "both.md", content: "alpha beta\nunrelated" }, ctx);
+	await call(captured, "notes_write", { address: "alpha.md", content: "alpha only" }, ctx);
+	await call(captured, "notes_write", { address: "beta.md", content: "beta only" }, ctx);
+	await call(captured, "notes_write", { address: "gamma.md", content: "gamma only" }, ctx);
 	const notesSearch = async (params: Record<string, unknown>) =>
-		resultJson<{ files: Array<{ path: string; matches: Array<{ line: number; text: string }> }> }>(await call(captured, "notes_search", params, ctx)).files;
+		resultJson<{ files: Array<{ address: string; matches: Array<{ line: number; text: string }> }> }>(await call(captured, "notes_search", params, ctx)).files;
 	const orFiles = await notesSearch({ query: ["alpha", "beta"] });
-	assert.deepEqual(orFiles.map((file) => file.path), ["alpha.md", "beta.md", "both.md"], "notes: a file matching any query is returned once, path-ordered");
-	assert.equal(orFiles.find((file) => file.path === "both.md")?.matches.length, 1, "notes: one line containing both queries is reported once");
-	assert.deepEqual((await notesSearch({ query: ["alpha"] })).map((file) => file.path), ["alpha.md", "both.md"], "notes: a one-element array searches that literal");
-	assert.deepEqual((await notesSearch({ query: "alpha" })).map((file) => file.path), ["alpha.md", "both.md"], "notes: a bare string still behaves exactly as before");
-	assert.deepEqual((await notesSearch({ query: "alpha" })).map((file) => file.path), (await notesSearch({ query: ["alpha"] })).map((file) => file.path), "notes: bare string equals the single-element list");
-	assert.deepEqual((await notesSearch({ query: ["gamma"] })).map((file) => file.path), ["gamma.md"]);
+	assert.deepEqual(orFiles.map((file) => file.address), ["alpha.md", "beta.md", "both.md"], "notes: a file matching any query is returned once, address-ordered");
+	assert.equal(orFiles.find((file) => file.address === "both.md")?.matches.length, 1, "notes: one line containing both queries is reported once");
+	assert.deepEqual((await notesSearch({ query: ["alpha"] })).map((file) => file.address), ["alpha.md", "both.md"], "notes: a one-element array searches that literal");
+	assert.deepEqual((await notesSearch({ query: "alpha" })).map((file) => file.address), ["alpha.md", "both.md"], "notes: a bare string still behaves exactly as before");
+	assert.deepEqual((await notesSearch({ query: "alpha" })).map((file) => file.address), (await notesSearch({ query: ["alpha"] })).map((file) => file.address), "notes: bare string equals the single-element list");
+	assert.deepEqual((await notesSearch({ query: ["gamma"] })).map((file) => file.address), ["gamma.md"]);
 
 	// An empty array is an argument error, not a silently empty result set.
 	await assert.rejects(() => call(captured, "history_search", { query: [] }, ctx), /non-empty array of strings/, "history: empty query array is refused");

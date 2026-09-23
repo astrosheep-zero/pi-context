@@ -51,33 +51,33 @@ test("notes are real files that persist across sessions and round-trip Unicode",
 	const original = manager();
 	const captured = makeExtension(original);
 	const ctx = context(original);
-	await call(captured, "notes_write", { path: "checkpoint/进度.md", content: "第一行\nneedle Café", scope: "human" }, ctx);
+	await call(captured, "notes_write", { address: "@human/checkpoint/进度.md", content: "第一行\nneedle Café" }, ctx);
 
 	// A brand-new session over the same physical root sees the human note: nothing is replayed
 	// from session entries, the file itself is the durable artifact.
 	const restored = manager();
 	const restoredCaptured = makeExtension(restored);
 	const restoredCtx = context(restored);
-	const rawRead = await call(restoredCaptured, "notes_read", { path: "checkpoint/进度.md", scope: "human", offset_chars: -4 }, restoredCtx);
+	const rawRead = await call(restoredCaptured, "notes_read", { address: "@human/checkpoint/进度.md", offset_chars: -4 }, restoredCtx);
 	const read = resultRead(rawRead);
 	assert.equal(read.details.address, "@human/checkpoint/进度.md");
 	assert.equal(read.content, "Café", "a negative offset reads the body tail in one call");
-	const searched = resultJson<{ files: Array<{ path: string; updated_at: unknown; matches: Array<{ line: number }> }> }>(
-		await call(restoredCaptured, "notes_search", { query: "Café", scope: "human" }, restoredCtx),
+	const searched = resultJson<{ files: Array<{ address: string; updated_at: unknown; matches: Array<{ line: number }> }> }>(
+		await call(restoredCaptured, "notes_search", { pattern: "@human/**", query: "Café" }, restoredCtx),
 	);
 	assert.equal(searched.files[0]?.matches[0]?.line, 2);
-	const listedFiles = resultJson<{ files: Array<{ path: string; updated_at: unknown }> }>(
-		await call(restoredCaptured, "notes_list", { pattern: "checkpoint/**", scope: "human" }, restoredCtx),
+	const listedFiles = resultJson<{ files: Array<{ address: string; updated_at: unknown }> }>(
+		await call(restoredCaptured, "notes_list", { pattern: "@human/checkpoint/**" }, restoredCtx),
 	);
 	assert.equal(listedFiles.files.length, 1, "glob ** crosses into the checkpoint directory");
-	assert.equal(listedFiles.files[0]?.path, "checkpoint/进度.md");
+	assert.equal(listedFiles.files[0]?.address, "@human/checkpoint/进度.md");
 	// A single-segment * never crosses `/`, so a nested-only store matches nothing at the root.
-	const rootOnly = resultJson<{ files: Array<{ path: string }> }>(
-		await call(restoredCaptured, "notes_list", { pattern: "*", scope: "human" }, restoredCtx)
+	const rootOnly = resultJson<{ files: Array<{ address: string }> }>(
+		await call(restoredCaptured, "notes_list", { pattern: "@human/*" }, restoredCtx)
 	);
 	assert.equal(rootOnly.files.length, 0, "glob * stays within one segment");
 	assert.equal(searched.files[0]?.updated_at, listedFiles.files[0]?.updated_at);
-	await assert.rejects(() => call(captured, "notes_write", { path: "../escape", content: "x" }, ctx), /unsupported component/);
+	await assert.rejects(() => call(captured, "notes_write", { address: "../escape", content: "x" }, ctx), /unsupported component/);
 });
 
 test("stale lifecycle: writes and metadata-only edits close and revive a note", async () => {
@@ -85,26 +85,26 @@ test("stale lifecycle: writes and metadata-only edits close and revive a note", 
 	const captured = makeExtension(sm);
 	const ctx = context(sm);
 
-	await call(captured, "notes_write", { path: "journal.md", content: "log line" }, ctx);
+	await call(captured, "notes_write", { address: "journal.md", content: "log line" }, ctx);
 
 	// metadata-only: content unchanged, flag set, applied 0
-	const markOnly = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { path: "journal.md", stale: true }, ctx));
+	const markOnly = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { address: "journal.md", stale: true }, ctx));
 	assert.equal(markOnly.applied, 0);
 	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.stale, true);
-	assert.equal(resultRead(await call(captured, "notes_read", { path: "journal.md" }, ctx)).content.endsWith("log line"), true, "mark-only leaves content unchanged");
+	assert.equal(resultRead(await call(captured, "notes_read", { address: "journal.md" }, ctx)).content.endsWith("log line"), true, "mark-only leaves content unchanged");
 
 	// explicit revive
-	const revived = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { path: "journal.md", stale: false }, ctx));
+	const revived = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { address: "journal.md", stale: false }, ctx));
 	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.stale, false, "stale:false revives");
 
 	// write+stale closure then plain write revival
-	await call(captured, "notes_write", { path: "journal.md", content: "final", stale: true }, ctx);
+	await call(captured, "notes_write", { address: "journal.md", content: "final", stale: true }, ctx);
 	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.stale, true);
-	await call(captured, "notes_write", { path: "journal.md", content: "reopened" }, ctx);
+	await call(captured, "notes_write", { address: "journal.md", content: "reopened" }, ctx);
 	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.stale, false, "writing without stale revives");
 
 	// metadata-only on a missing path is the typed not-found arm
-	const missing = resultJson<{ error?: string }>(await call(captured, "notes_edit", { path: "missing.md", stale: true }, ctx));
+	const missing = resultJson<{ error?: string }>(await call(captured, "notes_edit", { address: "missing.md", stale: true }, ctx));
 	assert.equal(missing.error, "note not found");
 });
 
@@ -225,8 +225,8 @@ test("an over-budget note is delivered as a prefix and resumed by next_offset_ch
 	const ctx = context(session);
 	const huge = `H${"x".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}`;
 	const text = `${huge}\ntail line`;
-	await call(captured, "notes_write", { path: "huge.md", content: text }, ctx);
-	const rawFirst = await call(captured, "notes_read", { path: "huge.md" }, ctx);
+	await call(captured, "notes_write", { address: "huge.md", content: text }, ctx);
+	const rawFirst = await call(captured, "notes_read", { address: "huge.md" }, ctx);
 	assertWithinBudget(rawFirst, "single oversized note");
 	const first = resultRead(rawFirst);
 	assert.ok(first.content.length > 0, "the page is not empty");
@@ -240,7 +240,7 @@ test("an over-budget note is delivered as a prefix and resumed by next_offset_ch
 	const parts = [first.content];
 	let offset: number | null = first.next_offset_chars;
 	while (offset !== null) {
-		const rawChunk = await call(captured, "notes_read", { path: "huge.md", offset_chars: offset }, ctx);
+		const rawChunk = await call(captured, "notes_read", { address: "huge.md", offset_chars: offset }, ctx);
 		assertWithinBudget(rawChunk, `huge note chunk at ${offset}`);
 		const chunk = resultRead(rawChunk);
 		assert.equal(chunk.offset_chars, offset, "the response echoes the resolved absolute offset");
@@ -250,7 +250,7 @@ test("an over-budget note is delivered as a prefix and resumed by next_offset_ch
 	assert.ok(parts.join("").endsWith(text), "the cursors reconstruct the body exactly");
 
 	// A success carries structured details; an error stays a JSON envelope with no details.
-	const missingResult = await call(captured, "notes_read", { path: "no-such.md" }, ctx);
+	const missingResult = await call(captured, "notes_read", { address: "no-such.md" }, ctx);
 	const missing = resultJson<Record<string, unknown>>(missingResult);
 	assert.deepEqual(Object.keys(missing).sort(), ["address", "error"], "the read error carries exactly error and address");
 	assert.equal(missing.error, "note not found");
@@ -263,13 +263,13 @@ test("an over-budget note search match is a named prefix with an honest line add
 	const ctx = context(session);
 	// The query sits behind a prefix, so its address is a real body-absolute offset, not line 1.
 	const hugeLine = `${'p'.repeat(500)}needle ${"y".repeat(TOOL_OUTPUT_MAX_BYTES * 2)}`;
-	await call(captured, "notes_write", { path: "a.md", content: "needle small" }, ctx);
-	await call(captured, "notes_write", { path: "search.md", content: hugeLine }, ctx);
-	const pages: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }> }> = [];
+	await call(captured, "notes_write", { address: "a.md", content: "needle small" }, ctx);
+	await call(captured, "notes_write", { address: "search.md", content: hugeLine }, ctx);
+	const pages: Array<{ address: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }> }> = [];
 	let cursor = 0;
 	let next: number | null = 0;
 	while (next !== null) {
-		const found = resultJson<{ files: Array<{ path: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }> }>; next_cursor: number | null }>(
+		const found = resultJson<{ files: Array<{ address: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }> }>; next_cursor: number | null }>(
 			await call(captured, "notes_search", { query: "needle", cursor }, ctx),
 		);
 		assert.ok(Buffer.byteLength(JSON.stringify(found), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "match result stays within budget");
@@ -277,7 +277,7 @@ test("an over-budget note search match is a named prefix with an honest line add
 		next = found.next_cursor;
 		if (next !== null) cursor = next;
 	}
-	assert.deepEqual(pages.map((file) => file.path), ["a.md", "search.md"], "pagination reaches the oversized file instead of looping");
+	assert.deepEqual(pages.map((file) => file.address), ["a.md", "search.md"], "pagination reaches the oversized file instead of looping");
 	const oversized = pages[1]!;
 	assert.equal(oversized.matches_total, 1, "the file's full match count is named even though the line was cut");
 	assert.equal(oversized.matches.length, 1);
@@ -286,13 +286,13 @@ test("an over-budget note search match is a named prefix with an honest line add
 	assert.ok(hugeLine.startsWith(match.text), "the match text is a plain prefix of the line");
 	assert.equal(match.text.includes("…"), false, "no marker is appended to the match text");
 	assert.equal(match.line, 1, "the informational line number survives");
-	const atMatch = resultRead(await call(captured, "notes_read", { path: "search.md", offset_chars: match.offset_chars }, ctx));
+	const atMatch = resultRead(await call(captured, "notes_read", { address: "search.md", offset_chars: match.offset_chars }, ctx));
 	assert.ok(atMatch.content.startsWith("needle"), "the search offset starts a read at the matched substring");
 	// The body is reconstructible by following notes_read's cursor from the start of the file.
 	const parts: string[] = [];
 	let offset: number | null = 0;
 	while (offset !== null) {
-		const rawChunk = await call(captured, "notes_read", { path: "search.md", offset_chars: offset }, ctx);
+		const rawChunk = await call(captured, "notes_read", { address: "search.md", offset_chars: offset }, ctx);
 		assertWithinBudget(rawChunk, `search.md chunk at ${offset}`);
 		const chunk = resultRead(rawChunk);
 		assert.equal(chunk.offset_chars, offset, "the read echoes the resolved address");
@@ -306,10 +306,10 @@ test("notes_search scopes by glob pattern; a non-matching pattern is an empty pa
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
-	await call(captured, "notes_write", { path: "deep/nested/a.md", content: "needle here" }, ctx);
-	await call(captured, "notes_write", { path: "top.md", content: "needle there" }, ctx);
-	const scoped = resultJson<{ files: Array<{ path: string }> }>(await call(captured, "notes_search", { query: "needle", pattern: "deep/**" }, ctx));
-	assert.deepEqual(scoped.files.map((file) => file.path), ["deep/nested/a.md"], "a glob scopes the search to the subtree");
+	await call(captured, "notes_write", { address: "deep/nested/a.md", content: "needle here" }, ctx);
+	await call(captured, "notes_write", { address: "top.md", content: "needle there" }, ctx);
+	const scoped = resultJson<{ files: Array<{ address: string }> }>(await call(captured, "notes_search", { query: "needle", pattern: "deep/**" }, ctx));
+	assert.deepEqual(scoped.files.map((file) => file.address), ["deep/nested/a.md"], "a glob scopes the search to the subtree");
 	const none = resultJson<{ files: unknown[]; error?: string }>(await call(captured, "notes_search", { query: "needle", pattern: "absent/**" }, ctx));
 	assert.equal(none.error, undefined, "a non-matching pattern is not an error");
 	assert.deepEqual(none.files, [], "a non-matching pattern is an empty page");

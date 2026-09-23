@@ -72,7 +72,7 @@ test("the root boot and reset boot carry durable window identity", async () => {
 	const ctx = context(sessionManager);
 	appendText(sessionManager, "user", "task before reset");
 	appendText(sessionManager, "assistant", "working");
-	await call(captured, "notes_write", { path: "decisions.md", content: "use terra" }, ctx);
+	await call(captured, "notes_write", { address: "decisions.md", content: "use terra" }, ctx);
 
 	// Root window: session_start persists the boot block without triggering a turn.
 	await runHandlers(captured, "session_start", { reason: "startup" }, ctx);
