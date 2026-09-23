@@ -43,6 +43,25 @@ test("low-budget guidance and warning persist at turn_end, once per active windo
 	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.WARNING_TYPE).length, 1);
 });
 
+test("early guidance stays silent and the committed final warning notifies once", async () => {
+	const sm = manager();
+	const captured = makeExtension(sm);
+	const early = context(sm, undefined, { tokens: 165_000, percent: 82.5, contextWindow: 200_000 });
+	assert.equal(await runContextHook(captured, early), undefined, "early guidance is persisted at turn_end, not injected immediately");
+	await commitTurnEndBoundary(captured, sm, early);
+	await runHandlers(captured, "agent_settled", {}, early);
+	assert.equal(noticesOf(early).filter((notice) => notice.message.includes("Context running low") || notice.message.includes("Context almost full")).length, 0, "early model guidance has no UI toast");
+	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1, "early guidance remains durable for the model");
+
+	const final = context(sm, undefined, { tokens: 181_000, percent: 90.5, contextWindow: 200_000 });
+	const warning = await runContextHook(captured, final);
+	assert.equal((warning?.messages[0] as { customType?: string } | undefined)?.customType, internal.WARNING_TYPE);
+	await commitTurnEndBoundary(captured, sm, final);
+	await runHandlers(captured, "turn_start", {}, final);
+	await runHandlers(captured, "agent_settled", {}, final);
+	assert.equal(noticesOf(final).filter((notice) => notice.message === "pi-context: Context almost full; close out the current memory window.").length, 1, "only the committed final warning notifies, exactly once");
+});
+
 test("the visible countdown ends at the warning line, clamps at zero, and preserves unknown usage", async () => {
 	const fixture = settingsFixture({
 		reserveTokens: 16_384,

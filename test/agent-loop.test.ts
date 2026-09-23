@@ -177,7 +177,7 @@ async function openFixture(options: {
 					assert.ok(sessionManager.getBranch().some((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE && (entry.data as { windowId?: string })?.windowId === windowId), "notification follows the reset marker commit");
 					assert.ok(sessionManager.getBranch().some((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && (entry.details as { windowId?: string })?.windowId === windowId), "notification follows the reset boot commit");
 				}
-				if (type === "warning" && sessionManager.getBranch().some((entry) => entry.type === "custom_message" && (entry.customType === GUIDANCE_TYPE || entry.customType === WARNING_TYPE))) budgetNotices++;
+				if (type === "warning" && /^pi-context: Context (?:almost full|running low)/.test(message)) budgetNotices++;
 				notices.push(message);
 			},
 		} as ExtensionUIContext,
@@ -260,30 +260,94 @@ function assertFreshRequest(fixture: Fixture, requestIndex: number, oldSentinel:
 	assert.equal(body.split(CONTINUATION).length - 1, 1, "the fresh window carries exactly one reset message");
 }
 
-test("real AgentSession: aborted low-budget requests notify only after a retry commits the reminder", async () => {
+test("real AgentSession: aborted early guidance retries silently with automatic reset disabled", async () => {
 	let fixture!: Fixture;
 	fixture = await openFixture({
 		compactionEnabled: false,
 		script: (request) => assistant(fixture, [{ type: "text", text: `response ${request}` }], request === 2 ? "aborted" : "stop", { usage: usage(50_000) }),
 	});
 	try {
-		const reminders = () => fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === GUIDANCE_TYPE);
+		const guidance = () => fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === GUIDANCE_TYPE);
 		const notices = () => fixture.budgetNotices();
 		await fixture.session.prompt("Establish usage below the reminder line.");
 		await fixture.session.waitForIdle();
-		assert.equal(reminders().length, 0);
+		assert.equal(guidance().length, 0);
 		await fixture.session.prompt("Abort this low-budget request.");
 		await fixture.session.waitForIdle();
-		assert.equal(reminders().length, 0, "an aborted turn does not commit its reminder");
-		assert.equal(notices(), 0, "an uncommitted reminder never notifies");
+		assert.equal(guidance().length, 0, "an aborted turn does not commit early guidance");
+		assert.equal(notices(), 0, "early guidance never notifies");
 		await fixture.session.prompt("Retry successfully.");
 		await fixture.session.waitForIdle();
-		assert.equal(reminders().length, 1);
-		assert.equal(notices(), 1, "the committed retry notifies once");
+		assert.equal(guidance().length, 1, "the successful retry commits the model guidance");
+		assert.equal(notices(), 0, "committed early guidance stays UI-silent");
 		await fixture.session.prompt("Continue in the same window.");
 		await fixture.session.waitForIdle();
-		assert.equal(reminders().length, 1);
-		assert.equal(notices(), 1, "later turns cannot repeat the notice");
+		assert.equal(guidance().length, 1);
+		assert.equal(notices(), 0, "later turns cannot toast the early reminder");
+	} finally {
+		fixture.close();
+	}
+});
+
+test("real AgentSession: an aborted final warning stays silent until a successful retry commits it", async () => {
+	let fixture!: Fixture;
+	fixture = await openFixture({
+		compactionEnabled: true,
+		script: (request, context) => {
+			if (request === 1) return assistant(fixture, [{ type: "toolCall", id: "abort-budget-probe-1", name: "get_context_remaining", arguments: {} }], "toolUse", { usage: usage(50_000) });
+			if (request === 2) return assistant(fixture, [{ type: "toolCall", id: "abort-budget-probe-2", name: "get_context_remaining", arguments: {} }], "toolUse", { usage: usage(60_000) });
+			assert.ok(text(context).includes(WARNING_PROMPT), "the final warning reaches the model on both attempts");
+			return assistant(fixture, [{ type: "text", text: `response ${request}` }], request === 3 ? "aborted" : "stop", { usage: usage(60_000) });
+		},
+	});
+	try {
+		const warnings = () => fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === WARNING_TYPE);
+		const notices = () => fixture.budgetNotices();
+		await fixture.session.prompt("Establish usage and reach the final runway.");
+		await fixture.session.waitForIdle();
+		assert.equal(fixture.requests.length, 3, "budget probes reach one final-warning attempt");
+		assert.equal(warnings().length, 0, "the aborted attempt leaves no durable warning");
+		assert.equal(notices(), 0, "an uncommitted warning never notifies");
+		await fixture.session.prompt("Retry successfully.");
+		await fixture.session.waitForIdle();
+		assert.equal(warnings().length, 1, "the successful retry commits one hidden warning");
+		assert.equal(resetMarkers(fixture).length, 1, "normal close-out resets after the committed warning");
+		assert.equal(notices(), 1, "the committed warning notifies once, including after reset");
+		assert.equal(fixture.notices.some((notice) => notice.includes("Context running low")), false, "early guidance remains UI-silent");
+	} finally {
+		fixture.close();
+	}
+});
+
+test("real AgentSession: final warning survives its reset boundary and notifies once", { timeout: 20000 }, async () => {
+	let fixture!: Fixture;
+	fixture = await openFixture({
+		compactionEnabled: true,
+		script: (request, context) => {
+			if (request === 1) return assistant(fixture, [{ type: "toolCall", id: "final-budget-probe-1", name: "get_context_remaining", arguments: {} }], "toolUse", { usage: usage(50_000) });
+			if (request === 2) return assistant(fixture, [{ type: "toolCall", id: "final-budget-probe-2", name: "get_context_remaining", arguments: {} }], "toolUse", { usage: usage(60_000) });
+			if (request === 3) {
+				assert.ok(text(context).includes(WARNING_PROMPT), "the final warning reaches the model");
+				return assistant(fixture, [{ type: "toolCall", id: "final-budget-wipe", name: "wipe_memory", arguments: {} }], "toolUse", { usage: usage(60_000) });
+			}
+			return assistant(fixture, [{ type: "text", text: "fresh window ready" }]);
+		},
+	});
+	try {
+		assert.equal(fixture.notices.length, 0, "boot is silent");
+		await fixture.session.prompt("FINAL_WARNING_RESET_SENTINEL");
+		await fixture.session.waitForIdle();
+		assert.equal(fixture.requests.length, 4, "two budget probes, close-out tool, and fresh-window request run");
+		assertFreshRequest(fixture, 3, "FINAL_WARNING_RESET_SENTINEL");
+		assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === WARNING_TYPE).length, 1);
+		assert.equal(resetMarkers(fixture).length, 1, "the reset commits in the same boundary as the final warning");
+		assert.equal(fixture.budgetNotices(), 1, "the old-window committed warning reaches the UI after reset");
+		assert.equal(fixture.notices.filter((notice) => notice.startsWith("pi-context: memory cleared · ")).length, 1, "reset notification remains intact");
+		assert.equal(fixture.notices.some((notice) => notice.includes("Context running low")), false, "early guidance stays silent");
+		await fixture.session.prompt("Continue after reset.");
+		await fixture.session.waitForIdle();
+		assert.equal(fixture.budgetNotices(), 1, "later turns cannot repeat the consumed final warning");
+		assert.equal(fixture.notices.filter((notice) => notice.startsWith("pi-context: memory cleared · ")).length, 1, "the prior reset notification is also deduplicated");
 	} finally {
 		fixture.close();
 	}

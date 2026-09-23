@@ -2,7 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext, type SessionBoundaryDraft, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { GUIDANCE_TYPE, WARNING_CONTENT, WARNING_TYPE } from "../protocol.js";
 import { readThresholdSettings, type ResolvedThresholds, type ThresholdSettingsResolution } from "./thresholds.js";
-import { currentWindowId, hasWindowMessage, windowUsage } from "./context-window.js";
+import { currentWindowId, hasWindowMessage, isWindowMarker, rootWindowId, windowUsage } from "./context-window.js";
 import { tokenBudgetGuidance } from "./prompts.js";
 import { output } from "../tool-output.js";
 
@@ -45,16 +45,30 @@ export function registerBudget(
 	const invalidateThresholds = () => { cachedPolicy = undefined; };
 	let pendingGuidance: { windowId: string; content: string; remaining: number } | undefined;
 	let pendingWarning: { windowId: string; content: string; remaining: number } | undefined;
-	let pendingNotices: Array<{ windowId: string; customType: string; remaining: number }> = [];
-	const notifyCommittedReminders = (ctx: ExtensionContext) => {
-		const windowId = currentWindowId(ctx);
-		for (const notice of pendingNotices) {
-			if (notice.windowId !== windowId || !hasWindowMessage(ctx, notice.customType)) continue;
-			ctx.ui.notify(notice.customType === WARNING_TYPE
-				? "pi-context: Context almost full; close out the current memory window."
-				: "pi-context: Context running low; checkpoint your notes soon.", "warning");
+	let pendingNotices = new Map<string, { sessionId: string; windowId: string }>();
+	const noticeKey = (sessionId: string, windowId: string) => `${sessionId}:${windowId}`;
+	const warningCommittedInWindow = (ctx: ExtensionContext, notice: { sessionId: string; windowId: string }): boolean => {
+		if (ctx.sessionManager.getSessionId() !== notice.sessionId) return false;
+		let windowId = rootWindowId(notice.sessionId);
+		for (const entry of ctx.sessionManager.getBranch()) {
+			if (isWindowMarker(entry)) {
+				windowId = entry.data.windowId;
+				continue;
+			}
+			if (windowId === notice.windowId && entry.type === "custom_message" && entry.customType === WARNING_TYPE) return true;
 		}
-		pendingNotices = [];
+		return false;
+	};
+	const notifyCommittedWarnings = (ctx: ExtensionContext, settled = false) => {
+		for (const [key, notice] of pendingNotices) {
+			if (warningCommittedInWindow(ctx, notice)) {
+				pendingNotices.delete(key);
+				ctx.ui.notify("pi-context: Context almost full; close out the current memory window.", "warning");
+			} else if (settled) {
+				// An uncommitted draft must not be matched to a later manual warning.
+				pendingNotices.delete(key);
+			}
+		}
 	};
 
 	const clearStaged = () => {
@@ -63,7 +77,7 @@ export function registerBudget(
 	};
 	const resetForTransition = () => {
 		clearStaged();
-		pendingNotices = [];
+		pendingNotices.clear();
 		invalidateThresholds();
 		notifiedWarnings.clear();
 	};
@@ -76,7 +90,10 @@ export function registerBudget(
 		clearStaged();
 		const windowId = currentWindowId(ctx);
 		const drafts = staged.filter((draft): draft is NonNullable<typeof draft> => draft !== undefined && draft.windowId === windowId);
-		pendingNotices = drafts.map(({ windowId, customType, remaining }) => ({ windowId, customType, remaining }));
+		if (drafts.some((draft) => draft.customType === WARNING_TYPE)) {
+			const sessionId = ctx.sessionManager.getSessionId();
+			pendingNotices.set(noticeKey(sessionId, windowId), { sessionId, windowId });
+		}
 		return drafts.map((draft) => ({
 			type: "custom_message" as const,
 			customType: draft.customType,
@@ -89,12 +106,12 @@ export function registerBudget(
 	pi.on("session_tree", resetForTransition);
 	pi.on("model_select", resetForTransition);
 	pi.on("session_shutdown", resetForTransition);
-	// A request can fail before Pi emits turn_end. agent_settled is the public
-	// lifecycle point that must discard an uncommitted draft before the next prompt.
-	// UI notices follow committed reminders. Aborted requests can retry their drafts
-	// without showing the same low-budget notification twice.
+	// A warning can be committed at turn_end, before a tool turn or a reset changes the
+	// active window. Observe the active branch at public lifecycle boundaries and match
+	// the candidate against its originating window segment, not only the current window.
+	pi.on("turn_start", (_event, ctx) => notifyCommittedWarnings(ctx));
 	pi.on("agent_settled", (_event, ctx) => {
-		notifyCommittedReminders(ctx);
+		notifyCommittedWarnings(ctx, true);
 		clearStaged();
 	});
 	pi.on("context", (_event, ctx) => {
@@ -151,6 +168,6 @@ export function registerBudget(
 		automaticResetEnabled,
 		hardReserveDue,
 		consumeTurnEnd,
-		clear: () => { clearStaged(); pendingNotices = []; },
+		clear: () => { clearStaged(); pendingNotices.clear(); },
 	};
 }
