@@ -34,7 +34,7 @@ pi -e npm:@astrosheep/pi-context
 | `notes.list` | `notes_list` |
 | `notes.search` | `notes_search` |
 
-The tool descriptions the model sees are the behavioral documentation: note results use `address` as the sole home identity; search is case-sensitive literal substring; both `notes_read` and `history_read` are character windows prefixed with the same `READ WINDOW` block, whose cursors reconstruct the source exactly when only the content after each block is concatenated; anything a response does not deliver is named by an explicit field.
+The tool descriptions the model sees are the behavioral documentation: history is addressed by stable `seq` values and paged with chronological `before`/`after`/`around` anchors; `history_list` defaults to a conversation view with hidden tool/developer runs folded, while `history_search` searches every role; `custom_type` identifies injected developer messages. Note results use `address` as the sole home identity; search is case-sensitive literal substring; both `notes_read` and `history_read` are character windows prefixed with the same `READ WINDOW` block, whose cursors reconstruct the source exactly when only the content after each block is concatenated; anything a response does not deliver is named by an explicit field.
 
 - **Runtime toggle** — `/pi-context off` disables new automatic resets; `/pi-context on` re-enables them; bare `/pi-context` reports the current state. A durable reset marker remains in force when off, so disabling the extension does not resurrect history from an already-reset window.
 

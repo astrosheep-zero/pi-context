@@ -55,15 +55,18 @@ test("custom reset marker removes old provider context while history remains sea
 	assert.equal(providerText.includes(internal.CONTEXT_WINDOW_OPEN_TAG), true);
 	assert.equal(providerText.includes(internal.RESET_MARKER_TYPE), false, "plain reset state never reaches the provider");
 
-	const windows = historyFromSession(ctx);
+	const projection = historyFromSession(ctx);
+	const windows = projection.windows;
 	assert.equal(windows.length, 2);
 	const oldWindow = windows[0]?.windowId;
 	assert.ok(oldWindow);
-	const read = resultRead(await call(captured, "history_read", { window_id: oldWindow, item_id: oldUserId }, ctx));
+	const oldSeq = windows[0]?.items.find((item) => item.content.includes("OLD-UNIQUE-TRANSCRIPT"))?.seq;
+	assert.ok(oldSeq);
+	const read = resultRead(await call(captured, "history_read", { seq: oldSeq }, ctx));
 	assert.match(read.content, /OLD-UNIQUE-TRANSCRIPT/);
-	const found = resultJson<{ items: Array<{ item_id: string }> }>(await call(captured, "history_search", { query: "needle" }, ctx));
+	const found = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_search", { query: "needle" }, ctx));
 	assert.equal(found.items.length, 1);
-	assert.equal(found.items[0]?.item_id, oldUserId);
+	assert.equal(found.items[0]?.seq, oldSeq);
 });
 
 test("the root boot and reset boot carry durable window identity", async () => {
@@ -229,7 +232,7 @@ test("off preserves an existing marker window and still cancels native compactio
 	const projected = await runContextWithSystemHook(captured, ctx, sessionManager.buildSessionContext().messages);
 	assert.equal(JSON.stringify(projected?.messages ?? []).includes("old context must stay hidden"), false);
 	const windows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_windows", {}, ctx));
-	assert.equal(windows.windows[0]?.window_id, windowId);
+	assert.equal(windows.windows.at(-1)?.window_id, windowId);
 });
 
 test("wipe_memory uses one turn boundary and never calls ctx.compact", async () => {

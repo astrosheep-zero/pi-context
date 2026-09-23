@@ -1,29 +1,37 @@
 import type { TextContent, ToolCall } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { SessionReader } from "../session-reader.js";
 import { isWindowMarker, rootWindowId } from "../context/context-window.js";
 import { HISTORY_PREVIEW_CHARS } from "../tool-output.js";
 
-type HistoryItem = {
+export type HistoryItem = {
+	seq: number;
 	windowId: string;
-	itemId: string;
 	role: "user" | "assistant" | "tool_call" | "tool" | "system" | "developer";
 	content: string;
 	createdAt: string | undefined;
+	customType: string | null;
 	toolName?: string;
+	callSeq?: number | null;
+	resultSeq?: number | null;
+	/** Internal pairing key; never serialized. */
+	toolCallId?: string;
 	// bashExecution only: the persisted output was truncated and the full text lives on disk.
 	outputTruncated?: boolean;
 	fullOutputPath?: string;
 	// toolResult only: the run reported an error.
 	toolError?: boolean;
 };
-type HistoryWindow = { windowId: string; createdAt?: string; items: HistoryItem[] };
 
-type HistoryFilter = {
+export type HistoryWindow = { windowId: string; createdAt?: string; items: HistoryItem[] };
+export type HistoryProjection = { windows: HistoryWindow[]; highestSeq: number; branchSeqs: Set<number> };
+export type HistoryRole = HistoryItem["role"];
+export type HistoryFilter = {
 	window_id?: string | null;
-	role?: HistoryItem["role"] | null;
+	roles?: HistoryRole[] | null;
 	tool_name?: string | null;
-	recent_first?: boolean;
+	custom_type?: string | null;
 };
 
 function isTextContent(part: unknown): part is TextContent {
@@ -35,16 +43,29 @@ export function contentText(content: unknown): string {
 	return Array.isArray(content) ? content.filter(isTextContent).map((part) => part.text).join("\n") : "";
 }
 
-function mapRole(role: AgentMessage["role"]): HistoryItem["role"] | undefined {
+function mapRole(role: AgentMessage["role"]): HistoryRole | undefined {
 	if (role === "user" || role === "assistant") return role;
 	if (role === "toolResult" || role === "bashExecution") return "tool";
-	if (role === "custom") return "user";
+	if (role === "custom") return "developer";
 	if (role === "compactionSummary" || role === "branchSummary") return "system";
 	return undefined;
 }
 
-/** This extension's own custom-entry namespace; entries under it are authored by pi-context. */
-const PI_CONTEXT_ENTRY_PREFIX = "pi-context/";
+function isToolCall(part: unknown): part is ToolCall {
+	return typeof part === "object" && part !== null && (part as { type?: unknown }).type === "toolCall";
+}
+
+function mappedMessage(message: AgentMessage): boolean {
+	return mapRole(message.role) !== undefined;
+}
+
+/** Seq allocation depends on entry kind and role, never on visible content. */
+function sequenceCount(entry: SessionEntry): number {
+	if (entry.type === "compaction" || entry.type === "branch_summary" || entry.type === "custom_message") return 1;
+	if (entry.type !== "message" || !mappedMessage(entry.message)) return 0;
+	if (entry.message.role !== "assistant" || !Array.isArray(entry.message.content)) return 1;
+	return 1 + entry.message.content.filter(isToolCall).length;
+}
 
 function messageContent(message: AgentMessage): string {
 	switch (message.role) {
@@ -60,142 +81,163 @@ function messageContent(message: AgentMessage): string {
 	}
 }
 
-function toolInfo(message: AgentMessage): Pick<HistoryItem, "toolName" | "outputTruncated" | "fullOutputPath" | "toolError"> {
+function toolInfo(message: AgentMessage): Pick<HistoryItem, "toolName" | "outputTruncated" | "fullOutputPath" | "toolError" | "toolCallId"> {
 	if (message.role === "bashExecution") {
 		// A truncated bash run is only half the record without the on-disk path: surface both.
 		return { toolName: "bash", outputTruncated: message.truncated || undefined, fullOutputPath: message.truncated ? message.fullOutputPath : undefined };
 	}
 	if (message.role !== "toolResult") return {};
-	return { toolName: message.toolName, toolError: message.isError === true ? true : undefined };
+	return { toolName: message.toolName, toolCallId: message.toolCallId, toolError: message.isError === true ? true : undefined };
 }
 
-/**
- * An assistant turn's tool calls, projected as their own items: calls wear their own role so the
- * authoring turn's visible text (role "assistant") stays pure; what was invoked stays as
- * searchable as what came back (role "tool"). Ids derive from the turn's entry id and stay
- * opaque; history_read resolves them like any other item.
- */
-function toolCallItems(windowId: string, entry: { id: string; timestamp?: string }, message: AgentMessage): HistoryItem[] {
+function toolCallItems(windowId: string, entry: { id: string; timestamp?: string }, message: AgentMessage, entrySeq: number): HistoryItem[] {
 	if (message.role !== "assistant" || !Array.isArray(message.content)) return [];
 	const items: HistoryItem[] = [];
 	let callIndex = 0;
 	for (const part of message.content) {
-		if (typeof part !== "object" || part === null || (part as { type?: unknown }).type !== "toolCall") continue;
-		const call = part as ToolCall;
+		if (!isToolCall(part)) continue;
+		const callSeq = entrySeq + callIndex + 1;
 		items.push({
+			seq: callSeq,
 			windowId,
-			itemId: `${entry.id}#${callIndex++}`,
 			role: "tool_call",
-			content: JSON.stringify(call.arguments),
+			content: JSON.stringify(part.arguments),
 			createdAt: entry.timestamp,
-			toolName: call.name,
+			customType: null,
+			toolName: part.name,
+			toolCallId: part.id,
+			resultSeq: null,
 		});
+		callIndex += 1;
 	}
 	return items;
 }
 
-/** Build durable, on-demand history directly from every entry on the current session branch. */
-export function historyFromSession(ctx: SessionReader): HistoryWindow[] {
+/** Build stable file-order addresses and project only the current branch into windows. */
+export function historyFromSession(ctx: SessionReader): HistoryProjection {
+	const seqByEntryId = new Map<string, number>();
+	let nextSeq = 1;
+	for (const entry of ctx.sessionManager.getEntries()) {
+		const count = sequenceCount(entry);
+		if (count === 0) continue;
+		seqByEntryId.set(entry.id, nextSeq);
+		nextSeq += count;
+	}
+	const highestSeq = nextSeq - 1;
+
 	const sessionId = ctx.sessionManager.getSessionId();
 	let window: HistoryWindow = { windowId: rootWindowId(sessionId), items: [] };
 	const windows = [window];
+	const branchSeqs = new Set<number>();
+	const callsById = new Map<string, number>();
+	const resultsById = new Map<string, number>();
+
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (isWindowMarker(entry)) {
 			window = { windowId: entry.data.windowId, createdAt: entry.timestamp, items: [] };
 			windows.push(window);
 			continue;
 		}
+		const entrySeq = seqByEntryId.get(entry.id);
+		if (entrySeq === undefined) continue;
+		branchSeqs.add(entrySeq);
+
 		if (entry.type === "compaction" || entry.type === "branch_summary") {
-			window.items.push({
-				windowId: window.windowId,
-				itemId: entry.id,
-				role: "system",
-				content: entry.summary,
-				createdAt: entry.timestamp,
-			});
+			window.items.push({ seq: entrySeq, windowId: window.windowId, role: "system", content: entry.summary, createdAt: entry.timestamp, customType: null });
 			continue;
 		}
 		if (entry.type === "message") {
 			const role = mapRole(entry.message.role);
 			if (!role) continue;
+			const customType = entry.message.role === "custom" ? entry.message.customType ?? null : null;
 			window.items.push({
+				seq: entrySeq,
 				windowId: window.windowId,
-				itemId: entry.id,
 				role,
 				content: messageContent(entry.message),
 				createdAt: entry.timestamp,
+				customType,
 				...toolInfo(entry.message),
+				...(role === "tool" ? { callSeq: null } : {}),
 			});
-			window.items.push(...toolCallItems(window.windowId, entry, entry.message));
+			const calls = toolCallItems(window.windowId, entry, entry.message, entrySeq);
+			for (const call of calls) {
+				branchSeqs.add(call.seq);
+				if (call.toolCallId && !callsById.has(call.toolCallId)) callsById.set(call.toolCallId, call.seq);
+			}
+			window.items.push(...calls);
+			if (entry.message.role === "toolResult" && entry.message.toolCallId && !resultsById.has(entry.message.toolCallId)) {
+				resultsById.set(entry.message.toolCallId, entrySeq);
+			}
 			continue;
 		}
 		if (entry.type === "custom_message") {
 			window.items.push({
+				seq: entrySeq,
 				windowId: window.windowId,
-				itemId: entry.id,
-				// Only entries this extension wrote are its own; every foreign custom message stays a user turn.
-				role: entry.customType.startsWith(PI_CONTEXT_ENTRY_PREFIX) ? "developer" : "user",
+				role: "developer",
 				content: contentText(entry.content),
 				createdAt: entry.timestamp,
+				customType: entry.customType,
 			});
 		}
 	}
-	return windows;
+
+	for (const item of windows.flatMap((current) => current.items)) {
+		if (item.role === "tool_call" && item.toolCallId) item.resultSeq = resultsById.get(item.toolCallId) ?? null;
+		if (item.role === "tool" && item.toolCallId) item.callSeq = callsById.get(item.toolCallId) ?? null;
+	}
+	return { windows, highestSeq, branchSeqs };
 }
 
 export function visibleItem(item: HistoryItem, maxChars = HISTORY_PREVIEW_CHARS) {
 	const characters = Array.from(item.content);
 	const truncated = characters.length > maxChars;
 	return {
+		seq: item.seq,
 		window_id: item.windowId,
-		item_id: item.itemId,
 		role: item.role,
+		created_at: item.createdAt ?? null,
 		tool_name: item.toolName ?? null,
-		// Surfaced only when set: a truncated bash run names its full-output path, and an
-		// errored tool run says so. Absent keys mean nothing special happened.
+		custom_type: item.customType,
+		...(item.role === "tool_call" ? { result_seq: item.resultSeq ?? null } : {}),
+		...(item.role === "tool" ? { call_seq: item.callSeq ?? null } : {}),
 		...(item.outputTruncated ? { output_truncated: true, full_output_path: item.fullOutputPath ?? null } : {}),
 		...(item.toolError ? { tool_error: true } : {}),
 		truncated,
 		total_chars: characters.length,
-		// A truncated payload is a plain prefix: no synthetic marker is appended, and
-		// `total_chars` names exactly how many code points were left out.
 		truncated_content: truncated ? characters.slice(0, maxChars).join("") : item.content,
 	};
 }
 
-export function allItems(ctx: SessionReader) {
-	return historyFromSession(ctx).flatMap((window) => window.items);
+export function allItems(projection: HistoryProjection): HistoryItem[] {
+	return projection.windows.flatMap((current) => current.items);
 }
 
-/**
- * window_id must name a real window; anything else is a named error, not a silent empty page
- * (a window that exists but has no matching items after the other filters stays a legal empty
- * page). Returns the teaching message plus the known window ids so the error is self-healing.
- */
-export function unknownWindowId(ctx: SessionReader, params: HistoryFilter): { message: string; known: string[] } | undefined {
+export function unknownWindowId(projection: HistoryProjection, params: HistoryFilter): { message: string; known: string[] } | undefined {
 	if (typeof params.window_id !== "string") return undefined;
-	const known = historyFromSession(ctx).map((window) => window.windowId);
+	const known = projection.windows.map((current) => current.windowId);
 	return known.includes(params.window_id) ? undefined : { message: `unknown window_id "${params.window_id}"`, known };
 }
 
-/**
- * A role×tool_name combination is vacuous — provably empty from the taxonomy alone, before
- * any data is read — when tool_name is given alongside a role that never carries one. Only
- * "tool_call" and "tool" items have a tool name. Returns the teaching error message, or
- * undefined when the combination can match.
- */
-export function vacuousRoleToolCombo(params: HistoryFilter): string | undefined {
-	if (typeof params.tool_name === "string" && typeof params.role === "string" && params.role !== "tool_call" && params.role !== "tool") {
-		return `tool_name is only set on "tool_call" and "tool" items; role "${params.role}" never carries one`;
+export function validateHistoryFilters(params: HistoryFilter): string | undefined {
+	if (typeof params.tool_name === "string" && typeof params.custom_type === "string") return "tool_name and custom_type cannot be used together";
+	if (typeof params.tool_name === "string" && params.roles && params.roles.some((role) => role !== "tool_call" && role !== "tool")) {
+		return 'tool_name only supports roles "tool_call" and "tool"';
+	}
+	if (typeof params.custom_type === "string" && params.roles && (params.roles.length !== 1 || params.roles[0] !== "developer")) {
+		return 'custom_type only supports roles ["developer"]';
 	}
 	return undefined;
 }
 
-export function filteredItems(ctx: SessionReader, params: HistoryFilter): HistoryItem[] {
-	let items = allItems(ctx);
+/** role/tool/custom filtering is applied before default conversation visibility. */
+export function filteredItems(projection: HistoryProjection, params: HistoryFilter, mode: "list" | "search"): HistoryItem[] {
+	let items = allItems(projection);
 	if (typeof params.window_id === "string") items = items.filter((item) => item.windowId === params.window_id);
-	if (typeof params.role === "string") items = items.filter((item) => item.role === params.role);
-	if (typeof params.tool_name === "string") items = items.filter((item) => item.toolName === params.tool_name);
-	if (params.recent_first !== false) items.reverse();
-	return items;
+	if (params.roles) items = items.filter((item) => params.roles!.includes(item.role));
+	if (typeof params.tool_name === "string") items = items.filter((item) => (item.role === "tool_call" || item.role === "tool") && item.toolName === params.tool_name);
+	if (typeof params.custom_type === "string") items = items.filter((item) => item.role === "developer" && item.customType === params.custom_type);
+	if (!params.roles && typeof params.tool_name !== "string" && typeof params.custom_type !== "string" && mode === "list") items = items.filter((item) => (item.role === "user" || item.role === "assistant" || item.role === "system") && item.content !== "");
+	return items.sort((a, b) => a.seq - b.seq);
 }

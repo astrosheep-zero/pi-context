@@ -40,7 +40,7 @@ export const PROTOCOL_BLOCK = `${CONTEXT_WINDOW_PROTOCOL_OPEN_TAG}
 Your memory resets whenever the context window fills; only what you wrote down survives. Two things outlive every window in this session: the notes you wrote, and the history that was recorded. Neither is memory — both are record. Write notes with notes_write, revise them with notes_edit, and read them back with notes_read / notes_search / notes_list; history is read-only through the history_* tools. Everything else wakes blank.
 Mark outdated or unneeded notes stale. Left alone, they will keep lying to you, and you will keep believing them.
 
-Keep a running checkpoint while you work, not at the last minute — the next window wakes knowing nothing about the work: the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. history_list returns those IDs; history_read pulls the exact item back out. Bookmark anything expensive the same way — a window/item ID beats re-running or re-searching.
+Keep a running checkpoint while you work, not at the last minute — the next window wakes knowing nothing about the work: the goal, decisions, progress, learnings, next steps, the skills you still need, the seq of every relevant history item still being solved, and important actions/tool calls for future reference. history_list and history_search return seq addresses; history_read({seq}) pulls an exact item back out. Bookmark anything expensive with its seq; a fork starts a new session and renumbers seqs.
 
 Use get_context_remaining to see how much of the window is left. When it runs out, this window is gone — with no final turn at the limit — and you continue in a fresh one, recovering only through notes_* and history_*. Once your checkpoint is written, you can call wipe_memory yourself instead of waiting for the erase. Do not let a window die undocumented.
 
@@ -58,7 +58,7 @@ Unless marked stale, a section's MAP.md is shown here in full, every window — 
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const WARNING_PROMPT =
-	"Your memory is about to be erased. Stop the current task and write the note NOW. If it already exists, revise it with notes_edit (or rewrite it whole): the goal, decisions, progress, learnings, next steps, the skills you still need, the window ID and item ID of every relevant user request still being solved, and important actions/tool calls for future reference. Use as many note/tool turns as needed to finish the checkpoint. When it is ready, call wipe_memory to reset immediately; otherwise finish normally and the extension will reset at your normal stop. Anything not in the note dies with the window.";
+	"Your memory is about to be erased. Stop the current task and write the note NOW. If it already exists, revise it with notes_edit (or rewrite it whole): the goal, decisions, progress, learnings, next steps, the skills you still need, the seq of every relevant history item still being solved, and important actions/tool calls for future reference. Use as many note/tool turns as needed to finish the checkpoint. When it is ready, call wipe_memory to reset immediately; otherwise finish normally and the extension will reset at your normal stop. Anything not in the note dies with the window.";
 
 /** Identical hidden close-out message for manual and budget-triggered requests. */
 export const WARNING_CONTENT = `${GUIDANCE_OPEN_TAG}\n${WARNING_PROMPT}\n${GUIDANCE_CLOSE_TAG}`;

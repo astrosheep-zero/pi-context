@@ -1,10 +1,9 @@
 import { Type } from "@earendil-works/pi-ai";
 export const nullableString = () => Type.Optional(Type.Union([Type.String(), Type.Null()]));
 export const positiveInteger = () => Type.Optional(Type.Integer({ minimum: 1 }));
-export const cursor = () => Type.Optional(Type.Integer({ minimum: 0, description: "Continuation cursor: pass the previous next_cursor back unchanged, with the same filters and ordering. Omit to start. next_cursor is null only when the set is exhausted." }));
-export const recentFirst = () => Type.Optional(Type.Boolean({ description: "Return newest-first. Only an explicit false returns oldest-first. Defaults to true." }));
-/** Role filter. `developer` is the known author for this extension's own custom entries. */
-export const role = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool_call"), Type.Literal("tool"), Type.Literal("system"), Type.Literal("developer"), Type.Null()], { description: "Filter by the item's role. Exactly six: \"user\" and \"assistant\" are a message's visible text (assistant text never contains tool calls); \"tool_call\" is one tool invocation (tool_name set, content = the call's JSON arguments); \"tool\" is one tool run's output (tool_name set); \"system\" is a native Pi compaction or branch summary; \"developer\" is an entry this extension authored (boot, guidance, warning, continuation messages, or any pi-context/* custom message)." });
+export const cursor = () => Type.Optional(Type.Integer({ minimum: 0, description: "Continuation cursor: pass the returned continuation value back unchanged, with the same filters and ordering. Omit to start. A null continuation means the set is exhausted." }));
+export const historyRole = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool_call"), Type.Literal("tool"), Type.Literal("system"), Type.Literal("developer")]);
+export const historyRoles = () => Type.Optional(Type.Array(historyRole, { minItems: 1, description: "Show exactly these roles. user is a human turn; assistant is visible model text; tool_call is one invocation; tool is one result; system is a native compaction or branch summary; developer is any extension-injected message, including every custom_message. Use custom_type to select a developer message type." }));
 
 /** Search query parameter: one literal, or several literals combined with OR. */
 export const searchQuery = () => Type.Union([Type.String(), Type.Array(Type.String(), { minItems: 1 })]);
