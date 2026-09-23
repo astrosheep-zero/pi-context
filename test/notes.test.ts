@@ -17,12 +17,10 @@ import { projectKey } from "../src/notes/paths.js";
 import type { Scope } from "../src/notes/index.js";
 import { listNotes, physicalPath, scopeDir } from "./helpers/notes.js";
 import { CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
-import { call, context, explicitBoot, installExtensionTestEnvironment, makeExtension, manager, resultJson, resultRead, runHandlers } from "./helpers/extension.js";
+import { call, context, explicitBoot, makeExtension, manager, resultJson, resultRead, runHandlers } from "./helpers/extension.js";
+import { installExtensionTestHooks } from "./helpers/extension-test-environment.js";
 
-const testEnvironment = installExtensionTestEnvironment("pi-context-notes");
-test.beforeEach(() => testEnvironment.beforeEach());
-test.afterEach(() => testEnvironment.afterEach());
-test.after(() => testEnvironment.dispose());
+const testEnvironment = installExtensionTestHooks("pi-context-notes");
 
 function freshRoot(): string {
 	return testEnvironment.newNotesRoot();

@@ -8,18 +8,15 @@ import {
 	assertWithinBudget,
 	call,
 	context,
-	installExtensionTestEnvironment,
 	makeExtension,
 	manager,
 	objectSchema,
 	resultJson,
 	resultRead,
 } from "./helpers/extension.js";
+import { installExtensionTestHooks } from "./helpers/extension-test-environment.js";
 
-const testEnvironment = installExtensionTestEnvironment("pi-context-integration");
-test.beforeEach(() => testEnvironment.beforeEach());
-test.afterEach(() => testEnvironment.afterEach());
-test.after(() => testEnvironment.dispose());
+const testEnvironment = installExtensionTestHooks("pi-context-integration");
 
 test("schemas cover the History/Notes actions plus reset controls", () => {
 	const captured = makeExtension(manager());

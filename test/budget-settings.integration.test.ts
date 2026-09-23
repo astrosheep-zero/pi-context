@@ -8,7 +8,6 @@ import {
 	call,
 	commitTurnEndBoundary,
 	context,
-	installExtensionTestEnvironment,
 	makeExtension,
 	manager,
 	noticesOf,
@@ -20,11 +19,9 @@ import {
 	settingsFixture,
 	writeJson,
 } from "./helpers/extension.js";
+import { installExtensionTestHooks } from "./helpers/extension-test-environment.js";
 
-const testEnvironment = installExtensionTestEnvironment("pi-context-integration");
-test.beforeEach(() => testEnvironment.beforeEach());
-test.afterEach(() => testEnvironment.afterEach());
-test.after(() => testEnvironment.dispose());
+const testEnvironment = installExtensionTestHooks("pi-context-integration");
 
 test("low-budget guidance and warning persist at turn_end, once per active window", async () => {
 	const sessionManager = manager();

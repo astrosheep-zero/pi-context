@@ -14,18 +14,15 @@ import {
 	call,
 	context,
 	explicitBoot,
-	installExtensionTestEnvironment,
 	makeExtension,
 	manager,
 	resultJson,
 	resultRead,
 	runHandlers,
 } from "./helpers/extension.js";
+import { installExtensionTestHooks } from "./helpers/extension-test-environment.js";
 
-const testEnvironment = installExtensionTestEnvironment("pi-context-integration");
-test.beforeEach(() => testEnvironment.beforeEach());
-test.afterEach(() => testEnvironment.afterEach());
-test.after(() => testEnvironment.dispose());
+const testEnvironment = installExtensionTestHooks("pi-context-integration");
 
 test("notes_list is most-recently-updated first across merged scopes", async () => {
 	const session = manager();

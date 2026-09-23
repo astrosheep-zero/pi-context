@@ -13,7 +13,6 @@ import {
 	commitTurnEndBoundary,
 	context,
 	explicitBoot,
-	installExtensionTestEnvironment,
 	makeExtension,
 	manager,
 	noticesOf,
@@ -26,11 +25,9 @@ import {
 	runCommand,
 	sentOf,
 } from "./helpers/extension.js";
+import { installExtensionTestHooks } from "./helpers/extension-test-environment.js";
 
-const testEnvironment = installExtensionTestEnvironment("pi-context-integration");
-test.beforeEach(() => testEnvironment.beforeEach());
-test.afterEach(() => testEnvironment.afterEach());
-test.after(() => testEnvironment.dispose());
+const testEnvironment = installExtensionTestHooks("pi-context-integration");
 
 test("custom reset marker removes old provider context while history remains searchable", async () => {
 	const sessionManager = manager();
