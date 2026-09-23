@@ -8,13 +8,12 @@ import { join } from "node:path";
 
 const note = "---\norigin: self\nstatus: active\nstale: false\ncreatedAt: 2026-01-01T00:00:00Z\nupdatedAt: 2026-01-01T00:00:00Z\nlastAccessed: 2026-01-01T00:00:00Z\naccessCount: 0\n---\n\n";
 
-test("doctor identifies legacy metadata as requiring manual migration", (t) => {
-	const root = mkdtempSync(join(tmpdir(), "dream-doctor-legacy-"));
+test("doctor ignores unknown frontmatter keys while validating canonical metadata", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "dream-doctor-extra-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	mkdirSync(join(root, "human"));
-	writeFileSync(join(root, "human/legacy.md"), note.replace("createdAt", "created_at"));
-	const issues = doctor(root);
-	assert.ok(issues.some((issue) => issue.includes("legacy metadata key created_at; manually migrate to createdAt")));
+	writeFileSync(join(root, "human/extra.md"), note.replace("accessCount: 0", "accessCount: 0\ncreated_at: 2025-01-01\nupdated_at: 2025-01-01\nlast_accessed: 2025-01-01\naccess_count: 7\nsource_window: old\nrecurrence_count: 2\nrecurrence_windows: old"));
+	assert.deepEqual(doctor(root), [], "unknown fields have no special diagnostics");
 });
 
 test("doctor validates without repairing files or running the dreamer", async () => {

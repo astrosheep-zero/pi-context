@@ -30,7 +30,6 @@ const SCOPES: readonly Scope[] = ["session", "project", "human", "agent", "model
 const ORIGINS: readonly Origin[] = ["user", "self", "external"];
 const STATUSES: readonly NoteStatus[] = ["active", "superseded", "pending", "archived"];
 const TIMESTAMP_KEYS = ["createdAt", "updatedAt", "lastAccessed"] as const;
-const LEGACY_KNOWN_KEYS = ["created_at", "updated_at", "last_accessed", "access_count", "source_window", "recurrence_count", "recurrence_windows"] as const;
 /** Emission order, exactly the Design's key list. */
 const KNOWN_KEYS = ["origin", "status", "stale", "createdAt", "updatedAt", "lastAccessed", "accessCount", "sourceWindow", "supersedes", "recurrenceCount", "recurrenceWindows"] as const;
 
@@ -125,13 +124,10 @@ function parseFrontmatter(raw: string): { fields: Record<string, unknown>; body:
 
 /**
  * Parse a note file. Missing known keys take the Design defaults (status active, stale false,
- * accessCount 0, timestamps now); unknown keys are carried through untouched. Known
- * snake_case metadata is refused because it requires the explicit manual migration.
+ * accessCount 0, timestamps now); unknown keys are carried through untouched.
  */
 export function parseNote(raw: string, now = Date.now()): { meta: NoteMeta; body: string } {
 	const { fields, body } = parseFrontmatter(raw);
-	const legacyKeys = LEGACY_KNOWN_KEYS.filter((key) => Object.hasOwn(fields, key));
-	if (legacyKeys.length > 0) throw new Error(`legacy note metadata ${legacyKeys.join(", ")} requires manual migration to camelCase before this note can be used`);
 	const meta = { ...fields } as Record<string, unknown>;
 	// scope is a legacy on-disk field: store callers derive it from the file's home and
 	// overwrite it after parsing, so an absent or outdated value just falls back.

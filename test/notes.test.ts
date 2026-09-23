@@ -165,7 +165,7 @@ test("linked git worktrees share the main checkout's project key", () => {
 	assert.equal(scopeDir("project", context(manager(), undefined, undefined, true, worktree)), scopeDir("project", context(manager(), undefined, undefined, true, main)), "@project uses the same physical home from both checkouts");
 });
 
-test("legacy metadata is refused for explicit manual migration; invalid project ownership stays unknown", async () => {
+test("unrecognized metadata remains ordinary frontmatter; invalid project ownership stays unknown", async () => {
 	freshRoot();
 	const session = manager();
 	const captured = makeExtension(session);
@@ -180,15 +180,24 @@ created_at: 2026-01-01T00:00:00.000+00:00
 updated_at: 2026-01-01T00:00:00.000+00:00
 last_accessed: 2026-01-01T00:00:00.000+00:00
 access_count: 0
+source_window: old-window
+recurrence_count: 2
+recurrence_windows: old-window
 ---
 
 legacy body`);
-	assert.throws(() => parseNote(readFileSync(legacyFile, "utf8")), /legacy note metadata .*requires manual migration/);
-	const legacyBytes = readFileSync(legacyFile, "utf8");
-	await assert.rejects(() => listNotes(ctx, { scope: "session" }), /requires manual migration/);
-	await assert.rejects(() => call(captured, "notes_read", { address: "legacy.md" }, ctx), /requires manual migration/);
-	await assert.rejects(() => call(captured, "notes_write", { address: "legacy.md", content: "legacy overwritten" }, ctx), /requires manual migration/);
-	assert.equal(readFileSync(legacyFile, "utf8"), legacyBytes, "refusal preserves the unmigrated file byte-for-byte");
+	const parsed = parseNote(readFileSync(legacyFile, "utf8"), Date.parse("2026-02-01T00:00:00Z"));
+	assert.equal(parsed.meta.createdAt, Date.parse("2026-02-01T00:00:00Z"), "missing canonical timestamp takes the normal default");
+	assert.equal(parsed.meta.created_at, "2026-01-01T00:00:00.000+00:00", "unrecognized fields remain ordinary extras");
+	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.address, "legacy.md");
+	assert.match(resultRead(await call(captured, "notes_read", { address: "legacy.md" }, ctx)).content, /legacy body$/);
+	await call(captured, "notes_edit", { address: "legacy.md", edits: [{ oldText: "legacy body", newText: "edited body" }] }, ctx);
+	await call(captured, "notes_write", { address: "legacy.md", content: "overwritten body" }, ctx);
+	const rewritten = parseNote(readFileSync(legacyFile, "utf8"));
+	assert.equal(rewritten.body, "overwritten body");
+	for (const key of ["created_at", "updated_at", "last_accessed", "access_count", "source_window", "recurrence_count", "recurrence_windows"]) {
+		assert.deepEqual(rewritten.meta[key], parsed.meta[key], `${key} is preserved as unrecognized frontmatter, not migrated`);
+	}
 
 	const invalidFile = physicalPath("session", "invalid.md", ctx);
 	writeFileSync(invalidFile, `---
