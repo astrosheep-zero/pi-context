@@ -67,6 +67,54 @@ The dreamer model is configured under the same key. `--dreamer <model pattern>` 
 }
 ```
 
+## Standalone notes library
+
+The same package provides a **Node.js TypeScript library independent of Pi**:
+
+```sh
+npm install @astrosheep/pi-context
+```
+
+```ts
+import { createNotesStore, type NotesContext } from "@astrosheep/pi-context/notes";
+
+const context: NotesContext = {
+  home: "/path/to/notes",          // explicit filesystem root
+  sessionId: "my-session",        // safe single directory component
+  projectKey: "my-project-a1b2c3d4",
+  agent: "my-agent",              // canonical lowercase slug
+  model: "my-model",              // canonical lowercase slug
+};
+const notes = createNotesStore(context);
+notes.write("@project/decisions.md", "Use a shared notes library.", { origin: "user" });
+notes.edit("@project/decisions.md", [
+  { oldText: "shared", newText: "host-independent" },
+]);
+const note = notes.read("@project/decisions.md"); // full text/body/metadata, or undefined
+const files = notes.list({ pattern: "@project/**" });
+const matches = notes.search(["library"]);
+```
+
+`/notes` ships JavaScript and TypeScript declarations. It does not import Pi or read `PI_*` environment variables. Pi packages are optional peers: a notes-only installation does not install them. Using the plugin, root SDK entry, or `dream` CLI still requires Pi. This is a filesystem library for Node, not a browser storage API.
+
+### API and identity
+
+`createNotesStore(context)` snapshots the five required identity fields; changing the supplied object afterward does not retarget the store. It resolves `home` once, validates identity components, and creates no files until an operation needs to write. Create a new store to change identity. Multiple stores can use independent roots and identities without changing process environment.
+
+- `write(address, content, { origin?, stale? }?)` returns `{ meta }`. Default origin is `self`; overwriting preserves creation time, existing project ownership, and unknown metadata, and revives stale notes unless `stale: true` is supplied.
+- `read(address)` returns `{ meta, body, text, resolvedScope }` or `undefined`. **Reads update** `last_accessed` and `access_count` on disk; `text` includes frontmatter.
+- `edit(address, edits?, { origin?, stale?, replaceAll? }?)` returns `{ meta, applied, resolved_scope, change: { before, after } }`. Edits affect the body; metadata-only changes need no edits. Each replacement uses the evolving body in array order; the complete batch is written atomically only after every edit succeeds. `change` contains the relevant body/frontmatter/full-file diff inputs, not a rendered diff.
+- `list({ pattern?, scope?, who? }?)` returns complete `NoteRow[]`, sorted by update time descending with address tie-breaking. Rows contain address, scope, virtual path, metadata, body, and body byte size. `scope` narrows the five-home view; `who` names a concrete agent/model home.
+- `search(queries: string[], { pattern?, scope?, who? }?)` returns complete `NoteSearchRow[]`, sorted by address. Matching is case-sensitive literal OR over body lines; matches contain one-based `line`, `text`, and `offsetChars` into the serialized read text. Neither listing nor search increments access metadata.
+
+The library returns full data, not tool envelopes or paginated/truncated output. `NoteError` exposes the existing named store refusals through `code`, with `line_numbers` for ambiguous edits and `edit_index` for a failed edit. Invalid addresses/identities and filesystem failures throw errors; only a missing `read` returns `undefined`. Notes remain markdown files with the existing frontmatter and size limits; writes use same-directory atomic rename, without cross-process locking. Foreign named homes can be read (including the access-metadata update), but their bodies cannot be written or edited through the store. These are cooperative address rules, not an OS security sandbox.
+
+Addresses use bare paths, `@project/`, `@human/`, `@self/`, `@model/`, or explicit `@agents/<slug>/` and `@models/<slug>/`. Relative self/model addresses resolve to the supplied identity; listing renders their concrete names. The disk layout remains `pi/session/<sessionId>/`, `project/<projectKey>/`, `human/`, `agents/<agent>/`, and `models/<model>/`. No data migration happens on library import or construction. Existing notes retain their metadata; new session notes record the supplied project key.
+
+### Library and plugin boundary
+
+The implementation lives in `src/notes/lib/`, exposed through its public barrel. The Pi adapter supplies the root and live session/project/agent/model identity on each call. Tools and boot use this same storage implementation. Tool schemas, Pi-style edit diff rendering, wire budgets, pagination, boot selection, legacy activation migration, and session replay stay outside the library. Neutral address/frontmatter/path helpers are exported for integrations; internal source paths are not the supported library API.
+
 ## SDK integration
 
 SDK hosts that create a session directly can bind pi-context to the exact same public `SettingsManager` authority as the session:
@@ -77,8 +125,7 @@ import {
   DefaultResourceLoader,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-// The package currently publishes source/dist files without a package main/exports entry.
-import { createPiContext } from "@astrosheep/pi-context/dist/src/index.js";
+import { createPiContext } from "@astrosheep/pi-context";
 
 const cwd = process.cwd();
 const agentDir = "/tmp/my-pi-agent";
@@ -101,6 +148,8 @@ const { session } = await createAgentSession({
   resourceLoader,
 });
 ```
+
+The previous `@astrosheep/pi-context/dist/src/index.js` SDK import remains supported. The root entry is Pi-dependent; notes-only consumers should import `/notes` instead.
 
 The manager must be shared by the resource loader's factory and `createAgentSession`. If the host replaces its settings authority, it must create and bind a new `createPiContext({ settingsManager })` factory together with the replacement manager; an existing factory remains bound to the manager it was created with.
 
@@ -140,6 +189,7 @@ Implementation architecture and the reset lifecycle live in [docs/](docs/).
 ```sh
 npm test            # build from a clean dist, then run the suite
 npm run typecheck
+npm run test:notes-package  # pack, install without Pi, typecheck and run a consumer
 ```
 
 The harness runs against the real installed Pi `SessionManager`/`SettingsManager` in temporary directories with fake credentials — no model or network calls, and the real `~/.pi` is never touched.

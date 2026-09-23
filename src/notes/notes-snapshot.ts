@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { listNotes, type NoteRow, type Scope } from "./store.js";
+import { createNotesStore, type NoteRow, type Scope } from "./lib/index.js";
+import { notesContextFromPi } from "./pi-adapter.js";
 
 const NOTES_HOMES = [
 	{ scope: "session", label: "this session" },
@@ -22,13 +23,15 @@ export type NotesSnapshot = {
  * Acquire the five homes once for one boot. Only filesystem-style errno failures are isolated;
  * malformed note data and unrelated construction errors remain visible to the caller.
  */
-export function loadNotesSnapshot(ctx: ExtensionContext, loadHome: NotesLoader = (context, scope) => listNotes(context, { scope })): NotesSnapshot {
+export function loadNotesSnapshot(ctx: ExtensionContext, loadHome?: NotesLoader): NotesSnapshot {
 	const openedAt = Date.now();
+	const store = createNotesStore(notesContextFromPi(ctx));
+	const load = loadHome ?? ((_context: ExtensionContext, scope: Scope) => store.list({ scope }));
 	const homes = new Map<Scope, readonly NoteRow[]>();
 	const unavailable: NotesHome[] = [];
 	for (const home of NOTES_HOMES) {
 		try {
-			homes.set(home.scope, loadHome(ctx, home.scope));
+			homes.set(home.scope, load(ctx, home.scope));
 		} catch (error) {
 			const code = typeof error === "object" && error !== null ? (error as NodeJS.ErrnoException).code : undefined;
 			if (typeof code !== "string" || !/^E[A-Z0-9_]+$/.test(code) || code.startsWith("ERR_")) throw error;

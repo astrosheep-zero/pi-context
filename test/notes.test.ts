@@ -16,7 +16,7 @@ import { parseNote } from "../src/notes/frontmatter.js";
 import { physicalPath, projectKey, scopeDir } from "../src/notes/paths.js";
 import { listNotes, type Scope } from "../src/notes/store.js";
 import { CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
-import { call, context, installExtensionTestEnvironment, makeExtension, manager, resultJson, resultRead, runHandlers } from "./helpers/extension.js";
+import { call, context, explicitBoot, installExtensionTestEnvironment, makeExtension, manager, resultJson, resultRead, runHandlers } from "./helpers/extension.js";
 
 const testEnvironment = installExtensionTestEnvironment("pi-context-notes");
 test.beforeEach(() => testEnvironment.beforeEach());
@@ -376,6 +376,29 @@ test("@ addresses select one home, reject illegal sigils, and never fall back", 
 	await assert.rejects(() => call(captured, "notes_read", { address: "@glboal/same.md" }, ctx), /@project\/.*@human\/.*bare names are this session/);
 	await assert.rejects(() => call(captured, "notes_write", { address: "bad@name.md", content: "no" }, ctx), /@project\/.*@human\/.*bare names are this session/);
 	assert.equal(existsSync(join(root, "human", "bad@name.md")), false, "a bad sigil creates nothing anywhere");
+});
+
+test("Pi adapter resolves agent and switched model identity on each notes call and boot", async () => {
+	const root = freshRoot();
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session, undefined, undefined, true, testEnvironment.cwd, true, "provider/First.Model");
+	await withAgent("Test Agent", async () => {
+		await call(captured, "notes_write", { address: "@self/private.md", content: "agent note" }, ctx);
+		await call(captured, "notes_write", { address: "@model/private.md", content: "first model note" }, ctx);
+		ctx.model = context(session, undefined, undefined, true, testEnvironment.cwd, true, "other/Second.Model").model;
+		assert.equal(resultJson<{ error: string }>(await call(captured, "notes_read", { address: "@model/private.md" }, ctx)).error, "note not found", "switched model does not fall back to previous home");
+		await call(captured, "notes_write", { address: "@model/private.md", content: "second model note" }, ctx);
+		const listed = resultJson<Listed>(await call(captured, "notes_list", {}, ctx));
+		assert.deepEqual(listed.files.map((row) => row.address).sort(), ["@agents/test-agent/private.md", "@models/second-model/private.md"]);
+		const boot = explicitBoot(ctx, "test-window", undefined);
+		assert.ok(boot.includes("@models/second-model/private.md"));
+		assert.equal(boot.includes("@models/first-model/private.md"), false);
+		assert.match(resultRead(await call(captured, "notes_read", { address: "@models/first-model/private.md" }, ctx)).content, /first model note$/);
+		const refused = resultJson<{ error: string }>(await call(captured, "notes_edit", { address: "@models/first-model/private.md", stale: true }, ctx));
+		assert.match(refused.error, /not your home/);
+		assert.match(readFileSync(join(root, "models/first-model/private.md"), "utf8"), /first model note$/);
+	});
 });
 
 const FRONTMATTER = (body: string) =>
