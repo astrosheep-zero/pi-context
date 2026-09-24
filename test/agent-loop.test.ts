@@ -16,7 +16,7 @@ import {
 	type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import piContext, { createPiContext } from "../src/index.js";
-import { BOOT_TYPE, CONTEXT_WINDOW_OPEN_TAG, CONTINUATION, CONTINUATION_TYPE, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, RESET_MARKER_TYPE, WARNING_CONTENT, WARNING_PROMPT, WARNING_TYPE } from "../src/protocol.js";
+import { BOOT_TYPE, CONTEXT_WINDOW_OPEN_TAG, CONTINUATION, CONTINUATION_TYPE, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, MANUAL_WIPE_TYPE, RESET_MARKER_TYPE, WARNING_CONTENT, WARNING_PROMPT, WARNING_TYPE } from "../src/protocol.js";
 
 type StreamScript = (request: number, context: AgentContext) => AssistantMessage | Promise<AssistantMessage>;
 type Hook = (pi: ExtensionAPI, getSession: () => AgentSession, requests: AgentContext[]) => void;
@@ -389,19 +389,18 @@ test("real AgentSession: explicit tiny-session wipe ignores keepRecentTokens and
 	}
 });
 
-test("real AgentSession: manual close-out spans note turns and commits its checkpoint after notes", { timeout: 20000 }, async () => {
+test("real AgentSession: manual command resets at the next turn end after its tool batch", { timeout: 20000 }, async () => {
 	let fixture!: Fixture;
 	fixture = await openFixture({
 		compactionEnabled: false,
 		script: (request, context) => {
-			if (request === 1) return assistant(fixture, [{ type: "text", text: "before manual close-out" }]);
+			if (request === 1) return assistant(fixture, [{ type: "text", text: "before manual reset" }]);
 			if (request === 2) {
-				assert.ok(text(context).includes(WARNING_PROMPT), "manual /wipe-memory sends the shared close-out warning");
-				return assistant(fixture, [{ type: "toolCall", id: "manual-note-a", name: "notes_write", arguments: { address: "manual-a.md", content: "MANUAL_NOTE_ALPHA" } }], "toolUse");
+				assert.ok(text(context).includes(WARNING_PROMPT), "idle /wipe-memory sends the shared checkpoint prompt");
+				return assistant(fixture, [{ type: "toolCall", id: "manual-note", name: "notes_write", arguments: { address: "manual-a.md", content: "MANUAL_NOTE_ALPHA" } }], "toolUse");
 			}
-			if (request === 3) return assistant(fixture, [{ type: "toolCall", id: "manual-note-b", name: "notes_write", arguments: { address: "manual-b.md", content: "MANUAL_NOTE_BETA" } }], "toolUse");
-			if (request === 4) return assistant(fixture, [{ type: "toolCall", id: "manual-wipe", name: "wipe_memory", arguments: {} }], "toolUse");
-			assert.fail("/wipe-memory must stop after committing the reset instead of starting a fresh model request");
+			assertFreshRequest(fixture, 2, "MANUAL_CLOSEOUT_OLD_SENTINEL");
+			return assistant(fixture, [{ type: "text", text: "continued in fresh window" }]);
 		},
 	});
 	try {
@@ -409,35 +408,69 @@ test("real AgentSession: manual close-out spans note turns and commits its check
 		await fixture.session.waitForIdle();
 		await fixture.session.prompt("/wipe-memory");
 		await fixture.session.waitForIdle();
-		assert.equal(fixture.requests.length, 4, "two note turns and explicit wipe finish without a fresh continuation request");
+		assert.equal(fixture.requests.length, 3, "a tool turn commits the reset before its automatic continuation");
 		assert.equal(resetMarkers(fixture).length, 1);
 		const branch = fixture.sessionManager.getBranch();
-		const warningIndex = branch.findIndex((entry) => entry.type === "custom_message" && entry.customType === WARNING_TYPE);
+		const warningIndex = branch.findIndex((entry) => entry.type === "custom_message" && entry.customType === MANUAL_WIPE_TYPE);
 		const checkpointIndex = branch.findIndex((entry) => entry.type === "compaction");
 		const markerIndex = branch.findIndex((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE);
-		assert.ok(warningIndex >= 0 && warningIndex < checkpointIndex, "the warning is durable before the checkpoint");
+		assert.ok(warningIndex >= 0 && warningIndex < checkpointIndex, "the idle warning is durable before the checkpoint");
 		const warning = branch[warningIndex];
 		assert.ok(warning?.type === "custom_message");
-		assert.equal(warning.content, WARNING_CONTENT, "manual and budget close-out persist the same hidden warning");
-		assert.equal(branch[markerIndex - 1]?.id, branch[checkpointIndex]?.id, "native retain-none checkpoint immediately precedes the marker");
-		assert.ok(branch.slice(0, checkpointIndex).filter((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "notes_write").length >= 2, "both note writes finish before the checkpoint");
+		assert.equal(warning.content, WARNING_CONTENT);
+		assert.equal(branch[markerIndex - 1]?.id, branch[checkpointIndex]?.id);
+		assert.ok(branch.slice(0, checkpointIndex).some((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "notes_write"), "note write finishes before the checkpoint");
 		const marker = resetMarkers(fixture)[0]!;
 		assert.equal(marker.type, "custom");
 		const windowId = (marker.data as { windowId: string }).windowId;
 		const boot = branch.find((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && (entry.details as { windowId?: string } | undefined)?.windowId === windowId);
 		assert.ok(boot && boot.type === "custom_message");
-		assert.ok(typeof boot.content === "string" && boot.content.includes("manual-a.md") && boot.content.includes("manual-b.md"), "the fresh boot indexes both completed notes");
+		assert.ok(typeof boot.content === "string" && boot.content.includes("manual-a.md"), "fresh boot indexes the completed note");
 		assert.equal(boot.display, false);
-		const canonical = fixture.sessionManager.buildSessionProjection().messages;
-		assert.equal(JSON.stringify(canonical).includes("MANUAL_CLOSEOUT_OLD_SENTINEL"), false, "canonical context excludes the prior window");
-		assert.ok(canonical.some((message) => message.role === "compactionSummary"), "the empty native summary wrapper remains canonical");
+		assert.equal(JSON.stringify(fixture.sessionManager.buildSessionProjection().messages).includes("MANUAL_CLOSEOUT_OLD_SENTINEL"), false);
 		assert.ok(JSON.stringify(branch).includes("MANUAL_CLOSEOUT_OLD_SENTINEL"), "raw history remains intact");
 	} finally {
 		fixture.close();
 	}
 });
 
-test("real AgentSession: repeated manual commands share one pending window and normal-stop fallback", { timeout: 20000 }, async () => {
+test("real AgentSession: streaming /wipe-memory notifies immediately and resets at the next turn end", { timeout: 20000 }, async () => {
+	let fixture!: Fixture;
+	let announceStarted!: () => void;
+	let releaseResponse!: () => void;
+	const started = new Promise<void>((resolve) => { announceStarted = resolve; });
+	const gate = new Promise<void>((resolve) => { releaseResponse = resolve; });
+	fixture = await openFixture({
+		compactionEnabled: false,
+		script: async (request) => {
+			assert.equal(request, 1, "the running response does not get a second old-window request");
+			announceStarted();
+			await gate;
+			return assistant(fixture, [{ type: "text", text: "current response finished" }]);
+		},
+	});
+	try {
+		const running = fixture.session.prompt("STREAMING_WIPE_OLD_SENTINEL");
+		await started;
+		await fixture.session.prompt("/wipe-memory", { streamingBehavior: "steer" });
+		await fixture.session.prompt("/wipe-memory", { streamingBehavior: "followUp" });
+		assert.equal(fixture.notices.filter((notice) => notice.includes("queued for the next turn end")).length, 1, "the user is notified once while output is ongoing");
+		assert.equal(resetMarkers(fixture).length, 0, "the ongoing turn is not interrupted");
+		releaseResponse();
+		await running;
+		await fixture.session.waitForIdle();
+		assert.equal(resetMarkers(fixture).length, 1);
+		assert.equal(fixture.requests.length, 1);
+		assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === MANUAL_WIPE_TYPE).length, 0, "the old turn cannot consume a newly queued warning");
+		assert.equal(JSON.stringify(fixture.sessionManager.buildSessionProjection().messages).includes("STREAMING_WIPE_OLD_SENTINEL"), false);
+		assert.ok(fixture.notices.some((notice) => notice.includes("memory cleared")), "the committed boundary has a separate success notice");
+	} finally {
+		releaseResponse();
+		fixture.close();
+	}
+});
+
+test("real AgentSession: repeated manual commands share one pending window", { timeout: 20000 }, async () => {
 	let fixture!: Fixture;
 	let announceStarted!: () => void;
 	let releaseResponse!: () => void;
@@ -461,7 +494,7 @@ test("real AgentSession: repeated manual commands share one pending window and n
 		await Promise.all([first, second]);
 		await fixture.session.waitForIdle();
 		assert.equal(fixture.requests.length, 1, "duplicate command waits do not schedule another model request");
-		assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === WARNING_TYPE).length, 1, "the same pending-window warning is deduplicated");
+		assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === MANUAL_WIPE_TYPE).length, 1, "the same pending-window warning is deduplicated");
 		assert.equal(resetMarkers(fixture).length, 1, "normal stop commits exactly one reset");
 		assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "compaction").length, 1);
 	} finally {
@@ -505,7 +538,7 @@ test("real AgentSession: user abort, synthetic aborted response, and generic err
 	}
 });
 
-test("real AgentSession: steering and follow-up queued during fallback reach the old window once", { timeout: 25000 }, async () => {
+test("real AgentSession: steering and follow-up queued during a manual reset arrive once", { timeout: 25000 }, async () => {
 	for (const delivery of ["steer", "followUp"] as const) {
 		let fixture!: Fixture;
 		let announceStarted!: () => void;
@@ -520,7 +553,10 @@ test("real AgentSession: steering and follow-up queued during fallback reach the
 					announceStarted();
 					await gate;
 				}
-				if (request === 2) assert.equal(text(context).split("QUEUED_DURING_FALLBACK").length - 1, 1, `${delivery} is delivered once before fallback`);
+				if (request === 2) {
+					assertFreshRequest(fixture, 1, WARNING_PROMPT);
+					assert.equal(text(context).split("QUEUED_DURING_FALLBACK").length - 1, 1, `${delivery} is delivered once in the new window`);
+				}
 				return assistant(fixture, [{ type: "text", text: `response ${request}` }]);
 			},
 		});
@@ -532,8 +568,8 @@ test("real AgentSession: steering and follow-up queued during fallback reach the
 			releaseResponse();
 			await command;
 			await fixture.session.waitForIdle();
-			assert.equal(fixture.requests.length, 2, `${delivery} runs once before the reset and does not start a fresh continuation`);
-			assert.equal(resetMarkers(fixture).length, 1, `${delivery} does not duplicate the fallback reset`);
+			assert.equal(fixture.requests.length, 2, `${delivery} runs once after the reset`);
+			assert.equal(resetMarkers(fixture).length, 1, `${delivery} does not duplicate the reset`);
 			assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "message" && JSON.stringify(entry.message).includes("QUEUED_DURING_FALLBACK")).length, 1);
 		} finally {
 			releaseResponse();

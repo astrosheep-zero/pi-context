@@ -15,6 +15,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { SessionManager as Manager } from "@earendil-works/pi-coding-agent";
 import piContext, { internal } from "../src/index.js";
+import { MANUAL_WIPE_TYPE, WARNING_CONTENT } from "../src/protocol.js";
 import {
 	initialResetControl,
 	reduceResetControl,
@@ -211,10 +212,10 @@ test("off stops future automatic/manual reset requests while an existing marker 
 	await h.runCommand("wipe-memory");
 	assert.equal(h.sent.length, 1, "/wipe-memory sends one hidden close-out warning and starts a normal turn");
 	assert.equal(h.sent[0]?.triggerTurn, true);
-	assert.equal(h.sent[0]?.customType, internal.WARNING_TYPE);
-	const warning = h.sessionManager.getBranch().find((entry) => entry.type === "custom_message" && entry.customType === internal.WARNING_TYPE);
+	assert.equal(h.sent[0]?.customType, MANUAL_WIPE_TYPE);
+	const warning = h.sessionManager.getBranch().find((entry) => entry.type === "custom_message" && entry.customType === MANUAL_WIPE_TYPE);
 	assert.ok(warning && warning.type === "custom_message");
-	assert.equal(warning.content, internal.WARNING_CONTENT);
+	assert.equal(warning.content, WARNING_CONTENT);
 	const markers = h.sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
 	assert.equal(markers.length, 1, "manual command waits for an agent boundary; it does not persist an immediate reset");
 });
@@ -376,6 +377,15 @@ test("reset-control: close-out phases deduplicate, span turns, and upgrade to a 
 	const commit = reduceResetControl(tool.state, { type: "turn_end", facts: turnEndFacts() });
 	assert.equal(commit.effect, "commit-boundary-stop");
 	assert.deepEqual(commit.state, initialResetControl());
+});
+
+test("reset-control: manual turn-end request upgrades a pending tool request", () => {
+	const windowId = "pcw:test:window";
+	const tool = reduceResetControl(initialResetControl(), { type: "tool_request", windowId });
+	const manual = reduceResetControl(tool.state, { type: "tool_request", windowId, source: "manual" });
+	assert.equal(manual.effect, "already-pending");
+	assert.deepEqual(manual.state.request, { phase: "tool-requested", windowId, source: "manual" });
+	assert.equal(reduceResetControl(manual.state, { type: "turn_end", facts: turnEndFacts() }).effect, "commit-boundary-stop");
 });
 
 test("reset-control: fallback is normal-stop only; hard reserve remains safety", () => {

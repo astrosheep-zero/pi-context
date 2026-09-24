@@ -71,7 +71,7 @@ export interface ResetBeforeSettleFacts {
 
 export type ResetControlEvent =
 	| { readonly type: "close_out"; readonly windowId: string; readonly source: ResetRequestSource }
-	| { readonly type: "tool_request"; readonly windowId: string }
+	| { readonly type: "tool_request"; readonly windowId: string; readonly source?: "manual" }
 	| { readonly type: "turn_end"; readonly facts: ResetTurnEndFacts }
 	| { readonly type: "before_settle"; readonly facts: ResetBeforeSettleFacts }
 	| { readonly type: "settled" }
@@ -111,8 +111,10 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 		}
 		case "tool_request": {
 			const request = state.request;
-			if (request.phase === "tool-requested" && request.windowId === event.windowId) return { state, effect: "already-pending" };
-			const source: ToolResetRequestSource = request.phase === "close-out" ? request.source : "tool";
+			if (request.phase === "tool-requested" && request.windowId === event.windowId) {
+				return { state: event.source === "manual" ? { ...state, request: { ...request, source: "manual" } } : state, effect: "already-pending" };
+			}
+			const source: ToolResetRequestSource = event.source ?? (request.phase === "close-out" ? request.source : "tool");
 			return { state: { ...state, request: { phase: "tool-requested", windowId: event.windowId, source } }, effect: "close-out-armed" };
 		}
 		case "turn_end": {
@@ -269,6 +271,11 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 	return {
 		closeOut(windowId: string, source: ResetRequestSource) {
 			const decision = reduceResetControl(control, { type: "close_out", windowId, source });
+			control = decision.state;
+			return decision.effect;
+		},
+		requestManualAtTurnEnd(windowId: string) {
+			const decision = reduceResetControl(control, { type: "tool_request", windowId, source: "manual" });
 			control = decision.state;
 			return decision.effect;
 		},

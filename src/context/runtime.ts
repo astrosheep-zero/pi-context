@@ -6,7 +6,7 @@ import { migrateLegacyHomes } from "../pi/notes/adapter.js";
 import { currentReset, currentWindowId, isCheckpointBackedReset, isWindowBoot, isWindowMarker, projectRootWindow, projectWindow, rootWindowId, type WindowMarker } from "./context-window.js";
 import { registerResetLifecycle } from "./reset-lifecycle.js";
 import { buildResetDrafts, resetTailCommitted } from "./reset-artifacts.js";
-import { BOOT_TYPE, WARNING_CONTENT, WARNING_TYPE } from "../protocol.js";
+import { BOOT_TYPE, MANUAL_WIPE_TYPE, WARNING_CONTENT } from "../protocol.js";
 import { ensureBoot, type IncompleteNotesNotifier } from "./boot.js";
 
 declare const __PI_CONTEXT_BUILD__: { version: string; sourceHash: string };
@@ -137,18 +137,24 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 				return;
 			}
 			const requestedWindowId = currentWindowId(cmdCtx);
-			await cmdCtx.waitForIdle();
-			if (!enabled || currentWindowId(cmdCtx) !== requestedWindowId) return;
-			const armed = resets.closeOut(requestedWindowId, "manual");
+			let idle = cmdCtx.isIdle();
+			if (!idle && !cmdCtx.signal) {
+				await cmdCtx.waitForIdle();
+				if (!enabled || currentWindowId(cmdCtx) !== requestedWindowId) return;
+				idle = true;
+			}
+			const armed = resets.requestManualAtTurnEnd(requestedWindowId);
 			if (armed === "already-pending") return;
+			cmdCtx.ui.notify(idle
+				? "pi-context: /wipe-memory received; reset after the next turn."
+				: "pi-context: /wipe-memory queued for the next turn end.", "info");
+			if (!idle) return;
 			try {
-				pi.sendMessage({ customType: WARNING_TYPE, content: WARNING_CONTENT, display: false }, { triggerTurn: true });
+				pi.sendMessage({ customType: MANUAL_WIPE_TYPE, content: WARNING_CONTENT, display: false }, { triggerTurn: true });
 			} catch (error) {
 				resets.clear();
 				cmdCtx.ui.notify(`pi-context: could not start manual close-out (${String(error)}).`, "error");
-				return;
 			}
-			await cmdCtx.waitForIdle();
 		},
 	});
 

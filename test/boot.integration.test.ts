@@ -6,7 +6,7 @@ import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { historyFromSession, internal } from "../src/index.js";
 import { listNotes, physicalPath } from "./helpers/notes.js";
-import { CONTINUATION_TYPE, WARNING_TYPE } from "../src/protocol.js";
+import { CONTINUATION_TYPE, MANUAL_WIPE_TYPE } from "../src/protocol.js";
 import {
 	appendText,
 	call,
@@ -248,7 +248,26 @@ test("wipe_memory uses one turn boundary and never calls ctx.compact", async () 
 	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE && entry.details && typeof entry.details === "object" && "windowId" in entry.details).length, 1);
 });
 
-test("pi-context command toggles future work, /wipe-memory starts close-out, and /compact remains disabled", async () => {
+test("/wipe-memory waits out non-agent busy work before starting its single-turn request", async () => {
+	const sessionManager = manager();
+	const captured = makeExtension(sessionManager);
+	const cmd = captured.commands.get("wipe-memory");
+	assert.ok(cmd);
+	let waits = 0;
+	const notices: string[] = [];
+	const ctx = Object.assign(context(sessionManager, undefined, undefined, false), {
+		signal: undefined,
+		waitForIdle: async () => { waits++; },
+		ui: { notify: (message: string) => notices.push(message) },
+	});
+	await cmd.handler("", ctx as unknown as Parameters<typeof cmd.handler>[1]);
+	assert.equal(waits, 1);
+	assert.equal(captured.sent.length, 1);
+	assert.equal(captured.sent[0]?.options?.triggerTurn, true);
+	assert.equal(notices.filter((message) => message.includes("received; reset after the next turn")).length, 1);
+});
+
+test("pi-context command toggles future work, /wipe-memory schedules a turn-end reset, and /compact remains disabled", async () => {
 	const sessionManager = manager();
 	appendText(sessionManager, "user", "hello");
 	const captured = makeExtension(sessionManager);
@@ -271,10 +290,11 @@ test("pi-context command toggles future work, /wipe-memory starts close-out, and
 	notices = await runCommand(captured, "pi-context", "on", low);
 	assert.match(notices[0]?.message ?? "", /on/);
 	notices = await runCommand(captured, "wipe-memory", "", low);
-	assert.equal(notices.length, 0, "the command begins a model close-out rather than announcing a reset request");
+	assert.equal(notices.length, 1, "the command acknowledges the reset request");
+	assert.match(notices[0]?.message ?? "", /next turn/);
 	assert.equal(captured.sent.length, 2, "the command persists one hidden warning after the startup boot");
-	assert.equal(captured.sent[1]?.options?.triggerTurn, true, "the shared warning starts an ordinary agent turn");
-	assert.equal(captured.sent[1]?.message.customType, WARNING_TYPE);
+	assert.equal(captured.sent[1]?.options?.triggerTurn, true, "the manual checkpoint prompt starts an ordinary agent turn");
+	assert.equal(captured.sent[1]?.message.customType, MANUAL_WIPE_TYPE);
 	assert.equal(captured.sent[1]?.message.display, false);
 	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE).length, 0, "no reset is claimed until close-out completes");
 	const markerContext = await runManualCompact(captured, low);
