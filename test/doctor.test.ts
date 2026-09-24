@@ -6,7 +6,7 @@ import test from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const note = "---\norigin: self\nstatus: active\nstale: false\ncreatedAt: 2026-01-01T00:00:00Z\nupdatedAt: 2026-01-01T00:00:00Z\nlastAccessed: 2026-01-01T00:00:00Z\naccessCount: 0\n---\n\n";
+const note = "---\norigin: self\ncreatedAt: 2026-01-01T00:00:00Z\nupdatedAt: 2026-01-01T00:00:00Z\nlastAccessed: 2026-01-01T00:00:00Z\naccessCount: 0\n---\n\n";
 
 test("doctor ignores unknown frontmatter keys while validating canonical metadata", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "dream-doctor-extra-"));
@@ -14,6 +14,15 @@ test("doctor ignores unknown frontmatter keys while validating canonical metadat
 	mkdirSync(join(root, "human"));
 	writeFileSync(join(root, "human/extra.md"), note.replace("accessCount: 0", "accessCount: 0\ncreated_at: 2025-01-01\nupdated_at: 2025-01-01\nlast_accessed: 2025-01-01\naccess_count: 7\nsource_window: old\nrecurrence_count: 2\nrecurrence_windows: old"));
 	assert.deepEqual(doctor(root), [], "unknown fields have no special diagnostics");
+});
+
+test("doctor validates crumpledAt as an optional ISO timestamp", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "dream-doctor-crumpled-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	mkdirSync(join(root, "human"));
+	writeFileSync(join(root, "human/valid.md"), note.replace("accessCount: 0", "accessCount: 0\ncrumpledAt: 2026-01-02T00:00:00Z"));
+	writeFileSync(join(root, "human/bad.md"), note.replace("accessCount: 0", "accessCount: 0\ncrumpledAt: yesterday"));
+	assert.deepEqual(doctor(root), ["human/bad.md: missing/invalid crumpledAt; use an ISO timestamp"]);
 });
 
 test("doctor validates without repairing files or running the dreamer", async () => {

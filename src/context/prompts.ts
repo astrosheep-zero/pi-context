@@ -41,8 +41,8 @@ function notesIndex(snapshot: NotesSnapshot, agentName: string, modelName: strin
 			continue;
 		}
 		const rows = rowsFor(snapshot, home.scope);
-		const map = rows.find((row) => row.path === "MAP.md" && !row.meta.stale);
-		const recent = rows.filter((row) => !row.meta.stale && row.path !== "MAP.md").slice(0, home.limit);
+		const map = rows.find((row) => row.path === "MAP.md" && row.meta.crumpledAt === undefined);
+		const recent = rows.filter((row) => row.meta.crumpledAt === undefined && row.path !== "MAP.md").slice(0, home.limit);
 		if (!map?.body && recent.length === 0) continue;
 		const contents = [`## ${home.label}`];
 		if (map?.body) contents.push(`●  MAP.md\n${map.body}`);
@@ -85,5 +85,5 @@ export function renderBootBlock(data: BootRenderData): string {
  * at write time; get_context_remaining remains the live source for the current figure.
  */
 export function tokenBudgetGuidance(remaining: number): string {
-	return `${GUIDANCE_OPEN_TAG}\nYour brain is almost out of room — ${remaining} tokens left, and then your memory gets wiped. The wipe is automatic: there is no final turn to write then. Grab the notebook now — the goal, decisions, progress, learnings, next steps, the skills you still need, the seq of every relevant history item still being solved, and important actions/tool calls for future reference. Bookmark expensive history with seq; a fork starts a new session and renumbers seqs. Replacing an older checkpoint? Mark it stale. Then call wipe_memory yourself — anything you do after the checkpoint isn't in it.\n${GUIDANCE_CLOSE_TAG}`;
+	return `${GUIDANCE_OPEN_TAG}\nYour brain is almost out of room — ${remaining} tokens left, and then your memory gets wiped. The wipe is automatic: there is no final turn to write then. Grab the notebook now — the goal, decisions, progress, learnings, next steps, the skills you still need, the seq of every relevant history item still being solved, and important actions/tool calls for future reference. Bookmark expensive history with seq; a fork starts a new session and renumbers seqs. Replacing an older checkpoint? Crumple it. Then call wipe_memory yourself — anything you do after the checkpoint isn't in it.\n${GUIDANCE_CLOSE_TAG}`;
 }

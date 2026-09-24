@@ -9,6 +9,8 @@ import { notesContextFromPi } from "./adapter.js";
 const ORIGIN = Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("self"), Type.Literal("external")], {
 	description: "Where the note's content came from. user: written or dictated by the human. self: written by you, the agent (default). external: anything else — third-party text, tool output, fetched material.",
 }));
+const CRUMPLED_PARAMETER = Type.Optional(Type.Boolean({ description: "true crumples the note: it leaves the boot index, list, and search, stays readable by address, and appears with wastebasket: true. false smooths it back." }));
+const WASTEBASKET_PARAMETER = Type.Optional(Type.Boolean({ description: "true lists only crumpled notes instead of live ones." }));
 const ADDRESS_DESCRIPTION = "Address forms are bare `<vpath>` for this session, `@project/<vpath>` for this project, `@human/<vpath>` for the human's cross-project notes, `@self/<vpath>` for your own, and `@model/<vpath>` for the current model's. `@self` and `@model` mean whoever is running now. Any other `@` prefix, or `@` inside a vpath, is a hard error. There is no fallback across prefixes. Paths reject `..`, absolute paths, and backslashes.";
 
 function failure(error: unknown) {
@@ -50,12 +52,12 @@ function byRecent<T extends { address: string; meta: { updatedAt: number } }>(a:
 export function registerNotesTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_write", label: "Notes write",
-		description: `Create or replace a note as a real markdown file, and name it for what it holds: a fresh window sees only an index entry, never the note itself. ${ADDRESS_DESCRIPTION} Keep notes small and split by topic — by what the note is about, never by who said it (authorship is origin's job); a rewrite replaces the body whole while preserving createdAt and every other frontmatter key. stale: true marks the note closed so it leaves the boot index but stays readable and searchable.`,
-		parameters: Type.Object({ address: Type.String(), content: Type.String(), origin: ORIGIN, stale: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), executionMode: "sequential",
+		description: `Create or replace a note as a real markdown file, and name it for what it holds: a fresh window sees only an index entry, never the note itself. ${ADDRESS_DESCRIPTION} Keep notes small and split by topic — by what the note is about, never by who said it (authorship is origin's job); a rewrite replaces the body whole while preserving createdAt and every other frontmatter key. Writing always produces an uncrumpled note.`,
+		parameters: Type.Object({ address: Type.String(), content: Type.String(), origin: ORIGIN }, { additionalProperties: false }), executionMode: "sequential",
 		async execute(_id, params, _signal, _update, ctx) {
 			const content = params.content;
 			try {
-				await createNotesStore(notesContextFromPi(ctx)).write(params.address, content, { origin: (params.origin ?? "self") as Origin, stale: params.stale });
+				await createNotesStore(notesContextFromPi(ctx)).write(params.address, content, { origin: (params.origin ?? "self") as Origin });
 				return output({ address: params.address, written: true });
 			} catch (error) { return failure(error); }
 		},
@@ -63,11 +65,11 @@ export function registerNotesTools(pi: ExtensionAPI) {
 
 	pi.registerTool(defineTool({
 		name: "notes_edit", label: "Notes edit",
-		description: `Edit a note body by exact-text replacement; frontmatter is never editable this way. ${ADDRESS_DESCRIPTION} Each oldText must occur exactly once unless replace_all is set; a multi-match anchor fails with its match line numbers and a zero-match anchor names the failing edit index. edits may be omitted (or empty) for a metadata-only update, which requires at least one of origin/stale. Moving while awake means notes_write at a new address and notes_edit at the old address with stale=true. The success return carries the address and a diff of what changed.`,
-		parameters: Type.Object({ address: Type.String(), edits: Type.Optional(Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }, { additionalProperties: false }))), origin: ORIGIN, stale: Type.Optional(Type.Boolean()), replace_all: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), executionMode: "sequential",
+		description: `Edit a note body by exact-text replacement; frontmatter is never editable this way. ${ADDRESS_DESCRIPTION} Each oldText must occur exactly once unless replace_all is set; a multi-match anchor fails with its match line numbers and a zero-match anchor names the failing edit index. edits may be omitted (or empty) for a metadata-only update, which requires at least one of origin/crumpled. Moving while awake means notes_write at a new address and notes_edit at the old address with crumpled: true. The success return carries the address and a diff of what changed.`,
+		parameters: Type.Object({ address: Type.String(), edits: Type.Optional(Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }, { additionalProperties: false }))), origin: ORIGIN, crumpled: CRUMPLED_PARAMETER, replace_all: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), executionMode: "sequential",
 		async execute(_id, params, _signal, _update, ctx) {
 			try {
-				const { applied, change } = await createNotesStore(notesContextFromPi(ctx)).edit(params.address, params.edits, { origin: params.origin as Origin | undefined, stale: params.stale, replaceAll: params.replace_all });
+				const { applied, change } = await createNotesStore(notesContextFromPi(ctx)).edit(params.address, params.edits, { origin: params.origin as Origin | undefined, crumpled: params.crumpled, replaceAll: params.replace_all });
 				const diff = renderDiff(change);
 				return output({ address: params.address, applied, diff });
 			} catch (error) { return failure(error); }
@@ -96,12 +98,12 @@ export function registerNotesTools(pi: ExtensionAPI) {
 
 	pi.registerTool(defineTool({
 		name: "notes_list", label: "Notes list",
-		description: `List note files as a recent-first snapshot carrying address, updated_at, and stale. more is the number of matching files omitted by limit or the wire budget; use pattern to narrow the address range. ${ADDRESS_DESCRIPTION} Listings merge your five prefixes: this session, @project/, @human/, @self/, and @model/.`,
-		parameters: Type.Object({ pattern: nullableString(), limit: positiveInteger() }, { additionalProperties: false }),
+		description: `List note files as a recent-first snapshot carrying address and updated_at; wastebasket rows also carry crumpled_at. more is the number of matching files omitted by limit or the wire budget; use pattern to narrow the address range. ${ADDRESS_DESCRIPTION} Listings merge your five prefixes: this session, @project/, @human/, @self/, and @model/.`,
+		parameters: Type.Object({ pattern: nullableString(), limit: positiveInteger(), wastebasket: WASTEBASKET_PARAMETER }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			let rows: NoteRow[];
-			try { rows = await createNotesStore(notesContextFromPi(ctx)).list({ pattern: params.pattern ?? undefined }); } catch (error) { return failure(error); }
-			const files: Array<{ address: string; stale: boolean; updated_at: string; address_truncated?: boolean }> = rows.map((row) => ({ address: row.address, stale: row.meta.stale, updated_at: localIso(row.meta.updatedAt) }));
+			try { rows = await createNotesStore(notesContextFromPi(ctx)).list({ pattern: params.pattern ?? undefined, wastebasket: params.wastebasket }); } catch (error) { return failure(error); }
+			const files: Array<{ address: string; updated_at: string; crumpled_at?: string; address_truncated?: boolean }> = rows.map((row) => ({ address: row.address, updated_at: localIso(row.meta.updatedAt), ...(row.meta.crumpledAt === undefined ? {} : { crumpled_at: row.meta.crumpledAt }) }));
 			return output(snapshot(files, params.limit, (file, fits) => {
 				const address = middleTruncate(file.address, (candidate) => fits({ ...file, address: candidate, address_truncated: true }));
 				return { ...file, address, address_truncated: true };
@@ -112,16 +114,16 @@ export function registerNotesTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_search", label: "Notes search",
 		description: `Case-insensitive literal substring search over note bodies; query is one string or several (OR), each matched line appears once. Results are a recent-first snapshot, not pageable; more counts matching files omitted by limit or the wire budget. Use pattern to narrow the address range. ${ADDRESS_DESCRIPTION} Search merges the same five prefixes as notes_list. Patterns glob over full address strings. Each file entry carries matches_total, its full match count before per-file capping. Each match carries line, text, offset_chars (a code-point offset into the serialized note returned by notes_read, at the earliest query match), and truncated (some line text is omitted). Pass address and offset_chars to notes_read to read from the match.`,
-		parameters: Type.Object({ query: searchQuery(), pattern: nullableString(), limit: positiveInteger(), max_matches_per_file: positiveInteger() }, { additionalProperties: false }),
+		parameters: Type.Object({ query: searchQuery(), pattern: nullableString(), limit: positiveInteger(), max_matches_per_file: positiveInteger(), wastebasket: WASTEBASKET_PARAMETER }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const queries = searchQueries(params.query);
 			let rows: NoteSearchRow[];
-			try { rows = await createNotesStore(notesContextFromPi(ctx)).search(queries, { pattern: params.pattern ?? undefined }); } catch (error) { return failure(error); }
+			try { rows = await createNotesStore(notesContextFromPi(ctx)).search(queries, { pattern: params.pattern ?? undefined, wastebasket: params.wastebasket }); } catch (error) { return failure(error); }
 			const maxPerFile = params.max_matches_per_file ?? Number.POSITIVE_INFINITY;
 			rows.sort(byRecent);
-			const result: Array<{ address: string; updated_at: string; stale: boolean; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }>; address_truncated?: boolean }> = rows.map((row) => {
+			const result: Array<{ address: string; updated_at: string; crumpled_at?: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }>; address_truncated?: boolean }> = rows.map((row) => {
 				const matches = row.matches.map((match) => ({ line: match.line, text: match.text, truncated: false, offset_chars: match.offsetChars }));
-				return { address: row.address, updated_at: localIso(row.meta.updatedAt), stale: row.meta.stale, matches_total: matches.length, matches: matches.slice(0, maxPerFile) };
+				return { address: row.address, updated_at: localIso(row.meta.updatedAt), ...(row.meta.crumpledAt === undefined ? {} : { crumpled_at: row.meta.crumpledAt }), matches_total: matches.length, matches: matches.slice(0, maxPerFile) };
 			});
 			const fitFile = (file: (typeof result)[number], fits: (candidate: (typeof result)[number]) => boolean) => {
 				const matches = file.matches;

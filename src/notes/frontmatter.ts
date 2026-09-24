@@ -1,6 +1,5 @@
 import type { Scope } from "./paths.js";
 
-export type NoteStatus = "active" | "superseded" | "pending" | "archived";
 export type Origin = "user" | "self" | "external";
 
 /**
@@ -11,8 +10,8 @@ export type Origin = "user" | "self" | "external";
 export type NoteMeta = {
 	scope: Scope;
 	origin: Origin;
-	status: NoteStatus;
-	stale: boolean;
+	/** Present only while the note is in the wastebasket; serialized as an ISO timestamp. */
+	crumpledAt?: string;
 	createdAt: number;
 	updatedAt: number;
 	lastAccessed: number;
@@ -28,10 +27,9 @@ export type NoteMeta = {
 
 const SCOPES: readonly Scope[] = ["session", "project", "human", "agent", "model"];
 const ORIGINS: readonly Origin[] = ["user", "self", "external"];
-const STATUSES: readonly NoteStatus[] = ["active", "superseded", "pending", "archived"];
 const TIMESTAMP_KEYS = ["createdAt", "updatedAt", "lastAccessed"] as const;
 /** Emission order, exactly the Design's key list. */
-const KNOWN_KEYS = ["origin", "status", "stale", "createdAt", "updatedAt", "lastAccessed", "accessCount", "sourceWindow", "supersedes", "recurrenceCount", "recurrenceWindows"] as const;
+const KNOWN_KEYS = ["origin", "crumpledAt", "createdAt", "updatedAt", "lastAccessed", "accessCount", "sourceWindow", "supersedes", "recurrenceCount", "recurrenceWindows"] as const;
 
 const pad2 = (value: number) => String(value).padStart(2, "0");
 
@@ -55,10 +53,6 @@ export function isScope(value: unknown): value is Scope {
 
 export function isOrigin(value: unknown): value is Origin {
 	return typeof value === "string" && (ORIGINS as readonly string[]).includes(value);
-}
-
-function isStatus(value: unknown): value is NoteStatus {
-	return typeof value === "string" && (STATUSES as readonly string[]).includes(value);
 }
 
 function toEpoch(value: unknown, fallback: number): number {
@@ -123,8 +117,8 @@ function parseFrontmatter(raw: string): { fields: Record<string, unknown>; body:
 }
 
 /**
- * Parse a note file. Missing known keys take the Design defaults (status active, stale false,
- * accessCount 0, timestamps now); unknown keys are carried through untouched.
+ * Parse a note file. Missing known keys take the defaults (accessCount 0, timestamps now);
+ * crumpledAt stays absent until explicitly set, and unknown keys survive untouched.
  */
 export function parseNote(raw: string, now = Date.now()): { meta: NoteMeta; body: string } {
 	const { fields, body } = parseFrontmatter(raw);
@@ -133,8 +127,6 @@ export function parseNote(raw: string, now = Date.now()): { meta: NoteMeta; body
 	// overwrite it after parsing, so an absent or outdated value just falls back.
 	meta.scope = isScope(meta.scope) ? meta.scope : "session";
 	meta.origin = isOrigin(meta.origin) ? meta.origin : "self";
-	meta.status = isStatus(meta.status) ? meta.status : "active";
-	meta.stale = meta.stale === true;
 	for (const key of TIMESTAMP_KEYS) meta[key] = toEpoch(meta[key], now);
 	meta.accessCount = typeof meta.accessCount === "number" && Number.isFinite(meta.accessCount) ? meta.accessCount : 0;
 	return { meta: meta as NoteMeta, body };

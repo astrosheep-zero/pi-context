@@ -6,10 +6,10 @@ import { earliestMatchOffsetChars } from "../text-match.js";
 import { assertAddress, assertGlobPattern, addressFor, globToRegExp } from "./address.js";
 import { snapshotNotesContext, type NotesContext } from "./context.js";
 import { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "./constants.js";
-import { isOrigin, isScope, parseNote, serializeNote, stripLeadingFrontmatter, type NoteMeta, type NoteStatus, type Origin } from "./frontmatter.js";
+import { isOrigin, isScope, localIso, parseNote, serializeNote, stripLeadingFrontmatter, type NoteMeta, type Origin } from "./frontmatter.js";
 import { namespaceSlugs, physicalPath, scopeDir, SLUG_PATTERN, type Scope } from "./paths.js";
 
-export type { NoteMeta, NoteStatus, Origin, Scope };
+export type { NoteMeta, Origin, Scope };
 
 export type NoteErrorCode = "not_found" | "ambiguous_edit" | "no_match" | "nothing_to_do" | "too_large" | "invalid_scope" | "invalid_origin";
 
@@ -31,13 +31,13 @@ export type NoteRow = { address: string; scope: Scope; path: string; meta: NoteM
 export type NoteMatch = { line: number; text: string; offsetChars: number };
 export type NoteSearchRow = { address: string; scope: Scope; path: string; meta: NoteMeta; matches: NoteMatch[] };
 export type EditOperation = { oldText: string; newText: string };
-export type WriteOptions = { origin?: Origin; stale?: boolean };
-export type EditOptions = { origin?: Origin; stale?: boolean; replaceAll?: boolean };
+export type WriteOptions = { origin?: Origin };
+export type EditOptions = { origin?: Origin; crumpled?: boolean; replaceAll?: boolean };
 export type NotesQuery = (
 	| { scope?: undefined; who?: never }
 	| { scope: "session" | "project" | "human"; who?: never }
 	| { scope: "agent" | "model"; who?: string }
-) & { pattern?: string };
+) & { pattern?: string; wastebasket?: boolean };
 export type NoteReadResult = { meta: NoteMeta; body: string; text: string; resolvedScope: Scope };
 export type NoteWriteResult = { meta: NoteMeta };
 export type NoteChange =
@@ -248,8 +248,6 @@ export function createNotesStore(input: NotesContext): NotesStore {
 			const meta: NoteMeta = existing ?? {
 				scope,
 				origin,
-				status: "active",
-				stale: false,
 				createdAt: now,
 				updatedAt: now,
 				lastAccessed: now,
@@ -258,8 +256,7 @@ export function createNotesStore(input: NotesContext): NotesStore {
 			};
 			meta.scope = scope;
 			meta.origin = origin;
-			meta.status = "active";
-			meta.stale = stableOptions.stale ?? false;
+			delete meta.crumpledAt;
 			meta.updatedAt = now;
 			const serialized = serializeNote(meta, cleanBody);
 			assertSerializedSize(serialized);
@@ -293,8 +290,8 @@ export function createNotesStore(input: NotesContext): NotesStore {
 		assertWritablePath(destination.path);
 		const scope = assertScope(destination.scope);
 		assertWritableHome(scope, destination.who, context);
-		if (operations.length === 0 && stableOptions.origin === undefined && stableOptions.stale === undefined) {
-			throw new NoteError("nothing_to_do", "nothing to do: provide edits or at least one of origin, stale");
+		if (operations.length === 0 && stableOptions.origin === undefined && stableOptions.crumpled === undefined) {
+			throw new NoteError("nothing_to_do", "nothing to do: provide edits or at least one of origin, crumpled");
 		}
 		const path = physicalPath(scope, destination.path, context, destination.who);
 		return withPathQueue(path, async () => {
@@ -322,12 +319,14 @@ export function createNotesStore(input: NotesContext): NotesStore {
 				}
 			});
 			if (stableOptions.origin !== undefined) meta.origin = assertOrigin(stableOptions.origin);
-			if (stableOptions.stale !== undefined) meta.stale = stableOptions.stale;
-			meta.updatedAt = Date.now();
+			if (stableOptions.crumpled === true && meta.crumpledAt === undefined) meta.crumpledAt = localIso(Date.now());
+			if (stableOptions.crumpled === false) delete meta.crumpledAt;
+			const bodyChanged = body !== next;
+			const originChanged = beforeMeta.origin !== meta.origin;
+			if (bodyChanged || originChanged) meta.updatedAt = Date.now();
 			const serialized = serializeNote(meta, next);
 			assertSerializedSize(serialized);
-			const bodyChanged = body !== next;
-			const metadataChanged = beforeMeta.origin !== meta.origin || beforeMeta.stale !== meta.stale;
+			const metadataChanged = originChanged || beforeMeta.crumpledAt !== meta.crumpledAt;
 			let change: NoteChange;
 			if (bodyChanged && metadataChanged) change = { kind: "file", before: raw, after: serialized };
 			else if (bodyChanged) change = { kind: "body", before: body, after: next };
@@ -351,6 +350,7 @@ export function createNotesStore(input: NotesContext): NotesStore {
 				const raw = await withPathQueue(fullPath, () => readFile(fullPath, "utf8"));
 				const { meta, body } = parseNote(raw);
 				meta.scope = scope;
+				if ((meta.crumpledAt !== undefined) !== (options.wastebasket === true)) continue;
 				yield { address, scope, path, meta, body };
 			}
 		}

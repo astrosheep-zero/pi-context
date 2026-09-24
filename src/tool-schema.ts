@@ -1,8 +1,8 @@
 import { Type } from "@earendil-works/pi-ai";
 export const nullableString = () => Type.Optional(Type.Union([Type.String(), Type.Null()]));
 export const positiveInteger = () => Type.Optional(Type.Integer({ minimum: 1 }));
-export const historyRole = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool_call"), Type.Literal("tool"), Type.Literal("system"), Type.Literal("developer")]);
-export const historyRoles = () => Type.Optional(Type.Array(historyRole, { minItems: 1, description: "Show exactly these roles. user is a human turn; assistant is visible model text; tool_call is one invocation; tool is one result; system is a native compaction or branch summary; developer is any extension-injected message, including every custom_message." }));
+export const historyRole = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool"), Type.Literal("context")]);
+export const historyRoles = () => Type.Optional(Type.Array(historyRole, { minItems: 1, description: "Any of user, assistant, tool, context." }));
 
 /** Search query parameter: one literal, or several literals combined with OR. */
 export const searchQuery = () => Type.Union([Type.String(), Type.Array(Type.String(), { minItems: 1 })]);

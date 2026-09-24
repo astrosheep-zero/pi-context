@@ -27,10 +27,11 @@ export function doctor(home: string): string[] {
 			if (fields.has(field[1]!)) report(path, `duplicate metadata key ${field[1]}; keep one value`);
 			fields.set(field[1]!, field[2]!.replace(/^(["'])(.*)\1$/, "$2"));
 		}
-		for (const [key, valid] of Object.entries({ origin: /^(user|self|external)$/, status: /^(active|superseded|pending|archived)$/, stale: /^(true|false)$/, accessCount: /^\d+$/ })) {
+		for (const [key, valid] of Object.entries({ origin: /^(user|self|external)$/, accessCount: /^\d+$/ })) {
 			if (!valid.test(fields.get(key) ?? "")) report(path, `missing/invalid ${key}; repair frontmatter`);
 		}
-		for (const key of ["createdAt", "updatedAt", "lastAccessed"]) {
+		for (const key of ["createdAt", "updatedAt", "lastAccessed", "crumpledAt"]) {
+			if (key === "crumpledAt" && !fields.has(key)) continue;
 			const value = fields.get(key);
 			if (!value || !Number.isFinite(Date.parse(value))) report(path, `missing/invalid ${key}; use an ISO timestamp`);
 		}

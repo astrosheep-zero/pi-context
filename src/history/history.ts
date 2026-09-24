@@ -12,10 +12,10 @@ export type HistoryItem = {
 	content: string;
 	createdAt: string | undefined;
 	toolName?: string;
-	callSeq?: number | null;
-	resultSeq?: number | null;
 	/** Internal pairing key; never serialized. */
 	toolCallId?: string;
+	/** Arguments for a standalone bash execution, already serialized as JSON. */
+	toolArgs?: string;
 	// bashExecution only: the persisted output was truncated and the full text lives on disk.
 	outputTruncated?: boolean;
 	fullOutputPath?: string;
@@ -23,14 +23,21 @@ export type HistoryItem = {
 	toolError?: boolean;
 };
 
-export type HistoryWindow = { windowId: string; createdAt?: string; items: HistoryItem[] };
-export type HistoryProjection = { windows: HistoryWindow[]; highestSeq: number; branchSeqs: Set<number> };
-export type HistoryRole = HistoryItem["role"];
-export type HistoryFilter = {
-	window_id?: string | null;
-	roles?: HistoryRole[] | null;
-	tool_name?: string | null;
+export type HistoryRole = "user" | "assistant" | "tool" | "context";
+export type HistoryEvent = {
+	seq: number;
+	windowId: string;
+	role: HistoryRole;
+	content: string;
+	createdAt: string | undefined;
+	tool?: string;
+	toolError?: boolean;
+	outputTruncated?: boolean;
+	fullOutputPath?: string;
 };
+export type HistoryWindow = { windowId: string; createdAt?: string; items: HistoryEvent[] };
+export type HistoryProjection = { windows: HistoryWindow[]; highestSeq: number; branchSeqs: Set<number>; resultAliases: Map<number, number> };
+export type HistoryFilter = { window_id?: string | null; roles?: HistoryRole[] | null };
 
 function isTextContent(part: unknown): part is TextContent {
 	return typeof part === "object" && part !== null && (part as TextContent).type === "text" && typeof (part as TextContent).text === "string";
@@ -41,7 +48,7 @@ export function contentText(content: unknown): string {
 	return Array.isArray(content) ? content.filter(isTextContent).map((part) => part.text).join("\n") : "";
 }
 
-function mapRole(role: AgentMessage["role"]): HistoryRole | undefined {
+function mapRole(role: AgentMessage["role"]): HistoryItem["role"] | undefined {
 	if (role === "user" || role === "assistant") return role;
 	if (role === "toolResult" || role === "bashExecution") return "tool";
 	if (role === "custom") return "developer";
@@ -68,9 +75,7 @@ function sequenceCount(entry: SessionEntry): number {
 function messageContent(message: AgentMessage): string {
 	switch (message.role) {
 		case "bashExecution":
-			// The command is as much the record as its output: without it the typed line is
-			// unsearchable. Mirrors the tool-call projection below.
-			return message.output ? `${message.command}\n${message.output}` : message.command;
+			return message.output;
 		case "branchSummary":
 		case "compactionSummary":
 			return message.summary;
@@ -79,10 +84,10 @@ function messageContent(message: AgentMessage): string {
 	}
 }
 
-function toolInfo(message: AgentMessage): Pick<HistoryItem, "toolName" | "outputTruncated" | "fullOutputPath" | "toolError" | "toolCallId"> {
+function toolInfo(message: AgentMessage): Pick<HistoryItem, "toolName" | "toolArgs" | "outputTruncated" | "fullOutputPath" | "toolError" | "toolCallId"> {
 	if (message.role === "bashExecution") {
 		// A truncated bash run is only half the record without the on-disk path: surface both.
-		return { toolName: "bash", outputTruncated: message.truncated || undefined, fullOutputPath: message.truncated ? message.fullOutputPath : undefined };
+		return { toolName: "bash", toolArgs: JSON.stringify({ command: message.command }), outputTruncated: message.truncated || undefined, fullOutputPath: message.truncated ? message.fullOutputPath : undefined };
 	}
 	if (message.role !== "toolResult") return {};
 	return { toolName: message.toolName, toolCallId: message.toolCallId, toolError: message.isError === true ? true : undefined };
@@ -99,18 +104,33 @@ function toolCallItems(windowId: string, entry: { id: string; timestamp?: string
 			seq: callSeq,
 			windowId,
 			role: "tool_call",
-			content: JSON.stringify(part.arguments),
+			content: JSON.stringify(part.arguments) ?? "{}",
 			createdAt: entry.timestamp,
 			toolName: part.name,
 			toolCallId: part.id,
-			resultSeq: null,
 		});
 		callIndex += 1;
 	}
 	return items;
 }
 
-/** Build stable file-order addresses and project only the current branch into windows. */
+function toolEvent(item: HistoryItem, result?: HistoryItem): HistoryEvent {
+	const name = item.toolName ?? "unknown";
+	const args = item.role === "tool_call" ? item.content : item.toolArgs ?? "{}";
+	const output = result?.content ?? (item.role === "tool" ? item.content : undefined);
+	return {
+		seq: item.seq,
+		windowId: item.windowId,
+		role: "tool",
+		content: `${name} ${args}${output === undefined ? "" : `\n--- output ---\n${output}`}`,
+		createdAt: item.createdAt,
+		tool: name,
+		...(result?.toolError || item.toolError ? { toolError: true } : {}),
+		...(result?.outputTruncated || item.outputTruncated ? { outputTruncated: true, fullOutputPath: result?.fullOutputPath ?? item.fullOutputPath } : {}),
+	};
+}
+
+/** Build stable internal addresses, then project the active branch into public events. */
 export function historyFromSession(ctx: SessionReader): HistoryProjection {
 	const seqByEntryId = new Map<string, number>();
 	let nextSeq = 1;
@@ -123,16 +143,14 @@ export function historyFromSession(ctx: SessionReader): HistoryProjection {
 	const highestSeq = nextSeq - 1;
 
 	const sessionId = ctx.sessionManager.getSessionId();
-	let window: HistoryWindow = { windowId: rootWindowId(sessionId), items: [] };
-	const windows = [window];
+	let window: { windowId: string; createdAt?: string; items: HistoryItem[] } = { windowId: rootWindowId(sessionId), items: [] };
+	const rawWindows = [window];
 	const branchSeqs = new Set<number>();
-	const callsById = new Map<string, number>();
-	const resultsById = new Map<string, number>();
 
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (isWindowMarker(entry)) {
 			window = { windowId: entry.data.windowId, createdAt: entry.timestamp, items: [] };
-			windows.push(window);
+			rawWindows.push(window);
 			continue;
 		}
 		const entrySeq = seqByEntryId.get(entry.id);
@@ -153,17 +171,10 @@ export function historyFromSession(ctx: SessionReader): HistoryProjection {
 				content: messageContent(entry.message),
 				createdAt: entry.timestamp,
 				...toolInfo(entry.message),
-				...(role === "tool" ? { callSeq: null } : {}),
 			});
 			const calls = toolCallItems(window.windowId, entry, entry.message, entrySeq);
-			for (const call of calls) {
-				branchSeqs.add(call.seq);
-				if (call.toolCallId && !callsById.has(call.toolCallId)) callsById.set(call.toolCallId, call.seq);
-			}
+			for (const call of calls) branchSeqs.add(call.seq);
 			window.items.push(...calls);
-			if (entry.message.role === "toolResult" && entry.message.toolCallId && !resultsById.has(entry.message.toolCallId)) {
-				resultsById.set(entry.message.toolCallId, entrySeq);
-			}
 			continue;
 		}
 		if (entry.type === "custom_message") {
@@ -177,14 +188,35 @@ export function historyFromSession(ctx: SessionReader): HistoryProjection {
 		}
 	}
 
-	for (const item of windows.flatMap((current) => current.items)) {
-		if (item.role === "tool_call" && item.toolCallId) item.resultSeq = resultsById.get(item.toolCallId) ?? null;
-		if (item.role === "tool" && item.toolCallId) item.callSeq = callsById.get(item.toolCallId) ?? null;
+	const raw = rawWindows.flatMap((current) => current.items);
+	const resultsById = new Map<string, HistoryItem>();
+	for (const item of raw) {
+		if (item.role === "tool" && item.toolCallId && !resultsById.has(item.toolCallId)) resultsById.set(item.toolCallId, item);
 	}
-	return { windows, highestSeq, branchSeqs };
+	const resultAliases = new Map<number, number>();
+	const consumed = new Set<number>();
+	const windows: HistoryWindow[] = rawWindows.map((current) => ({
+		windowId: current.windowId,
+		...(current.createdAt ? { createdAt: current.createdAt } : {}),
+		items: current.items.flatMap((item): HistoryEvent[] => {
+			if (consumed.has(item.seq)) return [];
+			if (item.role === "tool_call") {
+				const result = item.toolCallId ? resultsById.get(item.toolCallId) : undefined;
+				const paired = result && result.seq > item.seq && !consumed.has(result.seq) ? result : undefined;
+				if (paired) {
+					consumed.add(paired.seq);
+					resultAliases.set(paired.seq, item.seq);
+				}
+				return [toolEvent(item, paired)];
+			}
+			if (item.role === "tool") return [toolEvent(item)];
+			return [{ seq: item.seq, windowId: item.windowId, role: item.role === "system" || item.role === "developer" ? "context" : item.role, content: item.content, createdAt: item.createdAt }];
+		}),
+	}));
+	return { windows, highestSeq, branchSeqs, resultAliases };
 }
 
-export function visibleItem(item: HistoryItem, maxChars = HISTORY_PREVIEW_CHARS) {
+export function visibleItem(item: HistoryEvent, maxChars = HISTORY_PREVIEW_CHARS) {
 	const characters = Array.from(item.content);
 	const truncated = characters.length > maxChars;
 	return {
@@ -192,18 +224,16 @@ export function visibleItem(item: HistoryItem, maxChars = HISTORY_PREVIEW_CHARS)
 		window_id: item.windowId,
 		role: item.role,
 		created_at: item.createdAt ?? null,
-		tool_name: item.toolName ?? null,
-		...(item.role === "tool_call" ? { result_seq: item.resultSeq ?? null } : {}),
-		...(item.role === "tool" ? { call_seq: item.callSeq ?? null } : {}),
+		...(item.tool ? { tool: item.tool } : {}),
 		...(item.outputTruncated ? { output_truncated: true, full_output_path: item.fullOutputPath ?? null } : {}),
 		...(item.toolError ? { tool_error: true } : {}),
 		truncated,
 		total_chars: characters.length,
-		truncated_content: truncated ? characters.slice(0, maxChars).join("") : item.content,
+		content: truncated ? characters.slice(0, maxChars).join("") : item.content,
 	};
 }
 
-export function allItems(projection: HistoryProjection): HistoryItem[] {
+export function allItems(projection: HistoryProjection): HistoryEvent[] {
 	return projection.windows.flatMap((current) => current.items);
 }
 
@@ -213,19 +243,11 @@ export function unknownWindowId(projection: HistoryProjection, params: HistoryFi
 	return known.includes(params.window_id) ? undefined : { message: `unknown window_id "${params.window_id}"`, known };
 }
 
-export function validateHistoryFilters(params: HistoryFilter): string | undefined {
-	if (typeof params.tool_name === "string" && params.roles && params.roles.some((role) => role !== "tool_call" && role !== "tool")) {
-		return 'tool_name only supports roles "tool_call" and "tool"';
-	}
-	return undefined;
-}
-
-/** role/tool/custom filtering is applied before default conversation visibility. */
-export function filteredItems(projection: HistoryProjection, params: HistoryFilter, mode: "list" | "search"): HistoryItem[] {
+/** Default list is a conversation; explicit roles and search show the requested events. */
+export function filteredItems(projection: HistoryProjection, params: HistoryFilter, mode: "list" | "search"): HistoryEvent[] {
 	let items = allItems(projection);
 	if (typeof params.window_id === "string") items = items.filter((item) => item.windowId === params.window_id);
 	if (params.roles) items = items.filter((item) => params.roles!.includes(item.role));
-	if (typeof params.tool_name === "string") items = items.filter((item) => (item.role === "tool_call" || item.role === "tool") && item.toolName === params.tool_name);
-	if (!params.roles && typeof params.tool_name !== "string" && mode === "list") items = items.filter((item) => (item.role === "user" || item.role === "assistant" || item.role === "system") && item.content !== "");
+	if (!params.roles && mode === "list") items = items.filter((item) => (item.role === "user" || item.role === "assistant") && item.content !== "");
 	return items.sort((a, b) => a.seq - b.seq);
 }

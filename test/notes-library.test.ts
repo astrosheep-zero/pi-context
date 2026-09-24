@@ -25,12 +25,24 @@ test("standalone notes API persists camelCase metadata, edits, lists and searche
 	assert.deepEqual(edited.change, { kind: "body", before: "alpha\nneedle 😀", after: "beta\nneedle 😀" });
 	assert.equal(edited.resolvedScope, read.resolvedScope);
 	assert.equal(edited.applied, 1);
-	const metadataEdit = await notes.edit("checkpoint", undefined, { stale: true });
+	const updatedBefore = (await notes.read("checkpoint"))!.meta.updatedAt;
+	const metadataEdit = await notes.edit("checkpoint", undefined, { crumpled: true });
 	assert.equal(metadataEdit.change.kind, "metadata");
-	assert.match(metadataEdit.change.before, /\nstale: false\n/);
-	assert.match(metadataEdit.change.after, /\nstale: true\n/);
+	assert.equal(metadataEdit.change.before.includes("crumpledAt"), false);
+	assert.match(metadataEdit.change.after, /\ncrumpledAt: \d{4}-\d{2}-\d{2}T/);
 	assert.equal(metadataEdit.change.after.includes("needle"), false, "metadata-only diff excludes body");
-	assert.equal((await notes.list())[0]?.meta.stale, true);
+	assert.equal((await notes.list()).some((row) => row.address === "checkpoint.md"), false, "a crumpled note leaves the live list");
+	assert.equal((await notes.search(["needle"])).length, 0, "search also skips crumpled notes");
+	const basket = (await notes.list({ wastebasket: true }))[0]!;
+	assert.equal(basket.address, "checkpoint.md");
+	assert.ok(basket.meta.crumpledAt);
+	assert.equal(basket.meta.updatedAt, updatedBefore, "crumpling does not bump updatedAt");
+	const crumpledAt = basket.meta.crumpledAt;
+	await notes.edit("checkpoint", undefined, { crumpled: true });
+	assert.equal((await notes.list({ wastebasket: true }))[0]?.meta.crumpledAt, crumpledAt, "re-crumpling keeps the original time");
+	await notes.edit("checkpoint", undefined, { crumpled: false });
+	assert.equal((await notes.list()).some((row) => row.address === "checkpoint.md"), true, "smoothing returns the note to the live list");
+	assert.equal((await notes.list({ wastebasket: true })).length, 0);
 	const matches = await notes.search(["needle"]);
 	assert.equal(matches[0]?.matches[0]?.line, 2);
 	const text = (await notes.read("checkpoint"))!.text;
@@ -49,12 +61,13 @@ test("standalone notes API persists camelCase metadata, edits, lists and searche
 	assert.equal(rewritten.meta.sourceWindow, "pcw:test");
 	assert.equal(rewritten.meta.recurrenceCount, 2);
 	assert.deepEqual(rewritten.meta.recurrenceWindows, ["pcw:one", "pcw:two"]);
-	assert.equal(rewritten.meta.stale, false);
-	const combined = await moved.edit("checkpoint", [{ oldText: "new", newText: "final" }], { stale: true });
+	assert.equal(rewritten.meta.crumpledAt, undefined, "writing always produces an uncrumpled note");
+	const combined = await moved.edit("checkpoint", [{ oldText: "new", newText: "final" }], { crumpled: true });
 	assert.equal(combined.change.kind, "file");
-	assert.match(combined.change.after, /\nstale: true\n/);
+	assert.match(combined.change.after, /\ncrumpledAt: \d{4}-\d{2}-\d{2}T/);
 	assert.match(combined.change.after, /final body$/);
-	assert.deepEqual((await moved.edit("checkpoint", undefined, { stale: true })).change, { kind: "none", before: "", after: "" });
+	assert.deepEqual((await moved.edit("checkpoint", undefined, { crumpled: true })).change, { kind: "none", before: "", after: "" });
+	assert.equal((await moved.write("checkpoint", "revived body")).meta.crumpledAt, undefined, "writing a crumpled address smooths it");
 });
 
 test("same-file read/modify/write operations serialize across stores and markdown aliases", async (t) => {
@@ -135,7 +148,7 @@ test("invalid addressing and failed edits leave stored bytes untouched without p
 	await assert.rejects(() => notes.edit("edit", [{ oldText: "beta", newText: "B" }]), (error: unknown) => error instanceof NoteError && error.code === "ambiguous_edit" && error.lineNumbers?.join(",") === "2,3");
 	await assert.rejects(() => notes.edit("edit", [{ oldText: "alpha", newText: "A" }, { oldText: "absent", newText: "X" }]), (error: unknown) => error instanceof NoteError && error.code === "no_match" && error.editIndex === 1);
 	assert.equal(readFileSync(path, "utf8"), before);
-	await assert.rejects(() => notes.edit("absent", undefined, { stale: true }), (error: unknown) => error instanceof NoteError && error.code === "not_found");
+	await assert.rejects(() => notes.edit("absent", undefined, { crumpled: true }), (error: unknown) => error instanceof NoteError && error.code === "not_found");
 	await notes.edit("edit", [{ oldText: "alpha", newText: "A" }]);
 	assert.equal((await notes.read("edit"))?.body, "A\nbeta\nbeta", "failed operations do not poison later queue work");
 });

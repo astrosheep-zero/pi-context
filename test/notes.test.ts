@@ -12,6 +12,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { TSchema } from "typebox";
+import { Check } from "typebox/value";
 import { parseNote } from "../src/notes/frontmatter.js";
 import { projectKey } from "../src/notes/paths.js";
 import type { Scope } from "../src/notes/index.js";
@@ -33,8 +35,8 @@ function setUpdatedAt(scope: Scope, path: string, ctx: ReturnType<typeof context
 }
 
 type Meta = Record<string, unknown>;
-type Listed = { files: Array<{ address: string; stale: boolean; updated_at: string }> };
-type Searched = { files: Array<{ address: string; stale: boolean; updated_at: string; matches_total: number; matches: Array<{ line: number; text: string; offset_chars: number; truncated: boolean }> }> };
+type Listed = { files: Array<{ address: string; updated_at: string; crumpled_at?: string }> };
+type Searched = { files: Array<{ address: string; updated_at: string; crumpled_at?: string; matches_total: number; matches: Array<{ line: number; text: string; offset_chars: number; truncated: boolean }> }> };
 
 function assertNoPublicScope(value: unknown, label: string): void {
 	if (Array.isArray(value)) {
@@ -62,6 +64,24 @@ test("exactly the five notes tools are registered; the legacy five are gone", ()
 	assert.equal(captured.tools.get("notes_read")?.executionMode, undefined);
 });
 
+test("note schemas drop status/stale and expose crumpled plus wastebasket", () => {
+	const captured = makeExtension(manager());
+	const schema = (name: string): TSchema => captured.tools.get(name)!.parameters as TSchema;
+	const write = schema("notes_write");
+	assert.equal(Check(write, { address: "a.md", content: "x" }), true);
+	assert.equal(Check(write, { address: "a.md", content: "x", stale: true }), false, "notes_write no longer accepts stale");
+	assert.equal(Check(write, { address: "a.md", content: "x", crumpled: true }), false, "notes_write does not accept crumpled");
+	const edit = schema("notes_edit");
+	assert.equal(Check(edit, { address: "a.md", crumpled: true }), true);
+	assert.equal(Check(edit, { address: "a.md", stale: true }), false, "notes_edit no longer accepts stale");
+	assert.equal(Check(edit, { address: "a.md", status: "archived" }), false, "status is gone");
+	for (const name of ["notes_list", "notes_search"]) {
+		const base = name === "notes_search" ? { query: "x" } : {};
+		assert.equal(Check(schema(name), { ...base, wastebasket: true }), true, `${name} accepts wastebasket`);
+		assert.equal(Check(schema(name), { ...base, status: "active" }), false, `${name} rejects status`);
+	}
+});
+
 test("write lands a real markdown file with harness frontmatter and a pure body", async () => {
 	const root = freshRoot();
 	const session = manager();
@@ -79,10 +99,13 @@ test("write lands a real markdown file with harness frontmatter and a pure body"
 	const raw = readFileSync(file, "utf8");
 	assert.match(raw, /^---\n/, "the file opens with frontmatter");
 	assert.match(raw, /\n---\n\nhello$/, "frontmatter is followed by a blank line and the exact body");
-	for (const [key, value] of [["origin", "self"], ["status", "active"], ["stale", "false"], ["accessCount", "0"]]) {
+	for (const [key, value] of [["origin", "self"], ["accessCount", "0"]]) {
 		assert.match(raw, new RegExp(`^${key}: ${value}$`, "m"), `frontmatter carries ${key}=${value}`);
 	}
 	assert.equal(/^scope:/m.test(raw), false, "scope is derived from the file home, never persisted");
+	assert.equal(/^status:/m.test(raw), false, "status is gone from persisted notes");
+	assert.equal(/^stale:/m.test(raw), false, "the boolean stale flag is gone from persisted notes");
+	assert.equal(/^crumpledAt:/m.test(raw), false, "a fresh note is uncrumpled");
 	for (const key of ["createdAt", "updatedAt", "lastAccessed"]) {
 		assert.match(raw, new RegExp(`^${key}: \\d{4}-\\d{2}-\\d{2}T`, "m"), `frontmatter renders ${key} via localIso`);
 	}
@@ -174,8 +197,6 @@ test("unrecognized metadata remains ordinary frontmatter; invalid project owners
 	mkdirSync(scopeDir("session", ctx), { recursive: true });
 	writeFileSync(legacyFile, `---
 origin: self
-status: active
-stale: false
 created_at: 2026-01-01T00:00:00.000+00:00
 updated_at: 2026-01-01T00:00:00.000+00:00
 last_accessed: 2026-01-01T00:00:00.000+00:00
@@ -202,8 +223,6 @@ legacy body`);
 	const invalidFile = physicalPath("session", "invalid.md", ctx);
 	writeFileSync(invalidFile, `---
 origin: self
-status: active
-stale: false
 createdAt: 2026-01-01T00:00:00.000+00:00
 updatedAt: 2026-01-01T00:00:00.000+00:00
 lastAccessed: 2026-01-01T00:00:00.000+00:00
@@ -265,7 +284,7 @@ test("nothing-to-do, not-found, atomic batches, and replace_all zero-match are n
 	const empty = resultJson<{ error: string }>(await call(captured, "notes_edit", { address: "edit.md", edits: [] }, ctx));
 	assert.match(empty.error, /nothing to do/, "an empty edits list with no setters is also nothing to do");
 
-	const editMissing = resultJson<{ error: string }>(await call(captured, "notes_edit", { address: "missing.md", stale: true }, ctx));
+	const editMissing = resultJson<{ error: string }>(await call(captured, "notes_edit", { address: "missing.md", crumpled: true }, ctx));
 	assert.equal(editMissing.error, "note not found");
 	const readMissing = resultJson<{ error: string; address: string }>(await call(captured, "notes_read", { address: "missing.md" }, ctx));
 	assert.equal(readMissing.error, "note not found");
@@ -340,8 +359,7 @@ test("list and search merge scopes and carry addresses; the path jail rejects es
 	const listed = resultJson<Listed>(await call(captured, "notes_list", {}, ctx));
 	assert.deepEqual([...listed.files].map((file) => file.address).sort(), ["@human/three.md", "@project/two.md", "one.md"], "every merged row carries its full address");
 	for (const row of listed.files) {
-		assert.deepEqual(Object.keys(row).sort(), ["address", "stale", "updated_at"]);
-		assert.equal(row.stale, false);
+		assert.deepEqual(Object.keys(row).sort(), ["address", "updated_at"]);
 	}
 	const scoped = resultJson<Listed>(await call(captured, "notes_list", { pattern: "@human/**" }, ctx));
 	assert.deepEqual(scoped.files.map((file) => file.address), ["@human/three.md"], "an address-pattern filter narrows the set");
@@ -401,14 +419,14 @@ test("Pi adapter resolves agent and switched model identity on each notes call a
 		assert.ok(boot.includes("@models/second-model/private.md"));
 		assert.equal(boot.includes("@models/first-model/private.md"), false);
 		assert.match(resultRead(await call(captured, "notes_read", { address: "@models/first-model/private.md" }, ctx)).content, /first model note$/);
-		const refused = resultJson<{ error: string }>(await call(captured, "notes_edit", { address: "@models/first-model/private.md", stale: true }, ctx));
+		const refused = resultJson<{ error: string }>(await call(captured, "notes_edit", { address: "@models/first-model/private.md", crumpled: true }, ctx));
 		assert.match(refused.error, /not your home/);
 		assert.match(readFileSync(join(root, "models/first-model/private.md"), "utf8"), /first model note$/);
 	});
 });
 
 const FRONTMATTER = (body: string) =>
-	`---\norigin: self\nstatus: active\nstale: false\ncreatedAt: 2026-01-01T00:00:00.000+00:00\nupdatedAt: 2026-01-01T00:00:00.000+00:00\nlastAccessed: 2026-01-01T00:00:00.000+00:00\naccessCount: 0\n---\n\n${body}`;
+	`---\norigin: self\ncreatedAt: 2026-01-01T00:00:00.000+00:00\nupdatedAt: 2026-01-01T00:00:00.000+00:00\nlastAccessed: 2026-01-01T00:00:00.000+00:00\naccessCount: 0\n---\n\n${body}`;
 
 async function withAgent(name: string | undefined, run: () => Promise<void>): Promise<void> {
 	const previous = process.env.PI_NOTES_AGENT;

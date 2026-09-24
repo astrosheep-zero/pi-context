@@ -12,7 +12,6 @@ export type {
 	NoteReadResult,
 	NoteRow,
 	NoteSearchRow,
-	NoteStatus,
 	NoteWriteResult,
 	NotesQuery,
 	NotesStore,

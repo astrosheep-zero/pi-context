@@ -33,7 +33,7 @@ test("notes_list and notes_search are recent-first snapshots with narrowing hint
 		const project = address.startsWith("@project/");
 		const path = physicalPath(project ? "project" : "session", address.replace(/^@project\//, ""), ctx);
 		mkdirSync(dirname(path), { recursive: true });
-		writeFileSync(path, `---\nscope: ${project ? "project" : "session"}\norigin: self\nstatus: active\nstale: false\ncreatedAt: ${localIso(updated - 1000)}\nupdatedAt: ${localIso(updated)}\nlastAccessed: ${localIso(updated)}\naccessCount: 0\n---\n\n${content}`);
+		writeFileSync(path, `---\nscope: ${project ? "project" : "session"}\norigin: self\ncreatedAt: ${localIso(updated - 1000)}\nupdatedAt: ${localIso(updated)}\nlastAccessed: ${localIso(updated)}\naccessCount: 0\n---\n\n${content}`);
 	};
 	put("old.md", base + 1);
 	put("new.md", base + 3);
@@ -62,7 +62,7 @@ test("notes_list reports omitted files when the wire budget truncates the snapsh
 		const address = `bulk/note-${String(index).padStart(3, "0")}.md`;
 		const path = physicalPath("session", address, ctx);
 		mkdirSync(dirname(path), { recursive: true });
-		writeFileSync(path, `---\nscope: session\norigin: self\nstatus: active\nstale: false\ncreatedAt: ${localIso(timestamp)}\nupdatedAt: ${localIso(timestamp + index)}\nlastAccessed: ${localIso(timestamp)}\naccessCount: 0\n---\n\nbody`);
+		writeFileSync(path, `---\nscope: session\norigin: self\ncreatedAt: ${localIso(timestamp)}\nupdatedAt: ${localIso(timestamp + index)}\nlastAccessed: ${localIso(timestamp)}\naccessCount: 0\n---\n\nbody`);
 	}
 	const result = resultJson<{ files: Array<{ address: string }>; more: number }>(await call(captured, "notes_list", {}, ctx));
 	assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
@@ -78,7 +78,7 @@ test("notes_list is most-recently-updated first across merged scopes", async () 
 	const put = (scope: "session" | "project" | "human", path: string, updated: number) => {
 		const file = physicalPath(scope, path, ctx);
 		mkdirSync(dirname(file), { recursive: true });
-		writeFileSync(file, `---\nscope: ${scope}\norigin: self\nstatus: active\nstale: false\ncreatedAt: ${localIso(updated - 1000)}\nupdatedAt: ${localIso(updated)}\nlastAccessed: ${localIso(updated)}\naccessCount: 0\n---\n\nbody`);
+		writeFileSync(file, `---\nscope: ${scope}\norigin: self\ncreatedAt: ${localIso(updated - 1000)}\nupdatedAt: ${localIso(updated)}\nlastAccessed: ${localIso(updated)}\naccessCount: 0\n---\n\nbody`);
 	};
 	const base = 1_700_000_000_000;
 	put("session", "b.md", base + 10);
@@ -127,31 +127,38 @@ test("notes are real files that persist across sessions and round-trip Unicode",
 	await assert.rejects(() => call(captured, "notes_write", { address: "../escape", content: "x" }, ctx), /unsupported component/);
 });
 
-test("stale lifecycle: writes and metadata-only edits close and revive a note", async () => {
+test("crumple lifecycle: metadata-only edits close and smooth a note without touching updatedAt", async () => {
 	const sm = manager();
 	const captured = makeExtension(sm);
 	const ctx = context(sm);
 
 	await call(captured, "notes_write", { address: "journal.md", content: "log line" }, ctx);
+	const updatedBefore = (await listNotes(ctx, { scope: "session" }))[0]!.meta.updatedAt;
 
-	// metadata-only: content unchanged, flag set, applied 0
-	const markOnly = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { address: "journal.md", stale: true }, ctx));
+	// metadata-only: content unchanged, applied 0, and the recorded time is the original one
+	const markOnly = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { address: "journal.md", crumpled: true }, ctx));
 	assert.equal(markOnly.applied, 0);
-	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.stale, true);
-	assert.equal(resultRead(await call(captured, "notes_read", { address: "journal.md" }, ctx)).content.endsWith("log line"), true, "mark-only leaves content unchanged");
+	assert.match(markOnly.diff, /^\+\s*\d+\s+crumpledAt: \d{4}-\d{2}-\d{2}T/m);
+	assert.deepEqual(await listNotes(ctx, { scope: "session" }), [], "a crumpled note leaves the live list");
+	const basket = (await listNotes(ctx, { scope: "session", wastebasket: true }))[0]!;
+	assert.ok(basket.meta.crumpledAt);
+	assert.equal(basket.meta.updatedAt, updatedBefore, "crumpling does not change updatedAt");
+	assert.equal(resultRead(await call(captured, "notes_read", { address: "journal.md" }, ctx)).content.endsWith("log line"), true, "read still reaches a crumpled note");
 
-	// explicit revive
-	const revived = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { address: "journal.md", stale: false }, ctx));
-	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.stale, false, "stale:false revives");
+	// re-crumpling keeps the first time; smoothing empties the basket
+	await call(captured, "notes_edit", { address: "journal.md", crumpled: true }, ctx);
+	assert.equal((await listNotes(ctx, { scope: "session", wastebasket: true }))[0]?.meta.crumpledAt, basket.meta.crumpledAt);
+	await call(captured, "notes_edit", { address: "journal.md", crumpled: false }, ctx);
+	assert.deepEqual(await listNotes(ctx, { scope: "session", wastebasket: true }), []);
+	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.crumpledAt, undefined);
 
-	// write+stale closure then plain write revival
-	await call(captured, "notes_write", { address: "journal.md", content: "final", stale: true }, ctx);
-	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.stale, true);
+	// writing to a crumpled address always produces an uncrumpled note
+	await call(captured, "notes_edit", { address: "journal.md", crumpled: true }, ctx);
 	await call(captured, "notes_write", { address: "journal.md", content: "reopened" }, ctx);
-	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.stale, false, "writing without stale revives");
+	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.crumpledAt, undefined, "writing always produces an uncrumpled note");
 
 	// metadata-only on a missing path is the typed not-found arm
-	const missing = resultJson<{ error?: string }>(await call(captured, "notes_edit", { address: "missing.md", stale: true }, ctx));
+	const missing = resultJson<{ error?: string }>(await call(captured, "notes_edit", { address: "missing.md", crumpled: true }, ctx));
 	assert.equal(missing.error, "note not found");
 });
 
@@ -181,8 +188,6 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 		meta: {
 			scope,
 			origin: "self",
-			status: "active",
-			stale: false,
 			createdAt: updated,
 			updatedAt: updated,
 			lastAccessed: updated,
@@ -240,15 +245,15 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 
 	const empty = await loadNotesSnapshot(ctx, () => []);
 	assert.match(renderBootBlock({ ...renderData, notes: empty }), /# Your notes\n\n： None yet\. A blank slate is a fine place to start — just don't finish there\./);
-	const staleNote = note("session", "stale.md", "stale.md", "SHOULD_NOT_SHOW");
+	const crumpledNote = note("session", "crumpled.md", "crumpled.md", "SHOULD_NOT_SHOW");
 	const mapAndUnicode = await loadNotesSnapshot(ctx, (_ctx, scope) => scope === "session" ? [
 		note("session", "MAP.md", "MAP.md", "SESSION_MAP_BODY"),
 		note("session", "unicode.md", "unicode.md", "🐑字"),
-		{ ...staleNote, meta: { ...staleNote.meta, stale: true } },
+		{ ...crumpledNote, meta: { ...crumpledNote.meta, crumpledAt: localIso(updated) } },
 	] : []);
 	const mapAndUnicodeText = renderBootBlock({ ...renderData, notes: mapAndUnicode });
 	assert.match(mapAndUnicodeText, /SESSION_MAP_BODY[\s\S]*- unicode\.md \| 2 chars \| (?:just now|\d+s ago)/);
-	assert.equal(mapAndUnicodeText.includes("stale.md"), false);
+	assert.equal(mapAndUnicodeText.includes("crumpled.md"), false);
 	assert.equal(mapAndUnicodeText.includes("- MAP.md"), false);
 	assert.equal(mapAndUnicodeText.includes("## The human"), false, "empty sections are omitted");
 
