@@ -24,6 +24,53 @@ import { installExtensionTestHooks } from "./helpers/extension-test-environment.
 
 const testEnvironment = installExtensionTestHooks("pi-context-integration");
 
+test("notes_list and notes_search are recent-first snapshots with narrowing hints", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const base = 1_700_000_000_000;
+	const put = (address: string, updated: number, content = "needle") => {
+		const project = address.startsWith("@project/");
+		const path = physicalPath(project ? "project" : "session", address.replace(/^@project\//, ""), ctx);
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(path, `---\nscope: ${project ? "project" : "session"}\norigin: self\nstatus: active\nstale: false\ncreatedAt: ${localIso(updated - 1000)}\nupdatedAt: ${localIso(updated)}\nlastAccessed: ${localIso(updated)}\naccessCount: 0\n---\n\n${content}`);
+	};
+	put("old.md", base + 1);
+	put("new.md", base + 3);
+	put("@project/design.md", base + 2);
+
+	const listed = resultJson<{ files: Array<{ address: string; updated_at: string }>; more: number }>(await call(captured, "notes_list", { limit: 2 }, ctx));
+	assert.deepEqual(listed.files.map((file) => file.address), ["new.md", "@project/design.md"]);
+	assert.equal(listed.more, 1);
+	assert.deepEqual(Object.keys(listed).sort(), ["files", "more"]);
+
+	const searched = resultJson<{ files: Array<{ address: string; updated_at: string }>; more: number }>(await call(captured, "notes_search", { query: "needle", limit: 2 }, ctx));
+	assert.deepEqual(searched.files.map((file) => file.address), ["new.md", "@project/design.md"]);
+	assert.equal(searched.more, 1);
+
+	const narrowed = resultJson<{ files: Array<{ address: string }>; more: number }>(await call(captured, "notes_list", { pattern: "@project/**" }, ctx));
+	assert.deepEqual(narrowed.files.map((file) => file.address), ["@project/design.md"]);
+	assert.equal(narrowed.more, 0);
+});
+
+test("notes_list reports omitted files when the wire budget truncates the snapshot", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const timestamp = 1_700_000_000_000;
+	for (let index = 0; index < 400; index++) {
+		const address = `bulk/note-${String(index).padStart(3, "0")}.md`;
+		const path = physicalPath("session", address, ctx);
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(path, `---\nscope: session\norigin: self\nstatus: active\nstale: false\ncreatedAt: ${localIso(timestamp)}\nupdatedAt: ${localIso(timestamp + index)}\nlastAccessed: ${localIso(timestamp)}\naccessCount: 0\n---\n\nbody`);
+	}
+	const result = resultJson<{ files: Array<{ address: string }>; more: number }>(await call(captured, "notes_list", {}, ctx));
+	assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
+	assert.ok(result.files.length > 0 && result.files.length < 400);
+	assert.equal(result.more, 400 - result.files.length);
+	assert.equal(result.files[0]?.address, "bulk/note-399.md", "the snapshot retains the newest rows first");
+});
+
 test("notes_list is most-recently-updated first across merged scopes", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
@@ -302,19 +349,14 @@ test("an over-budget note search match is a named prefix with an honest line add
 	await call(captured, "notes_write", { address: "a.md", content: "needle small" }, ctx);
 	await call(captured, "notes_write", { address: "search.md", content: hugeLine }, ctx);
 	const pages: Array<{ address: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }> }> = [];
-	let cursor = 0;
-	let next: number | null = 0;
-	while (next !== null) {
-		const found = resultJson<{ files: Array<{ address: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }> }>; next_cursor: number | null }>(
-			await call(captured, "notes_search", { query: "needle", cursor }, ctx),
-		);
-		assert.ok(Buffer.byteLength(JSON.stringify(found), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "match result stays within budget");
-		pages.push(...found.files);
-		next = found.next_cursor;
-		if (next !== null) cursor = next;
-	}
-	assert.deepEqual(pages.map((file) => file.address), ["a.md", "search.md"], "pagination reaches the oversized file instead of looping");
-	const oversized = pages[1]!;
+	const found = resultJson<{ files: Array<{ address: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }> }>; more: number }>(
+		await call(captured, "notes_search", { query: "needle", limit: 10 }, ctx),
+	);
+	assert.ok(Buffer.byteLength(JSON.stringify(found), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "match result stays within budget");
+	pages.push(...found.files);
+	assert.equal(found.more, 1, "the oversized result names the omitted matching file");
+	assert.deepEqual(pages.map((file) => file.address), ["search.md"], "the snapshot keeps the most recently updated match");
+	const oversized = pages[0]!;
 	assert.equal(oversized.matches_total, 1, "the file's full match count is named even though the line was cut");
 	assert.equal(oversized.matches.length, 1);
 	const match = oversized.matches[0]!;

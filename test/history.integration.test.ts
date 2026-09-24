@@ -18,7 +18,7 @@ import { installExtensionTestHooks } from "./helpers/extension-test-environment.
 
 installExtensionTestHooks("pi-context-history-v2");
 
-test("history schemas expose seq and anchor paging, while notes keep cursor paging", () => {
+test("history schemas expose seq and anchor paging, while notes use snapshot limits", () => {
 	const captured = makeExtension(manager());
 	const readSchema = captured.tools.get("history_read")?.parameters as { properties?: Record<string, unknown>; required?: string[] };
 	const legacyItemKey = ["item", "id"].join("_");
@@ -41,7 +41,13 @@ test("history schemas expose seq and anchor paging, while notes keep cursor pagi
 	assert.deepEqual(Object.keys(windowsSchema.properties ?? []), []);
 
 	const notesSchema = captured.tools.get("notes_list")?.parameters as { properties?: Record<string, unknown> };
-	assert.ok(notesSchema.properties?.cursor, "notes retain their independent cursor contract");
+	assert.equal(notesSchema.properties?.cursor, undefined);
+	assert.ok(notesSchema.properties?.limit);
+	assert.equal(notesSchema.properties?.max_results, undefined);
+	const notesSearchSchema = captured.tools.get("notes_search")?.parameters as { properties?: Record<string, unknown> };
+	assert.equal(notesSearchSchema.properties?.cursor, undefined);
+	assert.ok(notesSearchSchema.properties?.limit);
+	assert.equal(notesSearchSchema.properties?.max_files, undefined);
 });
 
 test("seq is stable across branch changes and abandoned entries remain unreadable", async () => {

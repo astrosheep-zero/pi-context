@@ -2,8 +2,8 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, generateDiffString, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { localIso } from "../../notes/frontmatter.js";
 import { createNotesStore, NoteError, type NoteChange, type NoteReadResult, type NoteRow, type NoteSearchRow, type Origin } from "../../notes/index.js";
-import { DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS, middleTruncate, output, outputRaw, page, prefixFit, readCharacterWindow, readWindowBlock, withinTextBudget } from "../../tool-output.js";
-import { cursor, nullableString, positiveInteger, searchQueries, searchQuery } from "../../tool-schema.js";
+import { DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS, middleTruncate, output, outputRaw, prefixFit, readCharacterWindow, readWindowBlock, withinBudget, withinTextBudget } from "../../tool-output.js";
+import { nullableString, positiveInteger, searchQueries, searchQuery } from "../../tool-schema.js";
 import { notesContextFromPi } from "./adapter.js";
 
 const ORIGIN = Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("self"), Type.Literal("external")], {
@@ -24,6 +24,27 @@ function failure(error: unknown) {
 function renderDiff(change: NoteChange): string {
 	if (change.kind === "none") return "";
 	return generateDiffString(change.before, change.after).diff;
+}
+
+function snapshot<T>(rows: T[], limit: number | undefined, truncate: (item: T, fits: (candidate: T) => boolean) => T): { files: T[]; more: number } {
+	const selected: T[] = [];
+	const maxItems = Math.min(rows.length, limit ?? rows.length);
+	const response = (files: T[]) => ({ files, more: rows.length - files.length });
+	for (let index = 0; index < maxItems; index++) {
+		const item = rows[index]!;
+		const fits = (candidate: T) => withinBudget(response([...selected, candidate]));
+		if (fits(item)) {
+			selected.push(item);
+			continue;
+		}
+		if (selected.length === 0) selected.push(truncate(item, fits));
+		break;
+	}
+	return response(selected);
+}
+
+function byRecent<T extends { address: string; meta: { updatedAt: number } }>(a: T, b: T): number {
+	return b.meta.updatedAt - a.meta.updatedAt || a.address.localeCompare(b.address);
 }
 
 export function registerNotesTools(pi: ExtensionAPI) {
@@ -75,14 +96,13 @@ export function registerNotesTools(pi: ExtensionAPI) {
 
 	pi.registerTool(defineTool({
 		name: "notes_list", label: "Notes list",
-		description: `List note files as rows carrying address, updated_at, and stale, most recently updated first. ${ADDRESS_DESCRIPTION} Listings merge your five prefixes: this session, @project/, @human/, @self/, and @model/.`,
-		parameters: Type.Object({ pattern: nullableString(), cursor: cursor(), max_results: positiveInteger() }, { additionalProperties: false }),
+		description: `List note files as a recent-first snapshot carrying address, updated_at, and stale. more is the number of matching files omitted by limit or the wire budget; use pattern to narrow the address range. ${ADDRESS_DESCRIPTION} Listings merge your five prefixes: this session, @project/, @human/, @self/, and @model/.`,
+		parameters: Type.Object({ pattern: nullableString(), limit: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			let rows: NoteRow[];
 			try { rows = await createNotesStore(notesContextFromPi(ctx)).list({ pattern: params.pattern ?? undefined }); } catch (error) { return failure(error); }
 			const files: Array<{ address: string; stale: boolean; updated_at: string; address_truncated?: boolean }> = rows.map((row) => ({ address: row.address, stale: row.meta.stale, updated_at: localIso(row.meta.updatedAt) }));
-			return output(page(files, params.cursor ?? 0, "files", params.max_results, (file, fits) => {
-				if (fits(file)) return file;
+			return output(snapshot(files, params.limit, (file, fits) => {
 				const address = middleTruncate(file.address, (candidate) => fits({ ...file, address: candidate, address_truncated: true }));
 				return { ...file, address, address_truncated: true };
 			}));
@@ -91,19 +111,19 @@ export function registerNotesTools(pi: ExtensionAPI) {
 
 	pi.registerTool(defineTool({
 		name: "notes_search", label: "Notes search",
-		description: `Case-sensitive literal substring search over note bodies; query is one string or several (OR), each matched line appears once. ${ADDRESS_DESCRIPTION} Search merges the same five prefixes as notes_list. Patterns glob over full address strings. Each file entry carries matches_total, its full match count before capping. Each match carries line, text, offset_chars (a code-point offset into the serialized note returned by notes_read, at the earliest query match), and truncated.`,
-		parameters: Type.Object({ query: searchQuery(), pattern: nullableString(), cursor: cursor(), max_matches_per_file: positiveInteger(), max_files: positiveInteger() }, { additionalProperties: false }),
+		description: `Case-sensitive literal substring search over note bodies; query is one string or several (OR), each matched line appears once. Results are a recent-first snapshot, not pageable; more counts matching files omitted by limit or the wire budget. Use pattern to narrow the address range. ${ADDRESS_DESCRIPTION} Search merges the same five prefixes as notes_list. Patterns glob over full address strings. Each file entry carries matches_total, its full match count before per-file capping. Each match carries line, text, offset_chars (a code-point offset into the serialized note returned by notes_read, at the earliest query match), and truncated.`,
+		parameters: Type.Object({ query: searchQuery(), pattern: nullableString(), limit: positiveInteger(), max_matches_per_file: positiveInteger() }, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const queries = searchQueries(params.query);
 			let rows: NoteSearchRow[];
 			try { rows = await createNotesStore(notesContextFromPi(ctx)).search(queries, { pattern: params.pattern ?? undefined }); } catch (error) { return failure(error); }
 			const maxPerFile = params.max_matches_per_file ?? Number.POSITIVE_INFINITY;
+			rows.sort(byRecent);
 			const result: Array<{ address: string; updated_at: string; stale: boolean; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }>; address_truncated?: boolean }> = rows.map((row) => {
 				const matches = row.matches.map((match) => ({ line: match.line, text: match.text, truncated: false, offset_chars: match.offsetChars }));
 				return { address: row.address, updated_at: localIso(row.meta.updatedAt), stale: row.meta.stale, matches_total: matches.length, matches: matches.slice(0, maxPerFile) };
 			});
 			const fitFile = (file: (typeof result)[number], fits: (candidate: (typeof result)[number]) => boolean) => {
-				if (fits(file)) return file;
 				const matches = file.matches;
 				let low = 0;
 				let high = matches.length;
@@ -121,7 +141,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 				const address = middleTruncate(prefix.address, (candidate) => fits({ ...prefix, address: candidate, address_truncated: true }));
 				return { ...prefix, address, address_truncated: true };
 			};
-			return output(page(result, params.cursor ?? 0, "files", params.max_files, fitFile));
+			return output(snapshot(result, params.limit, fitFile));
 		},
 	}));
 }

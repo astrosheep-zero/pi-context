@@ -24,13 +24,6 @@ export function truncationMarker(removedChars: number): string {
 	return `…[truncated ${removedChars} chars]…`;
 }
 
-/**
- * Middle-truncate `text` until `fits` accepts it, keeping a head and a tail joined by
- * `truncationMarker`. Codex's `truncate_middle` semantics: when one indivisible unit
- * (a note line, a single match, a history item) exceeds the wire budget on its own, it is
- * still returned — visibly truncated — so cursors advance and no page comes back empty.
- * Returns `text` unchanged when it already fits.
- */
 export function middleTruncate(text: string, fits: (content: string) => boolean): string {
 	if (fits(text)) return text;
 	const chars = Array.from(text);
@@ -125,38 +118,6 @@ export function readWindowBlock(identity: ReadonlyArray<readonly [string, string
 	const next = window.next_offset_chars === null ? "null" : String(window.next_offset_chars);
 	const fields = identity.map(([name, value]) => `${name}: ${value}`).join("\n");
 	return `--- READ WINDOW ---\n${fields}\nchars: [${window.offset_chars},${end}) of ${window.total_chars}\nnext_offset_chars: ${next}\n`;
-}
-
-/** Shrink a single page item to fit; only invoked when that item alone exceeds the budget. */
-export type ItemTruncator<T> = (item: T, fits: (candidate: T) => boolean) => T;
-
-/**
- * Build a page without ever adding an item that would exceed the wire budget.
- *
- * A single item that cannot fit is middle-truncated through the optional `truncate`
- * callback and still included, with `next_cursor` advanced past it. Without that treatment
- * an oversized item would yield an empty page forever: the cursor would keep pointing back
- * at the same index.
- */
-export function page<T>(items: T[], cursor: number, key: string, limit?: number, truncate?: ItemTruncator<T>) {
-	const end = Math.min(items.length, cursor + (limit ?? items.length));
-	const selected: T[] = [];
-	let next = end < items.length ? end : null;
-	for (let index = cursor; index < end; index++) {
-		const candidateNext = index + 1 < end || end < items.length ? index + 1 : null;
-		const fits = (list: T[]) => withinBudget({ [key]: list, next_cursor: candidateNext });
-		if (!fits([...selected, items[index]])) {
-			if (selected.length === 0 && truncate) {
-				selected.push(truncate(items[index], (candidate) => fits([candidate])));
-				next = candidateNext;
-			} else {
-				next = index;
-			}
-			break;
-		}
-		selected.push(items[index]);
-	}
-	return { [key]: selected, next_cursor: next };
 }
 
 /**

@@ -1,7 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 export const nullableString = () => Type.Optional(Type.Union([Type.String(), Type.Null()]));
 export const positiveInteger = () => Type.Optional(Type.Integer({ minimum: 1 }));
-export const cursor = () => Type.Optional(Type.Integer({ minimum: 0, description: "Continuation cursor: pass the returned continuation value back unchanged, with the same filters and ordering. Omit to start. A null continuation means the set is exhausted." }));
 export const historyRole = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool_call"), Type.Literal("tool"), Type.Literal("system"), Type.Literal("developer")]);
 export const historyRoles = () => Type.Optional(Type.Array(historyRole, { minItems: 1, description: "Show exactly these roles. user is a human turn; assistant is visible model text; tool_call is one invocation; tool is one result; system is a native compaction or branch summary; developer is any extension-injected message, including every custom_message. Use custom_type to select a developer message type." }));
 
