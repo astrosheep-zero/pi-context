@@ -31,9 +31,9 @@ test("history schemas expose seq and anchor paging, while notes use snapshot lim
 	const listSchema = captured.tools.get("history_list")?.parameters as { properties?: Record<string, unknown> };
 	assert.ok(listSchema.properties?.before);
 	assert.ok(listSchema.properties?.after);
-	assert.ok(listSchema.properties?.around);
+	assert.equal(listSchema.properties?.around, undefined);
 	assert.ok(listSchema.properties?.roles);
-	assert.ok(listSchema.properties?.custom_type);
+	assert.equal(listSchema.properties?.custom_type, undefined);
 	assert.equal(listSchema.properties?.cursor, undefined);
 	assert.equal(listSchema.properties?.[legacyOrderingKey], undefined);
 
@@ -71,7 +71,7 @@ test("seq is stable across branch changes and abandoned entries remain unreadabl
 	assert.match(unknown.error, /run 1\.\.3/);
 });
 
-test("anchor paging is chronological, stable under appends, and around is centered", async () => {
+test("anchor paging is chronological, stable under appends, and supports ranges", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
@@ -80,18 +80,28 @@ test("anchor paging is chronological, stable under appends, and around is center
 	const tail = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_list", { limit: 2 }, ctx));
 	assert.deepEqual(tail.items.map((item) => item.seq), [4, 5]);
 	appendText(session, "user", "message-6");
-	const older = resultJson<{ items: Array<{ seq: number }>; has_older: boolean; has_newer: boolean }>(await call(captured, "history_list", { before: 5, limit: 2 }, ctx));
+	const older = resultJson<{ items: Array<{ seq: number }>; older_before: number | null; newer_after: number | null }>(await call(captured, "history_list", { before: 5, limit: 2 }, ctx));
 	assert.deepEqual(older.items.map((item) => item.seq), [3, 4]);
-	assert.equal(older.has_older, true);
-	assert.equal(older.has_newer, true);
+	assert.equal(older.older_before, 3);
+	assert.equal(older.newer_after, null);
 	const newer = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_list", { after: 5, limit: 2 }, ctx));
 	assert.deepEqual(newer.items.map((item) => item.seq), [6]);
-	const around = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_list", { around: 3, limit: 3 }, ctx));
-	assert.deepEqual(around.items.map((item) => item.seq), [2, 3, 4]);
-	const single = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_list", { around: 3, limit: 1 }, ctx));
-	assert.deepEqual(single.items.map((item) => item.seq), [3]);
-	const invalid = resultJson<{ error: string }>(await call(captured, "history_list", { before: 3, after: 4 }, ctx));
-	assert.match(invalid.error, /at most one/);
+	for (let index = 7; index <= 10; index++) appendText(session, "user", `message-${index}`);
+	const range = resultJson<{ items: Array<{ seq: number }>; older_before: number | null; newer_after: number | null }>(await call(captured, "history_list", { after: 2, before: 10, limit: 3 }, ctx));
+	assert.deepEqual(range.items.map((item) => item.seq), [3, 4, 5]);
+	assert.equal(range.older_before, null);
+	assert.equal(range.newer_after, 5);
+	const rangeNext = resultJson<{ items: Array<{ seq: number }>; newer_after: number | null }>(await call(captured, "history_list", { after: range.newer_after!, before: 10, limit: 3 }, ctx));
+	assert.deepEqual(rangeNext.items.map((item) => item.seq), [6, 7, 8]);
+	assert.equal(rangeNext.newer_after, 8);
+	const rangeLast = resultJson<{ items: Array<{ seq: number }>; older_before: number | null; newer_after: number | null }>(await call(captured, "history_list", { after: rangeNext.newer_after!, before: 10, limit: 3 }, ctx));
+	assert.deepEqual(rangeLast.items.map((item) => item.seq), [9]);
+	assert.equal(rangeLast.older_before, null);
+	assert.equal(rangeLast.newer_after, null);
+	assert.equal("has_older" in rangeLast, false);
+	assert.equal("has_newer" in rangeLast, false);
+	assert.equal((captured.tools.get("history_list")?.parameters as { properties?: Record<string, { minimum?: number }> }).properties?.before?.minimum, 1);
+	assert.equal((captured.tools.get("history_list")?.parameters as { properties?: Record<string, { minimum?: number }> }).properties?.after?.minimum, 1);
 });
 
 test("conversation view folds tools and injected messages, while explicit roles expand them", async () => {
@@ -126,7 +136,12 @@ test("conversation view folds tools and injected messages, while explicit roles 
 	assert.ok(Number(folded.count) >= 5);
 	assert.equal((folded.tools as Record<string, number>).bash, 1);
 	assert.equal((folded.tools as Record<string, number>).read, 1);
-	assert.equal((folded.custom_types as Record<string, number>).square, 1);
+	assert.equal("custom_types" in folded, false);
+
+	const empty = resultJson<{ items: unknown[]; older_before: number | null; newer_after: number | null }>(await call(captured, "history_list", { roles: ["system"] }, ctx));
+	assert.deepEqual(empty.items, []);
+	assert.equal(empty.older_before, null);
+	assert.equal(empty.newer_after, null);
 
 	const expanded = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_list", { roles: ["tool_call", "tool"] }, ctx));
 	assert.deepEqual(expanded.items.map((item) => item.role), ["tool_call", "tool_call", "tool", "tool"]);
@@ -139,8 +154,9 @@ test("conversation view folds tools and injected messages, while explicit roles 
 	assert.deepEqual(bashOnly.items.map((item) => item.role), ["tool_call", "tool"]);
 	assert.equal(bashOnly.items[1]?.call_seq, bashOnly.items[0]?.seq);
 
-	const injected = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_list", { custom_type: "square" }, ctx));
-	assert.deepEqual(injected.items.map((item) => [item.role, item.custom_type, item.truncated_content]), [["developer", "square", "injected event"]]);
+	const injected = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_list", { roles: ["developer"] }, ctx));
+	assert.deepEqual(injected.items.map((item) => [item.role, item.truncated_content]), [["developer", "injected event"]]);
+	assert.equal("custom_type" in injected.items[0]!, false);
 	assert.equal(turnId.length > 0, true);
 });
 
@@ -153,12 +169,34 @@ test("search covers all roles, supports filters and anchor paging", async () => 
 	appendText(session, "assistant", "assistant needle");
 	const all = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_search", { query: "needle" }, ctx));
 	assert.deepEqual(all.items.map((item) => item.role), ["user", "developer", "assistant"]);
-	assert.ok(all.items.every((item) => typeof item.seq === "number" && typeof item.match_offset_chars === "number"));
-	const developers = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_search", { query: "needle", custom_type: "pi-context/boot" }, ctx));
-	assert.deepEqual(developers.items.map((item) => item.custom_type), ["pi-context/boot"]);
-	const first = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_search", { query: "needle", after: 0, limit: 1 }, ctx));
-	const next = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_search", { query: "needle", after: first.items[0]!.seq }, ctx));
-	assert.equal(next.items.length, 2);
+	assert.ok(all.items.every((item) => typeof item.seq === "number" && typeof item.offset_chars === "number"));
+	const developers = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_search", { query: "needle", roles: ["developer"] }, ctx));
+	assert.deepEqual(developers.items.map((item) => item.role), ["developer"]);
+	assert.equal("custom_type" in developers.items[0]!, false);
+	const first = resultJson<{ items: Array<{ seq: number }>; older_before: number | null; newer_after: number | null }>(await call(captured, "history_search", { query: "needle", after: 1, limit: 1 }, ctx));
+	assert.equal(first.items.length, 1);
+	const next = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_search", { query: "needle", after: first.items[0]!.seq, limit: 2 }, ctx));
+	assert.equal(next.items.length, 1);
+});
+
+test("search previews start at case-insensitive literal matches and offsets read original Unicode text", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const prefix = "😀İ".repeat(1000);
+	appendText(session, "user", prefix + "NeEdLe.* trailing");
+	const found = resultJson<{ items: Array<{ seq: number; offset_chars: number; truncated_content: string; total_chars: number; truncated: boolean; match_offset_chars?: number }> }>(await call(captured, "history_search", { query: ["absent", "needle.*"], max_chars_per_item: 8 }, ctx));
+	assert.equal(found.items.length, 1);
+	const hit = found.items[0]!;
+	assert.equal(hit.offset_chars, 2000);
+	assert.equal(hit.match_offset_chars, undefined);
+	assert.equal(hit.truncated_content, "NeEdLe.*");
+	assert.equal(hit.truncated, true);
+	assert.equal(hit.total_chars, 2017);
+	const read = resultRead(await call(captured, "history_read", { seq: hit.seq, offset_chars: hit.offset_chars, limit_chars: 8 }, ctx));
+	assert.equal(read.content, hit.truncated_content);
+	const noMatch = resultJson<{ items: unknown[] }>(await call(captured, "history_search", { query: "needle.+" }, ctx));
+	assert.deepEqual(noMatch.items, []);
 });
 
 test("history_read uses seq and preserves the shared character-window contract", async () => {

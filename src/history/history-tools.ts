@@ -4,15 +4,12 @@ import { output, outputRaw, middleTruncate, prefixFit, earliestMatchOffsetChars,
 import { historyRoles, searchQuery, searchQueries } from "../tool-schema.js";
 import { allItems, filteredItems, historyFromSession, type HistoryFilter, type HistoryItem, type HistoryProjection, unknownWindowId, validateHistoryFilters, visibleItem } from "./history.js";
 
-const SEQ_DESCRIPTION = "Items are ascending by seq. A seq is an item's fixed position in this session and never changes while the session lives; a fork starts a new session and renumbers. Compare seq values to tell which item came first. Page with before or after using a seq from the page. created_at is metadata only.";
-const ROLE_DESCRIPTION = "Exactly six roles: user is a human turn; assistant is visible model text; tool_call is one invocation with JSON arguments; tool is one result; system is a native compaction or branch summary; developer is any message injected by an extension, including every custom_message. custom_type identifies developer messages.";
-
 type VisibleItem = ReturnType<typeof visibleItem>;
-type FoldedRow = { folded: true; first_seq: number; last_seq: number; count: number; tools: Record<string, number>; custom_types: Record<string, number> };
+type FoldedRow = { folded: true; first_seq: number; last_seq: number; count: number; tools: Record<string, number> };
 type RenderedItem = VisibleItem | FoldedRow;
 type Candidate = { item: HistoryItem; matchOffset?: number; preview?: VisibleItem };
-type AnchorParams = { before?: number; after?: number; around?: number; limit?: number; max_chars_per_item?: number };
-type PageResponse = { items: RenderedItem[]; has_older: boolean; has_newer: boolean };
+type AnchorParams = { before?: number; after?: number; limit?: number; max_chars_per_item?: number };
+type PageResponse = { items: RenderedItem[]; older_before: number | null; newer_after: number | null };
 
 /** Shrink a single page item to fit the fully rendered response. */
 function truncateHistoryItem<T extends { truncated_content: string; truncated: boolean; tool_name: string | null }>(item: T, fits: (candidate: T) => boolean): T {
@@ -35,94 +32,92 @@ function isConversationItem(item: HistoryItem): boolean {
 }
 
 function isConversationView(params: HistoryFilter): boolean {
-	return !params.roles && typeof params.tool_name !== "string" && typeof params.custom_type !== "string";
+	return !params.roles && typeof params.tool_name !== "string";
 }
 
 function foldedRuns(items: HistoryItem[]): FoldedRow[] {
 	if (items.length === 0) return [];
 	const sorted = [...items].sort((a, b) => a.seq - b.seq);
 	const tools: Record<string, number> = {};
-	const customTypes: Record<string, number> = {};
 	for (const item of sorted) {
 		if (item.role === "tool_call") {
 			const name = item.toolName ?? "unknown";
 			tools[name] = (tools[name] ?? 0) + 1;
 		}
-		if (item.role === "developer" && item.customType !== null) customTypes[item.customType] = (customTypes[item.customType] ?? 0) + 1;
 	}
-	return [{ folded: true, first_seq: sorted[0]!.seq, last_seq: sorted.at(-1)!.seq, count: sorted.length, tools, custom_types: customTypes }];
+	return [{ folded: true, first_seq: sorted[0]!.seq, last_seq: sorted.at(-1)!.seq, count: sorted.length, tools }];
 }
 
-function pageEdges(vis: HistoryItem[], selected: HistoryItem[], anchor: number | undefined): { has_older: boolean; has_newer: boolean } {
-	if (selected.length === 0) {
-		if (anchor === undefined) return { has_older: false, has_newer: false };
-		return { has_older: vis.some((item) => item.seq < anchor), has_newer: vis.some((item) => item.seq > anchor) };
-	}
+function pageAnchors(vis: HistoryItem[], selected: HistoryItem[], before: number | undefined, after: number | undefined): { older_before: number | null; newer_after: number | null } {
+	if (selected.length === 0) return { older_before: null, newer_after: null };
+	const lower = after ?? 0;
+	const upper = before ?? Number.POSITIVE_INFINITY;
 	const seqs = selected.map((item) => item.seq);
 	const first = Math.min(...seqs);
 	const last = Math.max(...seqs);
-	return { has_older: vis.some((item) => item.seq < first), has_newer: vis.some((item) => item.seq > last) };
+	return {
+		older_before: vis.some((item) => item.seq > lower && item.seq < first && item.seq < upper) ? first : null,
+		newer_after: vis.some((item) => item.seq > last && item.seq < upper && item.seq > lower) ? last : null,
+	};
 }
 
-function foldRows(projection: HistoryProjection, params: HistoryFilter, vis: HistoryItem[], selected: HistoryItem[], edges: { has_older: boolean; has_newer: boolean }): FoldedRow[] {
+
+function foldRows(projection: HistoryProjection, params: HistoryFilter & AnchorParams, vis: HistoryItem[], selected: HistoryItem[], anchors: { older_before: number | null; newer_after: number | null }): FoldedRow[] {
 	if (selected.length === 0) {
 		// If the conversation has no visible messages at all, keep its hidden run legible.
-		if (vis.length === 0 && !edges.has_older && !edges.has_newer) {
+		if (vis.length === 0 && anchors.older_before === null && anchors.newer_after === null) {
 			const onlyWindow = typeof params.window_id === "string" ? [params.window_id] : undefined;
 			const hidden = allItems(projection).filter((item) => (!onlyWindow || onlyWindow.includes(item.windowId)) && !isConversationItem(item));
 			return foldedRuns(hidden);
 		}
 		return [];
 	}
+	const lower = params.after ?? 0;
+	const upper = params.before ?? Number.POSITIVE_INFINITY;
 	const windowItems = allItems(projection)
-		.filter((item) => typeof params.window_id !== "string" || item.windowId === params.window_id)
+		.filter((item) => (typeof params.window_id !== "string" || item.windowId === params.window_id) && item.seq > lower && item.seq < upper)
 		.sort((a, b) => a.seq - b.seq);
 	const folded: FoldedRow[] = [];
 	const firstSeq = Math.min(...selected.map((item) => item.seq));
 	const lastSeq = Math.max(...selected.map((item) => item.seq));
-	if (!edges.has_older) folded.push(...foldedRuns(windowItems.filter((item) => item.seq < firstSeq && !isConversationItem(item))));
+	if (anchors.older_before === null) folded.push(...foldedRuns(windowItems.filter((item) => item.seq < firstSeq && !isConversationItem(item))));
 	const orderedSelected = [...selected].sort((a, b) => a.seq - b.seq);
 	for (let i = 0; i + 1 < orderedSelected.length; i++) {
 		const left = orderedSelected[i]!.seq;
 		const right = orderedSelected[i + 1]!.seq;
 		folded.push(...foldedRuns(windowItems.filter((item) => item.seq > left && item.seq < right && !isConversationItem(item))));
 	}
-	if (!edges.has_newer) folded.push(...foldedRuns(windowItems.filter((item) => item.seq > lastSeq && !isConversationItem(item))));
+	if (anchors.newer_after === null) folded.push(...foldedRuns(windowItems.filter((item) => item.seq > lastSeq && !isConversationItem(item))));
 	return folded;
 }
 
-function renderedPage(projection: HistoryProjection, params: HistoryFilter, vis: HistoryItem[], selected: Candidate[], anchor: number | undefined, maxChars: number, folds: boolean): PageResponse {
+function candidatePreview(candidate: Candidate, maxChars: number): VisibleItem {
+	const base = visibleItem(candidate.item, maxChars);
+	if (candidate.matchOffset === undefined) return base;
+	const chars = Array.from(candidate.item.content);
+	const start = candidate.matchOffset;
+	return { ...base, truncated: start > 0 || start + maxChars < chars.length, truncated_content: chars.slice(start, start + maxChars).join("") };
+}
+
+function renderedPage(projection: HistoryProjection, params: HistoryFilter & AnchorParams, vis: HistoryItem[], selected: Candidate[], maxChars: number, folds: boolean): PageResponse {
 	const selectedItems = selected.map((candidate) => candidate.item).sort((a, b) => a.seq - b.seq);
-	const edges = pageEdges(vis, selectedItems, anchor);
+	const anchors = pageAnchors(vis, selectedItems, params.before, params.after);
 	const orderedSelected = [...selected].sort((a, b) => a.item.seq - b.item.seq);
 	const visible = orderedSelected.map((candidate) => {
-		const base = candidate.preview ?? visibleItem(candidate.item, maxChars);
-		return candidate.matchOffset === undefined ? base : { ...base, match_offset_chars: candidate.matchOffset };
+		const base = candidate.preview ?? candidatePreview(candidate, maxChars);
+		return candidate.matchOffset === undefined ? base : { ...base, offset_chars: candidate.matchOffset };
 	});
 	let rows: RenderedItem[] = visible;
 	if (folds) {
-		const folded = foldRows(projection, params, vis, selectedItems, edges);
+		const folded = foldRows(projection, params, vis, selectedItems, anchors);
 		rows = [...visible, ...folded].sort((a, b) => ("folded" in a ? a.first_seq : a.seq) - ("folded" in b ? b.first_seq : b.seq));
 	}
-	return { items: rows, ...edges };
+	return { items: rows, ...anchors };
 }
 
-function orderedCandidates(vis: Candidate[], before: number | undefined, after: number | undefined, around: number | undefined, limit: number): Candidate[] {
+function orderedCandidates(vis: Candidate[], before: number | undefined, after: number | undefined, limit: number): Candidate[] {
 	const ascending = [...vis].sort((a, b) => a.item.seq - b.item.seq);
-	if (around !== undefined) {
-		if (ascending.length === 0) return [];
-		let pivot = ascending.findIndex((candidate) => candidate.item.seq >= around);
-		if (pivot < 0) pivot = ascending.length - 1;
-		const ordered = [ascending[pivot]!];
-		for (let distance = 1; ordered.length < limit; distance++) {
-			const older = ascending[pivot - distance];
-			if (older) ordered.push(older);
-			const newer = ascending[pivot + distance];
-			if (newer) ordered.push(newer);
-			if (!older && !newer) break;
-		}
-		return ordered.slice(0, limit);
-	}
+	if (before !== undefined && after !== undefined) return ascending.filter((candidate) => candidate.item.seq > after && candidate.item.seq < before).slice(0, limit);
 	if (after !== undefined) return ascending.filter((candidate) => candidate.item.seq > after).slice(0, limit);
 	if (before !== undefined) return ascending.filter((candidate) => candidate.item.seq < before).reverse().slice(0, limit);
 	return ascending.slice(-limit).reverse();
@@ -131,28 +126,27 @@ function orderedCandidates(vis: Candidate[], before: number | undefined, after: 
 function selectPage(projection: HistoryProjection, params: HistoryFilter & AnchorParams, vis: Candidate[], folds: boolean): PageResponse {
 	const before = params.before;
 	const after = params.after;
-	const around = params.around;
-	const anchor = before ?? after ?? around;
+	const anchor = before ?? after;
 	const maxChars = params.max_chars_per_item ?? HISTORY_PREVIEW_CHARS;
 	const limit = params.limit ?? 20;
-	const candidates = orderedCandidates(vis, before, after, around, limit);
+	const candidates = orderedCandidates(vis, before, after, limit);
 	const allVisible = vis.map((candidate) => candidate.item).sort((a, b) => a.seq - b.seq);
 	const kept: Candidate[] = [];
 	for (const candidate of candidates) {
 		const proposed = [...kept, candidate];
-		const response = renderedPage(projection, params, allVisible, proposed, anchor, maxChars, folds);
+		const response = renderedPage(projection, params, allVisible, proposed, maxChars, folds);
 		if (withinBudget(response)) {
 			kept.push(candidate);
 			continue;
 		}
 		if (kept.length === 0) {
-			const base = visibleItem(candidate.item, maxChars);
-			const shrunk = truncateHistoryItem(base, (preview) => withinBudget(renderedPage(projection, params, allVisible, [{ ...candidate, preview }], anchor, maxChars, folds)));
+			const base = candidatePreview(candidate, maxChars);
+			const shrunk = truncateHistoryItem(base, (preview) => withinBudget(renderedPage(projection, params, allVisible, [{ ...candidate, preview }], maxChars, folds)));
 			kept.push({ ...candidate, preview: shrunk });
 		}
 		break;
 	}
-	return renderedPage(projection, params, allVisible, kept, anchor, maxChars, folds);
+	return renderedPage(projection, params, allVisible, kept, maxChars, folds);
 }
 
 function errorText(error: unknown): string {
@@ -184,21 +178,18 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "history_list",
 		label: "History list items",
-		description: `List session history in the conversation view by default: non-empty user, assistant, and system items, with hidden tool and developer runs folded into summaries. Use roles to expand selected roles, tool_name for tool calls/results, or custom_type for injected developer messages. Every item carries truncated and total_chars; resolve an item by seq with history_read. ${SEQ_DESCRIPTION} ${ROLE_DESCRIPTION}`,
+		description: "List session history. By default, return the newest conversation page: non-empty user, assistant, and system messages with tool/developer activity folded into extra context rows. Use roles to expand roles or tool_name to filter one tool; use history_read with seq for full content. older_before and newer_after in the response are ready to pass as before and after; they are relative to the current filters.",
 		parameters: Type.Object({
-			before: Type.Optional(Type.Integer({ minimum: 0, description: "Return items with seq below this number, nearest first before ascending output." })),
-			after: Type.Optional(Type.Integer({ minimum: 0, description: "Return items with seq above this number, nearest first." })),
-			around: Type.Optional(Type.Integer({ minimum: 0, description: "Center the page on this seq, alternating older and newer items." })),
-			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum visible items; folded rows do not count." })),
+			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum visible items returned; folded context rows are extra and do not count." })),
 			roles: historyRoles(),
-			tool_name: Type.Optional(Type.String({ description: "Return only calls and results from this tool; defaults to both tool_call and tool roles." })),
-			custom_type: Type.Optional(Type.String({ description: "Return only developer messages with this custom type; defaults to the developer role." })),
-			window_id: Type.Optional(Type.String({ description: "Limit history to this known context window." })),
-			max_chars_per_item: Type.Optional(Type.Integer({ minimum: 1, description: `Maximum preview code points per item (default ${HISTORY_PREVIEW_CHARS}).` })),
+			tool_name: Type.Optional(Type.String({ minLength: 1, description: "Filter tool calls and results to this tool name." })),
+			before: Type.Optional(Type.Integer({ minimum: 1, description: "Return one older page with seq below this value. Pass older_before from the response. For a bounded range, repeat the same call and keep after unchanged." })),
+			after: Type.Optional(Type.Integer({ minimum: 1, description: "Return one newer page with seq above this value. Pass newer_after from the response. For a bounded range, repeat the same call and keep before unchanged." })),
+			window_id: Type.Optional(Type.String({ minLength: 1, description: "Advanced filter for one context window; usually omit this." })),
+			max_chars_per_item: Type.Optional(Type.Integer({ minimum: 1, description: `Maximum preview characters per item; use history_read for full content (default ${HISTORY_PREVIEW_CHARS}).` })),
 		}, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const projection = historyFromSession(ctx);
-			if ([params.before, params.after, params.around].filter((value) => value !== undefined).length > 1) return output({ error: "give at most one of before, after, around" });
 			const invalid = validateHistoryFilters(params);
 			if (invalid) return output({ error: invalid });
 			const badWindow = unknownWindowId(projection, params);
@@ -237,21 +228,19 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "history_search",
 		label: "History search",
-		description: `Case-sensitive literal substring search over durable Pi session history; query accepts one string or an array of strings, an item matches when it contains any of them (OR), and each item appears once. Search defaults to every role because a query already narrows the set. No semantic search. Each hit carries truncated, total_chars, and match_offset_chars; resolve an address with history_read at that offset. ${SEQ_DESCRIPTION} ${ROLE_DESCRIPTION}`,
+		description: "Case-insensitive literal substring search over current-session history; query is one string or several (OR), each matching item appears once. By default, search every role and return the latest 20 matches in seq order. Previews start at the earliest match; truncated means some original text is omitted. Pass seq and offset_chars to history_read to read from the match. older_before/newer_after are continuation anchors within the current filters and bounds; repeat the call replacing only the corresponding anchor.",
 		parameters: Type.Object({
-			limit: Type.Optional(Type.Integer({ minimum: 1 })),
-			before: Type.Optional(Type.Integer({ minimum: 0, description: "Return hits with seq below this number." })),
-			after: Type.Optional(Type.Integer({ minimum: 0, description: "Return hits with seq above this number." })),
 			query: searchQuery(),
+			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum matching items returned." })),
 			roles: historyRoles(),
-			tool_name: Type.Optional(Type.String()),
-			custom_type: Type.Optional(Type.String()),
-			window_id: Type.Optional(Type.String()),
-			max_chars_per_item: Type.Optional(Type.Integer({ minimum: 1 })),
+			tool_name: Type.Optional(Type.String({ minLength: 1, description: "Filter tool calls and results to this tool name." })),
+			before: Type.Optional(Type.Integer({ minimum: 1, description: "Return older hits with seq below this value. Pass older_before from the response. For a bounded range, repeat the same call and keep after unchanged." })),
+			after: Type.Optional(Type.Integer({ minimum: 1, description: "Return newer hits with seq above this value. Pass newer_after from the response. For a bounded range, repeat the same call and keep before unchanged." })),
+			window_id: Type.Optional(Type.String({ minLength: 1, description: "Advanced filter for one context window; usually omit this." })),
+			max_chars_per_item: Type.Optional(Type.Integer({ minimum: 1, description: `Maximum preview characters per item; use history_read for full content (default ${HISTORY_PREVIEW_CHARS}).` })),
 		}, { additionalProperties: false }),
 		async execute(_id, params, _signal, _update, ctx) {
 			const projection = historyFromSession(ctx);
-			if (params.before !== undefined && params.after !== undefined) return output({ error: "give at most one of before, after" });
 			const invalid = validateHistoryFilters(params);
 			if (invalid) return output({ error: invalid });
 			const badWindow = unknownWindowId(projection, params);
@@ -263,8 +252,8 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 				return output({ error: errorText(error) });
 			}
 			const matches = filteredItems(projection, params, "search")
-				.filter((item) => queries.some((query) => item.content.includes(query)))
-				.map((item) => ({ item, matchOffset: earliestMatchOffsetChars(item.content, queries) }));
+				.map((item) => ({ item, matchOffset: earliestMatchOffsetChars(item.content, queries) }))
+				.filter((candidate) => candidate.matchOffset >= 0);
 			return output(selectPage(projection, params, matches, false));
 		},
 	}));

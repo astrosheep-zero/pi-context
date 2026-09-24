@@ -376,8 +376,9 @@ export function createNotesStore(input: NotesContext): NotesStore {
 			let baseChars = 0;
 			const matches: NoteMatch[] = [];
 			for (const [index, line] of body.split("\n").entries()) {
-				if (stableQueries.some((query) => line.includes(query))) {
-					matches.push({ line: index + 1, text: line, offsetChars: serializedBodyOffset + baseChars + earliestMatchOffsetChars(line, stableQueries) });
+				const offset = earliestMatchOffsetChars(line, stableQueries);
+				if (offset >= 0) {
+					matches.push({ line: index + 1, text: line, offsetChars: serializedBodyOffset + baseChars + offset });
 				}
 				baseChars += Array.from(line).length + 1;
 			}

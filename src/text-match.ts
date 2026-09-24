@@ -1,13 +1,14 @@
 /**
- * Code-point offset of the earliest occurrence of any of `queries` in `text`, or 0 when
- * none occurs. Shared by the two search tools so a match address is computed identically.
+ * Code-point offset of the earliest case-insensitive literal match, or -1 when
+ * none occurs. Match against the original text so Unicode casing cannot shift offsets.
  */
 export function earliestMatchOffsetChars(text: string, queries: string[]): number {
 	let earliest = -1;
 	for (const query of queries) {
-		const index = text.indexOf(query);
+		const literal = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const index = new RegExp(literal, "iu").exec(text)?.index ?? -1;
 		if (index < 0) continue;
 		if (earliest < 0 || index < earliest) earliest = index;
 	}
-	return earliest <= 0 ? 0 : Array.from(text.slice(0, earliest)).length;
+	return earliest < 0 ? -1 : Array.from(text.slice(0, earliest)).length;
 }

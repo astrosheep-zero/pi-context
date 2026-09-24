@@ -11,7 +11,6 @@ export type HistoryItem = {
 	role: "user" | "assistant" | "tool_call" | "tool" | "system" | "developer";
 	content: string;
 	createdAt: string | undefined;
-	customType: string | null;
 	toolName?: string;
 	callSeq?: number | null;
 	resultSeq?: number | null;
@@ -31,7 +30,6 @@ export type HistoryFilter = {
 	window_id?: string | null;
 	roles?: HistoryRole[] | null;
 	tool_name?: string | null;
-	custom_type?: string | null;
 };
 
 function isTextContent(part: unknown): part is TextContent {
@@ -103,7 +101,6 @@ function toolCallItems(windowId: string, entry: { id: string; timestamp?: string
 			role: "tool_call",
 			content: JSON.stringify(part.arguments),
 			createdAt: entry.timestamp,
-			customType: null,
 			toolName: part.name,
 			toolCallId: part.id,
 			resultSeq: null,
@@ -143,20 +140,18 @@ export function historyFromSession(ctx: SessionReader): HistoryProjection {
 		branchSeqs.add(entrySeq);
 
 		if (entry.type === "compaction" || entry.type === "branch_summary") {
-			window.items.push({ seq: entrySeq, windowId: window.windowId, role: "system", content: entry.summary, createdAt: entry.timestamp, customType: null });
+			window.items.push({ seq: entrySeq, windowId: window.windowId, role: "system", content: entry.summary, createdAt: entry.timestamp });
 			continue;
 		}
 		if (entry.type === "message") {
 			const role = mapRole(entry.message.role);
 			if (!role) continue;
-			const customType = entry.message.role === "custom" ? entry.message.customType ?? null : null;
 			window.items.push({
 				seq: entrySeq,
 				windowId: window.windowId,
 				role,
 				content: messageContent(entry.message),
 				createdAt: entry.timestamp,
-				customType,
 				...toolInfo(entry.message),
 				...(role === "tool" ? { callSeq: null } : {}),
 			});
@@ -178,7 +173,6 @@ export function historyFromSession(ctx: SessionReader): HistoryProjection {
 				role: "developer",
 				content: contentText(entry.content),
 				createdAt: entry.timestamp,
-				customType: entry.customType,
 			});
 		}
 	}
@@ -199,7 +193,6 @@ export function visibleItem(item: HistoryItem, maxChars = HISTORY_PREVIEW_CHARS)
 		role: item.role,
 		created_at: item.createdAt ?? null,
 		tool_name: item.toolName ?? null,
-		custom_type: item.customType,
 		...(item.role === "tool_call" ? { result_seq: item.resultSeq ?? null } : {}),
 		...(item.role === "tool" ? { call_seq: item.callSeq ?? null } : {}),
 		...(item.outputTruncated ? { output_truncated: true, full_output_path: item.fullOutputPath ?? null } : {}),
@@ -221,12 +214,8 @@ export function unknownWindowId(projection: HistoryProjection, params: HistoryFi
 }
 
 export function validateHistoryFilters(params: HistoryFilter): string | undefined {
-	if (typeof params.tool_name === "string" && typeof params.custom_type === "string") return "tool_name and custom_type cannot be used together";
 	if (typeof params.tool_name === "string" && params.roles && params.roles.some((role) => role !== "tool_call" && role !== "tool")) {
 		return 'tool_name only supports roles "tool_call" and "tool"';
-	}
-	if (typeof params.custom_type === "string" && params.roles && (params.roles.length !== 1 || params.roles[0] !== "developer")) {
-		return 'custom_type only supports roles ["developer"]';
 	}
 	return undefined;
 }
@@ -237,7 +226,6 @@ export function filteredItems(projection: HistoryProjection, params: HistoryFilt
 	if (typeof params.window_id === "string") items = items.filter((item) => item.windowId === params.window_id);
 	if (params.roles) items = items.filter((item) => params.roles!.includes(item.role));
 	if (typeof params.tool_name === "string") items = items.filter((item) => (item.role === "tool_call" || item.role === "tool") && item.toolName === params.tool_name);
-	if (typeof params.custom_type === "string") items = items.filter((item) => item.role === "developer" && item.customType === params.custom_type);
-	if (!params.roles && typeof params.tool_name !== "string" && typeof params.custom_type !== "string" && mode === "list") items = items.filter((item) => (item.role === "user" || item.role === "assistant" || item.role === "system") && item.content !== "");
+	if (!params.roles && typeof params.tool_name !== "string" && mode === "list") items = items.filter((item) => (item.role === "user" || item.role === "assistant" || item.role === "system") && item.content !== "");
 	return items.sort((a, b) => a.seq - b.seq);
 }

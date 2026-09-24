@@ -380,6 +380,21 @@ test("an over-budget note search match is a named prefix with an honest line add
 	assert.ok(parts.join("").endsWith(hugeLine), "resuming across pages reconstructs the matched body line");
 });
 
+test("notes_search ignores case, treats queries literally, and preserves original Unicode offsets", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	await call(captured, "notes_write", { address: "case-match.md", content: "😀İ NeEdLe.* tail" }, ctx);
+	const found = resultJson<{ files: Array<{ address: string; matches: Array<{ offset_chars: number }> }> }>(await call(captured, "notes_search", { query: ["missing", "needle.*"], pattern: "case-match.md" }, ctx));
+	assert.equal(found.files.length, 1);
+	assert.equal(found.files[0]!.matches.length, 1);
+	const hit = found.files[0]!;
+	const read = resultRead(await call(captured, "notes_read", { address: hit.address, offset_chars: hit.matches[0]!.offset_chars }, ctx));
+	assert.equal(read.content, "NeEdLe.* tail");
+	const absent = resultJson<{ files: unknown[] }>(await call(captured, "notes_search", { query: "needle.+", pattern: "case-match.md" }, ctx));
+	assert.deepEqual(absent.files, []);
+});
+
 test("notes_search scopes by glob pattern; a non-matching pattern is an empty page, not an error", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
