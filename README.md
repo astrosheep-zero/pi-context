@@ -128,7 +128,7 @@ src/
     frontmatter.ts       # persisted metadata codec
     constants.ts         # storage limits
   pi/notes/              # Pi integration, not part of /notes
-    adapter.ts           # live identity, root defaults, activation migration
+    adapter.ts           # live identity, anonymous fallback, activation migration
     tools.ts             # schemas, diff rendering, output budgets
     snapshot.ts          # boot's five-home snapshot
 ```

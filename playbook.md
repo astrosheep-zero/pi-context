@@ -23,7 +23,7 @@ The homes serve different readers:
 3. **Merge only genuine duplicates.** Supersede a note only when both notes have the same topic and kind (checkpoint, design, log…), and the survivor is strictly newer or more specific. Name the shared topic in the survivor. Otherwise keep both and record any unresolved conflict.
 4. **Preserve meaning and provenance.** Keep facts, conditions, exceptions, uncertainty, authorship, and sources. When promoting a finding, cite its source. Do not relabel agent-authored material as human-authored. If its destination or authority is unclear, propose the promotion instead.
 5. **Keep notes manageable.** Aim below about 200 lines / 8KB per note. Split oversized notes by topic with one-line cross-links. Checkpoints may exceed the budget: trim prose, never facts.
-6. **Keep maps useful.** Each writable home's MAP.md lists its durable notes, one line per entry, with an unambiguous address and a short gist in your own words. Add promoted notes and drop entries that no longer hold. Session notes are never mapped. Maps follow the same size budget.
+6. **Keep maps useful.** Each writable home's MAP.md lists its durable notes, one line per entry, with an unambiguous address and a short gist in your own words. Add promoted notes and drop entries that no longer hold. Maps follow the same size budget.
 7. **Preserve the record.** Never physically delete notes. After merging, crumple the absorbed note only if it is writable. Preserve existing metadata and provenance. Map entry lines are yours to maintain within the writable scope.
 
 ## Report

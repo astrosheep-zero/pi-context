@@ -13,7 +13,7 @@ export function notesRoot(): string {
 
 /** Translate the current Pi runtime into a fresh, explicit identity snapshot. */
 export function agentSlug(_ctx: ExtensionContext): string {
-	return slugify(process.env.PI_NOTES_AGENT ?? "root");
+	return slugify(process.env.PI_NOTES_AGENT ?? "anonymous");
 }
 
 /** Pi's active model identity is resolved live so a mid-session switch retargets @model. */

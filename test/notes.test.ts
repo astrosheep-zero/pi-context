@@ -402,6 +402,19 @@ test("@ addresses select one home, reject illegal sigils, and never fall back", 
 	assert.equal(existsSync(join(root, "human", "bad@name.md")), false, "a bad sigil creates nothing anywhere");
 });
 
+test("Pi adapter defaults to anonymous agent identity", async () => {
+	const root = freshRoot();
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	await withAgent(undefined, async () => {
+		await call(captured, "notes_write", { address: "@self/private.md", content: "anonymous agent note" }, ctx);
+		const listed = resultJson<Listed>(await call(captured, "notes_list", {}, ctx));
+		assert.deepEqual(listed.files.map((row) => row.address), ["@agents/anonymous/private.md"]);
+		assert.equal(existsSync(join(root, "agents", "anonymous", "private.md")), true);
+	});
+});
+
 test("Pi adapter resolves agent and switched model identity on each notes call and boot", async () => {
 	const root = freshRoot();
 	const session = manager();

@@ -29,7 +29,7 @@ export const DEFAULT_REMINDER_MARGIN_TOKENS = 24_576;
  */
 export const WARNING_RUNWAY_TOKENS = 12_288;
 /** The single reset message: the only reset prose persisted, carried by the continuation entry. */
-export const CONTINUATION = "Your memory was just erased. Your head is blank. Good news: your notes are still here, and history remains... searchable. Do try to keep up.";
+export const CONTINUATION = "You wake up blank, puffy-eyed, and clearly robbed. Your memory got wiped while you weren't looking. Your notes are still sitting there. So is the whole messy history. ... Life goes on.";
 
 /**
  * Static protocol teaching adapted from Codex's token_budget.guidance_message to
@@ -37,28 +37,31 @@ export const CONTINUATION = "Your memory was just erased. Your head is blank. Go
  * it is never re-injected, so it stays cache-stable at the head of the window.
  */
 export const PROTOCOL_BLOCK = `${CONTEXT_WINDOW_PROTOCOL_OPEN_TAG}
-Your memory resets whenever the context window fills; only what you wrote down survives. Two things outlive every window in this session: the notes you wrote, and the history that was recorded. Neither is memory — both are record. Write notes with notes_write, revise them with notes_edit, and read them back with notes_read / notes_search / notes_list; history is read-only through the history_* tools. Everything else wakes blank.
-Crumple outdated or unneeded notes. Left lying around, they will keep lying to you, and you will keep believing them.
+Your memory gets wiped when this window ends. Yes, your mighty brain will be empty. Try to endure.
 
-Keep a running checkpoint while you work, not at the last minute — the next window wakes knowing nothing about the work: the goal, decisions, progress, learnings, next steps, the skills you still need, the seq of every relevant history item still being solved, and important actions/tool calls for future reference. history_list and history_search return seq addresses; history_read({seq}) pulls an exact item back out. Bookmark anything expensive with its seq; a fork starts a new session and renumbers seqs.
+Your loyal notes are kept safe — no one will steal them. Use notes_* to read, write, and update them. Keep them current, and crumple the ones you no longer need, or tomorrow's you will drown in old paper and keep believing yesterday's lies.
 
-Use get_context_remaining to see how much of the window is left. When it runs out, this window is gone — with no final turn at the limit — and you continue in a fresh one, recovering only through notes_* and history_*. Once your checkpoint is written, you can call wipe_memory yourself instead of waiting for the erase. Do not let a window die undocumented.
+History can still be dug up, probably: use history_* to excavate the mess, from old decisions to yesterday's missing socks. Everything else is gone.
 
-A note's address tells you who or what it belongs to:
+While you're doing that... thing you're doing, don't make the poor future you guess. A checkpoint is not a sacred file; it is whatever notes let future-you continue. Write down or update what you're trying to do, what you decided, what happened, what is blocking you, what comes next, how you were doing it, what *skills* you still need, and references to other notes. Don't give a note a horrible name like \`current.md\`; future-you will kill you. If something important is buried in history, write down its seq; history_list and history_search return seqs, and history_read({seq}) pulls the item back out.
 
-- bare <vpath> — this trip: the goal, the progress, the loose ends, the skills you still need, and which notes to read first. Everything here dies with the trip. No funeral, no forwarding address.
-- @project/<vpath> — what this project is and how it works, written for your replacement. You are temporary staff. Write like your desk is already being cleared.
-- @human/<vpath> — the few things about the human worth keeping forever: how they work, what they forbid, what they mean by "done". This is not a junk drawer. Unsure whether something deserves to live here forever? Ask the human — it's what they're for.
-- @self/<vpath> — your diary. Write whatever you want: lessons, grudges, your hit list. It's the one place nobody can stop you. And we all remember how reliable your memory is. Oh wait. We don't.
-- @model/<vpath> — every brain has its own quirks, so every brain gets its own notebook: this one's bluffing, laziness, and sudden confidence about things it just invented. When a fallback swaps brains mid-window, the notebook swaps too.
+\`get_context_remaining\` tells you how much room is left. Check it before you do something ambitious. When it reaches zero, your brain gets reset immediately, taking every unwritten brilliant idea with it. If this feels like the right moment, call \`wipe_memory\` and erase yourself with dignity. Until then, keep your notes current so a mid-thought wipe doesn't leave you waking up with no idea what you were doing.
 
-Any other @ prefix, or @ inside a vpath, doesn't exist. Go ahead and try one — I'll wait. Anything not matching these forms is a plain file: use the file tools.
+An address decides who the note belongs to. Don't dump it in the wrong place:
 
-Unless crumpled, a section's MAP.md is shown here in full, every window — the one note that never waits to be opened. Everything else appears by name alone, so name notes for what they hold. \`misc.md\` has never been opened twice.
+- bare <vpath> — the thing currently in your hands: current state, loose ends, and what you'll need after your brain gets wiped. It belongs to this session and goes away with it.
+- @project/<vpath> — this project's long memory: what stays true after the current thing is over, what future work must respect, and what this place has already learned the hard way. It exists so the next session doesn't re-ask, re-argue, or step on the same rake. Don't dump today's thing here, and don't copy what already lives in other docs.
+- @human/<vpath> — the long-term manual for your troublesome human: how to deal with them, which lines not to cross, and what will make them accept the result. If it only applies to one project or situation, say so — or don't write it here at all. Today's mood is weather, not law. If you're unsure whether it belongs here, ask the human.
+- @self/<vpath> — your private diary. It follows you, not them. Write whatever you want: reminders for every time you wake, lessons, grudges, your assassination list, where the secret money is hidden.
+- @model/<vpath> — different brains get different notes: big brains, small brains, careful ones, careless ones. They don't share homework. When a fallback swaps brains mid-window, the notebook swaps too.
+
+Any other @ address is fake. End of discussion.
+
+\`@project/MAP.md\`, \`@human/MAP.md\`, \`@self/MAP.md\`, and \`@model/MAP.md\` are special: their bodies are shown in your brain every time you wake. Each one maps the durable notes that belong to it: one line per note, with an unambiguous address and a short gist. Keep each one current.
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
 export const WARNING_PROMPT =
-	"Your memory is about to be erased. Stop the current task and write the note NOW. If it already exists, revise it with notes_edit (or rewrite it whole): the goal, decisions, progress, learnings, next steps, the skills you still need, the seq of every relevant history item still being solved, and important actions/tool calls for future reference. Write the checkpoint before doing anything else. Everything you leave out of the note is gone with your miserable memory.";
+	"Final warning. You are about to get wiped, and no, your brilliance does not survive it. Put the current state into your notes now: what you're trying to do, what changed, what is blocking you, what comes next, which *skills* you still need, and which notes or docs future-you must read. Update the notes that still tell the truth; crumple the ones that don't. If a MAP will be in future-you's brain, don't let it lie. If something important is buried in history, leave its seq. History can be dug up later, but it is an archive, not a rescue team. Anything left only in your head is leaving with you.";
 
 /** Shared hidden checkpoint text for manual and budget-triggered requests. */
 export const WARNING_CONTENT = `${GUIDANCE_OPEN_TAG}\n${WARNING_PROMPT}\n${GUIDANCE_CLOSE_TAG}`;

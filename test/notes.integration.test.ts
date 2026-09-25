@@ -286,7 +286,7 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 		notes: allFailed,
 	});
 	assert.ok(allFailedText.includes("pcw:test:root") && allFailedText.includes("pcw:test:next"), "identity survives an all-home failure");
-	assert.ok(allFailedText.includes("Your memory resets whenever the context window fills"), "protocol survives an all-home failure");
+	assert.ok(allFailedText.includes("Your memory gets wiped when this window ends"), "protocol survives an all-home failure");
 	assert.equal(allFailedText.includes("scripted read failure"), false, "the model-facing notice does not expose OS/error details");
 	await assert.rejects(
 		() => loadNotesSnapshot(ctx, () => { throw new TypeError("programmer failure"); }),
