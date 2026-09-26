@@ -196,7 +196,7 @@ export function registerHistoryTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "history_read",
 		label: "History read item",
-		description: "Read one event's full text by seq, default 12000 characters from offset_chars. A negative offset_chars counts back from the end. To continue, pass next_offset_chars as offset_chars.",
+		description: `Read one event's full text by seq, default ${DEFAULT_READ_WINDOW_CHARS} characters from offset_chars. A negative offset_chars counts back from the end. To continue, pass next_offset_chars as offset_chars.`,
 		parameters: Type.Object({
 			seq: Type.Integer({ minimum: 1, description: "Stable file-order address returned by history_list or history_search." }),
 			offset_chars: Type.Optional(Type.Integer({ description: "Code-point offset to start from. A negative value counts back from the end; the response echoes the resolved absolute offset. Pass the previous next_offset_chars back unchanged to continue." })),

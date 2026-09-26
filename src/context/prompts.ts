@@ -85,5 +85,5 @@ export function renderBootBlock(data: BootRenderData): string {
  * at write time; get_context_remaining remains the live source for the current figure.
  */
 export function tokenBudgetGuidance(remaining: number): string {
-	return `${GUIDANCE_OPEN_TAG}\nOnly ${remaining} tokens left before you get wiped. While you still have room, update your notes, rescue anything still only in your head, crumple stale notes, and keep any \`MAP.md\` honest. If you're ready, call \`wipe_memory\` and go out on your own terms.\n${GUIDANCE_CLOSE_TAG}`;
+	return `${GUIDANCE_OPEN_TAG}\nOnly ${remaining} tokens left before you get wiped. While you still have room, update your notes, rescue anything still only in your head, crumple the notes that stopped telling the truth, and keep any \`MAP.md\` honest. If you're ready, call \`wipe_memory\` and go out on your own terms.\n${GUIDANCE_CLOSE_TAG}`;
 }
