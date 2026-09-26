@@ -1,6 +1,6 @@
 {
   "name": "@astrosheep/pi-context",
-  "version": "0.32.0",
+  "version": "0.32.1",
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",

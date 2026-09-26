@@ -11,7 +11,7 @@ const ORIGIN = Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("sel
 }));
 const CRUMPLED_PARAMETER = Type.Optional(Type.Boolean({ description: "true crumples the note: it leaves the boot index, list, and search, stays readable by address, and appears with wastebasket: true. false smooths it back." }));
 const WASTEBASKET_PARAMETER = Type.Optional(Type.Boolean({ description: "true lists only crumpled notes instead of live ones." }));
-const ADDRESS_DESCRIPTION = "Address forms are bare `<vpath>` for this session, `@project/<vpath>` for this project, `@human/<vpath>` for the human's cross-project notes, `@self/<vpath>` for your own, and `@model/<vpath>` for the current model's. `@self` and `@model` mean whoever is running now. Any other `@` prefix, or `@` inside a vpath, is a hard error. There is no fallback across prefixes. Paths reject `..`, absolute paths, and backslashes.";
+const ADDRESS_DESCRIPTION = "Address forms are bare `<vpath>` for this session, `@project/<vpath>` for this project, `@human/<vpath>` for the human's cross-project notes, `@self/<vpath>` for your own, and `@model/<vpath>` for the current model's. `@self` and `@model` mean whoever is running now. Any other `@` prefix, or `@` inside a vpath, is refused. There is no fallback across prefixes. Paths reject `..`, absolute paths, and backslashes.";
 
 function failure(error: unknown) {
 	if (error instanceof NoteError) {
@@ -52,7 +52,7 @@ function byRecent<T extends { address: string; meta: { updatedAt: number } }>(a:
 export function registerNotesTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_write", label: "Notes write",
-		description: `Create or replace a note as a real markdown file, and name it for what it holds: a fresh window sees only an index entry, never the note itself. ${ADDRESS_DESCRIPTION} Keep notes small and split by topic — by what the note is about, never by who said it (authorship is origin's job); a rewrite replaces the body whole while preserving createdAt and every other frontmatter key. Writing always produces an uncrumpled note.`,
+		description: `Create or rewrite a note, and name it for what it holds and when to reach for it: a fresh window sees only the name in the index and decides whether to open by it. Write it for a reader who arrives knowing nothing, and keep it true when the content drifts. ${ADDRESS_DESCRIPTION} A rewrite replaces the body whole while preserving createdAt and every other frontmatter key. Writing always produces an uncrumpled note.`,
 		parameters: Type.Object({ address: Type.String(), content: Type.String(), origin: ORIGIN }, { additionalProperties: false }), executionMode: "sequential",
 		async execute(_id, params, _signal, _update, ctx) {
 			const content = params.content;
@@ -66,7 +66,7 @@ export function registerNotesTools(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "notes_update", label: "Notes update",
 		description: `Update one note: exact-text body edits, a metadata-only change, or a rename_to move; frontmatter is never editable through edits. ${ADDRESS_DESCRIPTION} Each oldText must occur exactly once unless replace_all is set; a multi-match anchor fails with its match line numbers and a zero-match anchor names the failing edit index. edits may be omitted (or empty) for a metadata-only update, which requires at least one of origin/crumpled. rename_to moves the note to a new address preserving createdAt and every other metadata key; it is used alone, never combined with edits/origin/crumpled, refuses a live note at the target, and may replace a crumpled one. The success return carries the address and a diff of what changed.`,
-		parameters: Type.Object({ address: Type.String(), edits: Type.Optional(Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }, { additionalProperties: false }))), origin: ORIGIN, crumpled: CRUMPLED_PARAMETER, replace_all: Type.Optional(Type.Boolean()), rename_to: Type.Optional(Type.String({ description: "Move the note to this address (same address rules as address), preserving createdAt and all other metadata. Used alone: never combined with edits, origin, crumpled, or replace_all. A live note at the target refuses; a crumpled target is replaced." })) }, { additionalProperties: false }), executionMode: "sequential",
+		parameters: Type.Object({ address: Type.String(), edits: Type.Optional(Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }, { additionalProperties: false }))), origin: ORIGIN, crumpled: CRUMPLED_PARAMETER, replace_all: Type.Optional(Type.Boolean()), rename_to: Type.Optional(Type.String({ description: "Move the note to this address (same address rules as address), preserving createdAt and all other metadata. Used alone: never combined with edits, origin, crumpled, or replace_all. A live note at the target refuses; a crumpled target is replaced. References elsewhere do not follow the move." })) }, { additionalProperties: false }), executionMode: "sequential",
 		async execute(_id, params, _signal, _update, ctx) {
 			try {
 				const store = createNotesStore(notesContextFromPi(ctx));
