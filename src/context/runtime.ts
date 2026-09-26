@@ -2,7 +2,6 @@ import { getCurrentSystemMessage, Type } from "@earendil-works/pi-ai";
 import { VERSION, defineTool, type ExtensionAPI, type ExtensionContext, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { registerBudget } from "./budget.js";
 import { output } from "../tool-output.js";
-import { migrateLegacyHomes } from "../pi/notes/adapter.js";
 import { currentReset, currentWindowId, isCheckpointBackedReset, isWindowBoot, isWindowMarker, projectRootWindow, projectWindow, rootWindowId, type WindowMarker } from "./context-window.js";
 import { registerResetLifecycle } from "./reset-lifecycle.js";
 import { buildResetDrafts, resetTailCommitted } from "./reset-artifacts.js";
@@ -51,9 +50,6 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 		const homes = snapshot.unavailable.map((home) => home.label).join(", ");
 		ctx.ui.notify(`pi-context: notes index incomplete for ${homes}; notes_list can retry after recovery.`, "warning");
 	};
-	const migrationWarning = migrateLegacyHomes();
-	if (migrationWarning) console.warn(`pi-context: ${migrationWarning}`);
-
 	const budget = registerBudget(pi, () => enabled, settingsManager, (windowId) => resets.closeOut(windowId, "automatic"));
 
 	pi.on("session_start", async (_event, ctx) => {

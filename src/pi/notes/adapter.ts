@@ -1,5 +1,4 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { existsSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { NotesContext } from "../../notes/context.js";
@@ -31,14 +30,4 @@ export function notesContextFromPi(ctx: ExtensionContext, home = notesRoot()): N
 		agent: agentSlug(ctx),
 		model: modelSlug(ctx),
 	};
-}
-
-/** One-time host activation migration from the legacy personal/ directory. */
-export function migrateLegacyHomes(home = notesRoot()): string | undefined {
-	const legacy = join(home, "personal");
-	const modern = join(home, "human");
-	if (!existsSync(legacy)) return undefined;
-	if (existsSync(modern)) return "both personal/ and human/ exist under the notes home; migrate by hand, no automatic merge";
-	renameSync(legacy, modern);
-	return undefined;
 }

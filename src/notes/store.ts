@@ -11,7 +11,7 @@ import { namespaceSlugs, physicalPath, scopeDir, SLUG_PATTERN, type Scope } from
 
 export type { NoteMeta, Origin, Scope };
 
-export type NoteErrorCode = "not_found" | "ambiguous_edit" | "no_match" | "nothing_to_do" | "too_large" | "invalid_scope" | "invalid_origin";
+export type NoteErrorCode = "not_found" | "already_exists" | "ambiguous_edit" | "no_match" | "nothing_to_do" | "too_large" | "invalid_scope" | "invalid_origin";
 
 /** Typed store refusal. Edit locations are exposed in camelCase. */
 export class NoteError extends Error {
@@ -44,12 +44,14 @@ export type NoteChange =
 	| { kind: "none"; before: ""; after: "" }
 	| { kind: "body" | "metadata" | "file"; before: string; after: string };
 export type NoteEditResult = { meta: NoteMeta; applied: number; resolvedScope: Scope; change: NoteChange };
+export type NoteRenameResult = { meta: NoteMeta; replacedCrumpledTarget: boolean };
 
 /** Host-neutral, filesystem-backed notes API. */
 export interface NotesStore {
 	write(address: string, content: string, options?: WriteOptions): Promise<NoteWriteResult>;
 	read(address: string): Promise<NoteReadResult | undefined>;
-	edit(address: string, edits?: EditOperation[], options?: EditOptions): Promise<NoteEditResult>;
+	update(address: string, edits?: EditOperation[], options?: EditOptions): Promise<NoteEditResult>;
+	rename(fromAddress: string, toAddress: string): Promise<NoteRenameResult>;
 	list(options?: NotesQuery): Promise<NoteRow[]>;
 	search(queries: string[], options?: NotesQuery): Promise<NoteSearchRow[]>;
 }
@@ -282,7 +284,7 @@ export function createNotesStore(input: NotesContext): NotesStore {
 		});
 	}
 
-	async function edit(address: string, edits?: EditOperation[], options: EditOptions = {}): Promise<NoteEditResult> {
+	async function update(address: string, edits?: EditOperation[], options: EditOptions = {}): Promise<NoteEditResult> {
 		const stableAddress = address;
 		const operations = edits === undefined ? [] : edits.map((operation) => ({ ...operation }));
 		const stableOptions = { ...options };
@@ -337,6 +339,46 @@ export function createNotesStore(input: NotesContext): NotesStore {
 		});
 	}
 
+	/**
+	 * Move one note to a new address with every metadata key preserved. Both ends must be
+	 * writable; a live target refuses, a crumpled target is replaced. Locks both paths in
+	 * sorted order so crossed renames cannot deadlock.
+	 */
+	async function rename(fromAddress: string, toAddress: string): Promise<NoteRenameResult> {
+		const stableFrom = fromAddress;
+		const stableTo = toAddress;
+		const from = assertAddress(stableFrom);
+		const to = assertAddress(stableTo);
+		const fromScope = assertScope(from.scope);
+		const toScope = assertScope(to.scope);
+		assertWritablePath(to.path);
+		assertWritableHome(fromScope, from.who, context);
+		assertWritableHome(toScope, to.who, context);
+		const fromPath = physicalPath(fromScope, from.path, context, from.who);
+		const toPath = physicalPath(toScope, to.path, context, to.who);
+		if (resolve(fromPath) === resolve(toPath)) throw new NoteError("nothing_to_do", "rename_to resolves to the same note");
+		const [first, second] = [fromPath, toPath].sort();
+		return withPathQueue(first!, () => withPathQueue(second!, async () => {
+			const raw = await readFileIfExists(fromPath);
+			if (raw === undefined) throw new NoteError("not_found", "note not found");
+			const targetRaw = await readFileIfExists(toPath);
+			if (targetRaw !== undefined && parseNote(targetRaw).meta.crumpledAt === undefined) {
+				throw new NoteError("already_exists", "rename_to target is a live note; crumple it first or pick another address");
+			}
+			const { meta, body } = parseNote(raw);
+			meta.scope = toScope;
+			// Project ownership only changes when the move crosses the session boundary.
+			if (fromScope !== "session" && toScope === "session") meta.project = context.projectKey;
+			if (fromScope === "session" && toScope !== "session") delete meta.project;
+			meta.updatedAt = Date.now();
+			const serialized = serializeNote(meta, body);
+			assertSerializedSize(serialized);
+			await atomicWrite(toPath, serialized);
+			await rm(fromPath, { force: true });
+			return { meta, replacedCrumpledTarget: targetRaw !== undefined };
+		}));
+	}
+
 	async function* scan(options: NotesQuery): AsyncGenerator<Omit<NoteRow, "sizeBytes">> {
 		const matcher = matcherFor(normalizePattern(options.pattern, context));
 		const homes = await homesFor(context, options);
@@ -388,5 +430,5 @@ export function createNotesStore(input: NotesContext): NotesStore {
 		return rows;
 	}
 
-	return { write, read, edit, list, search };
+	return { write, read, update, rename, list, search };
 }

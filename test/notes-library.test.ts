@@ -21,12 +21,12 @@ test("standalone notes API persists camelCase metadata, edits, lists and searche
 	assert.equal(read.meta.origin, "user");
 	assert.equal(read.meta.accessCount, 1);
 	assert.equal(await notes.read("missing.md"), undefined);
-	const edited = await notes.edit("checkpoint", [{ oldText: "alpha", newText: "beta" }]);
+	const edited = await notes.update("checkpoint", [{ oldText: "alpha", newText: "beta" }]);
 	assert.deepEqual(edited.change, { kind: "body", before: "alpha\nneedle 😀", after: "beta\nneedle 😀" });
 	assert.equal(edited.resolvedScope, read.resolvedScope);
 	assert.equal(edited.applied, 1);
 	const updatedBefore = (await notes.read("checkpoint"))!.meta.updatedAt;
-	const metadataEdit = await notes.edit("checkpoint", undefined, { crumpled: true });
+	const metadataEdit = await notes.update("checkpoint", undefined, { crumpled: true });
 	assert.equal(metadataEdit.change.kind, "metadata");
 	assert.equal(metadataEdit.change.before.includes("crumpledAt"), false);
 	assert.match(metadataEdit.change.after, /\ncrumpledAt: \d{4}-\d{2}-\d{2}T/);
@@ -38,9 +38,9 @@ test("standalone notes API persists camelCase metadata, edits, lists and searche
 	assert.ok(basket.meta.crumpledAt);
 	assert.equal(basket.meta.updatedAt, updatedBefore, "crumpling does not bump updatedAt");
 	const crumpledAt = basket.meta.crumpledAt;
-	await notes.edit("checkpoint", undefined, { crumpled: true });
+	await notes.update("checkpoint", undefined, { crumpled: true });
 	assert.equal((await notes.list({ wastebasket: true }))[0]?.meta.crumpledAt, crumpledAt, "re-crumpling keeps the original time");
-	await notes.edit("checkpoint", undefined, { crumpled: false });
+	await notes.update("checkpoint", undefined, { crumpled: false });
 	assert.equal((await notes.list()).some((row) => row.address === "checkpoint.md"), true, "smoothing returns the note to the live list");
 	assert.equal((await notes.list({ wastebasket: true })).length, 0);
 	const matches = await notes.search(["needle"]);
@@ -62,11 +62,11 @@ test("standalone notes API persists camelCase metadata, edits, lists and searche
 	assert.equal(rewritten.meta.recurrenceCount, 2);
 	assert.deepEqual(rewritten.meta.recurrenceWindows, ["pcw:one", "pcw:two"]);
 	assert.equal(rewritten.meta.crumpledAt, undefined, "writing always produces an uncrumpled note");
-	const combined = await moved.edit("checkpoint", [{ oldText: "new", newText: "final" }], { crumpled: true });
+	const combined = await moved.update("checkpoint", [{ oldText: "new", newText: "final" }], { crumpled: true });
 	assert.equal(combined.change.kind, "file");
 	assert.match(combined.change.after, /\ncrumpledAt: \d{4}-\d{2}-\d{2}T/);
 	assert.match(combined.change.after, /final body$/);
-	assert.deepEqual((await moved.edit("checkpoint", undefined, { crumpled: true })).change, { kind: "none", before: "", after: "" });
+	assert.deepEqual((await moved.update("checkpoint", undefined, { crumpled: true })).change, { kind: "none", before: "", after: "" });
 	assert.equal((await moved.write("checkpoint", "revived body")).meta.crumpledAt, undefined, "writing a crumpled address smooths it");
 });
 
@@ -75,8 +75,8 @@ test("same-file read/modify/write operations serialize across stores and markdow
 	const other = createNotesStore(context);
 	await notes.write("shared", "alpha\nbeta");
 
-	const firstEdit = notes.edit("shared", [{ oldText: "alpha", newText: "A" }]);
-	const secondEdit = other.edit("shared.md", [{ oldText: "beta", newText: "B" }]);
+	const firstEdit = notes.update("shared", [{ oldText: "alpha", newText: "A" }]);
+	const secondEdit = other.update("shared.md", [{ oldText: "beta", newText: "B" }]);
 	await Promise.all([firstEdit, secondEdit]);
 	assert.equal((await notes.read("shared"))?.body, "A\nB", "edits through address aliases retain both changes");
 
@@ -87,7 +87,7 @@ test("same-file read/modify/write operations serialize across stores and markdow
 
 	const file = join(home, "pi/session/session-a/shared.md");
 	const stableEdits = [{ oldText: "A", newText: "first" }];
-	const operation = notes.edit("shared", stableEdits);
+	const operation = notes.update("shared", stableEdits);
 	stableEdits[0]!.newText = "mutated after call";
 	await operation;
 	assert.equal((await notes.read("shared"))?.body, "first\nB", "edit arguments are snapshotted at method entry");
@@ -145,10 +145,44 @@ test("invalid addressing and failed edits leave stored bytes untouched without p
 	await notes.write("edit", "alpha\nbeta\nbeta");
 	const path = join(home, "pi/session/session-a/edit.md");
 	const before = readFileSync(path, "utf8");
-	await assert.rejects(() => notes.edit("edit", [{ oldText: "beta", newText: "B" }]), (error: unknown) => error instanceof NoteError && error.code === "ambiguous_edit" && error.lineNumbers?.join(",") === "2,3");
-	await assert.rejects(() => notes.edit("edit", [{ oldText: "alpha", newText: "A" }, { oldText: "absent", newText: "X" }]), (error: unknown) => error instanceof NoteError && error.code === "no_match" && error.editIndex === 1);
+	await assert.rejects(() => notes.update("edit", [{ oldText: "beta", newText: "B" }]), (error: unknown) => error instanceof NoteError && error.code === "ambiguous_edit" && error.lineNumbers?.join(",") === "2,3");
+	await assert.rejects(() => notes.update("edit", [{ oldText: "alpha", newText: "A" }, { oldText: "absent", newText: "X" }]), (error: unknown) => error instanceof NoteError && error.code === "no_match" && error.editIndex === 1);
 	assert.equal(readFileSync(path, "utf8"), before);
-	await assert.rejects(() => notes.edit("absent", undefined, { crumpled: true }), (error: unknown) => error instanceof NoteError && error.code === "not_found");
-	await notes.edit("edit", [{ oldText: "alpha", newText: "A" }]);
+	await assert.rejects(() => notes.update("absent", undefined, { crumpled: true }), (error: unknown) => error instanceof NoteError && error.code === "not_found");
+	await notes.update("edit", [{ oldText: "alpha", newText: "A" }]);
 	assert.equal((await notes.read("edit"))?.body, "A\nbeta\nbeta", "failed operations do not poison later queue work");
+});
+
+test("rename moves a note with metadata intact across scopes and refuses live targets", async (t) => {
+	const { context, notes } = fixture(t);
+	const written = await notes.write("old-name", "body text", { origin: "user" });
+	await notes.read("old-name.md");
+	const moved = await notes.rename("old-name.md", "@project/new-name.md");
+	assert.equal(moved.meta.createdAt, written.meta.createdAt, "createdAt survives the move");
+	assert.equal(moved.meta.origin, "user");
+	assert.equal(moved.meta.accessCount, 1, "accessCount survives the move");
+	assert.ok(moved.meta.updatedAt >= written.meta.updatedAt, "updatedAt is bumped");
+	assert.equal(moved.meta.project, undefined, "leaving the session scope drops project ownership");
+	assert.equal(moved.replacedCrumpledTarget, false);
+	assert.equal(await notes.read("old-name.md"), undefined, "the old address is gone");
+	assert.equal((await notes.read("@project/new-name.md"))?.body, "body text");
+
+	const back = await notes.rename("@project/new-name.md", "back.md");
+	assert.equal(back.meta.project, context.projectKey, "entering the session scope stamps current project ownership");
+	assert.equal((await notes.read("back.md"))?.meta.createdAt, written.meta.createdAt);
+
+	const within = await notes.rename("back.md", "still-back.md");
+	assert.equal(within.meta.project, context.projectKey, "a same-scope rename keeps project ownership untouched");
+
+	await notes.write("occupied", "live target");
+	await assert.rejects(() => notes.rename("still-back.md", "occupied.md"), (error: unknown) => error instanceof NoteError && error.code === "already_exists");
+	await notes.update("occupied", undefined, { crumpled: true });
+	const replaced = await notes.rename("still-back.md", "occupied.md");
+	assert.equal(replaced.replacedCrumpledTarget, true, "a crumpled target is replaced");
+	assert.equal((await notes.read("occupied.md"))?.meta.createdAt, written.meta.createdAt, "the moved note keeps its identity, not the target's");
+
+	await assert.rejects(() => notes.rename("occupied", "occupied.md"), (error: unknown) => error instanceof NoteError && error.code === "nothing_to_do");
+	await assert.rejects(() => notes.rename("occupied.md", "@models/other-model/stolen.md"), (error: unknown) => error instanceof NoteError && error.code === "invalid_scope");
+	await assert.rejects(() => notes.rename("@agents/someone-else/private.md", "mine.md"), (error: unknown) => error instanceof NoteError && error.code === "invalid_scope");
+	await assert.rejects(() => notes.rename("absent.md", "anywhere.md"), (error: unknown) => error instanceof NoteError && error.code === "not_found");
 });

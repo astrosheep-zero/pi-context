@@ -37,7 +37,7 @@ void invalidQueries;
 const context: NotesContext = { home: "./notes", sessionId: "consumer", projectKey: "example-12345678", agent: "root", model: "test" };
 const notes: NotesStore = createNotesStore(context);
 await notes.write("@project/hello.md", "hello", { origin: "user" });
-const edited = await notes.edit("@project/hello.md", [{ oldText: "hello", newText: "hello world" }]);
+const edited = await notes.update("@project/hello.md", [{ oldText: "hello", newText: "hello world" }]);
 const before: string = edited.change.before;
 const change: NoteChange = edited.change;
 if (change.kind === "none") { const empty: "" = change.before; void empty; }

@@ -64,12 +64,20 @@ export function registerNotesTools(pi: ExtensionAPI) {
 	}));
 
 	pi.registerTool(defineTool({
-		name: "notes_edit", label: "Notes edit",
-		description: `Edit a note body by exact-text replacement; frontmatter is never editable this way. ${ADDRESS_DESCRIPTION} Each oldText must occur exactly once unless replace_all is set; a multi-match anchor fails with its match line numbers and a zero-match anchor names the failing edit index. edits may be omitted (or empty) for a metadata-only update, which requires at least one of origin/crumpled. Moving while awake means notes_write at a new address and notes_edit at the old address with crumpled: true. The success return carries the address and a diff of what changed.`,
-		parameters: Type.Object({ address: Type.String(), edits: Type.Optional(Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }, { additionalProperties: false }))), origin: ORIGIN, crumpled: CRUMPLED_PARAMETER, replace_all: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), executionMode: "sequential",
+		name: "notes_update", label: "Notes update",
+		description: `Update one note: exact-text body edits, a metadata-only change, or a rename_to move; frontmatter is never editable through edits. ${ADDRESS_DESCRIPTION} Each oldText must occur exactly once unless replace_all is set; a multi-match anchor fails with its match line numbers and a zero-match anchor names the failing edit index. edits may be omitted (or empty) for a metadata-only update, which requires at least one of origin/crumpled. rename_to moves the note to a new address preserving createdAt and every other metadata key; it is used alone, never combined with edits/origin/crumpled, refuses a live note at the target, and may replace a crumpled one. The success return carries the address and a diff of what changed.`,
+		parameters: Type.Object({ address: Type.String(), edits: Type.Optional(Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }, { additionalProperties: false }))), origin: ORIGIN, crumpled: CRUMPLED_PARAMETER, replace_all: Type.Optional(Type.Boolean()), rename_to: Type.Optional(Type.String({ description: "Move the note to this address (same address rules as address), preserving createdAt and all other metadata. Used alone: never combined with edits, origin, crumpled, or replace_all. A live note at the target refuses; a crumpled target is replaced." })) }, { additionalProperties: false }), executionMode: "sequential",
 		async execute(_id, params, _signal, _update, ctx) {
 			try {
-				const { applied, change } = await createNotesStore(notesContextFromPi(ctx)).edit(params.address, params.edits, { origin: params.origin as Origin | undefined, crumpled: params.crumpled, replaceAll: params.replace_all });
+				const store = createNotesStore(notesContextFromPi(ctx));
+				if (params.rename_to !== undefined) {
+					if (params.edits !== undefined || params.origin !== undefined || params.crumpled !== undefined || params.replace_all !== undefined) {
+						return output({ error: "rename_to is used alone: do not combine it with edits, origin, crumpled, or replace_all" });
+					}
+					const { replacedCrumpledTarget } = await store.rename(params.address, params.rename_to);
+					return output({ address: params.address, rename_to: params.rename_to, replaced_crumpled_target: replacedCrumpledTarget });
+				}
+				const { applied, change } = await store.update(params.address, params.edits, { origin: params.origin as Origin | undefined, crumpled: params.crumpled, replaceAll: params.replace_all });
 				const diff = renderDiff(change);
 				return output({ address: params.address, applied, diff });
 			} catch (error) { return failure(error); }

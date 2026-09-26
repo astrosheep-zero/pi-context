@@ -73,8 +73,6 @@ export function doctor(home: string): string[] {
 		for (const name of readdirSync(home)) {
 			const path = join(home, name);
 			inspect(path, () => {
-				if (name === "global") { report(path, "legacy home; manually migrate to human/ without overwriting existing files"); return; }
-				if (name === "personal") { report(path, "legacy home; migrate to human/ (rename the directory), merging by hand if human/ already exists"); return; }
 				if (name === ".dream.lock") {
 					const valid = lstatSync(path).isFile() && /^[1-9]\d* [\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}\s*$/i.test(readFileSync(path, "utf8"));
 					report(path, `${valid ? "lock present" : "malformed lock"}; verify no dream is running before manual removal; liveness not inferred`);

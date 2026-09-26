@@ -136,7 +136,7 @@ test("crumple lifecycle: metadata-only edits close and smooth a note without tou
 	const updatedBefore = (await listNotes(ctx, { scope: "session" }))[0]!.meta.updatedAt;
 
 	// metadata-only: content unchanged, applied 0, and the recorded time is the original one
-	const markOnly = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_edit", { address: "journal.md", crumpled: true }, ctx));
+	const markOnly = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_update", { address: "journal.md", crumpled: true }, ctx));
 	assert.equal(markOnly.applied, 0);
 	assert.match(markOnly.diff, /^\+\s*\d+\s+crumpledAt: \d{4}-\d{2}-\d{2}T/m);
 	assert.deepEqual(await listNotes(ctx, { scope: "session" }), [], "a crumpled note leaves the live list");
@@ -146,19 +146,19 @@ test("crumple lifecycle: metadata-only edits close and smooth a note without tou
 	assert.equal(resultRead(await call(captured, "notes_read", { address: "journal.md" }, ctx)).content.endsWith("log line"), true, "read still reaches a crumpled note");
 
 	// re-crumpling keeps the first time; smoothing empties the basket
-	await call(captured, "notes_edit", { address: "journal.md", crumpled: true }, ctx);
+	await call(captured, "notes_update", { address: "journal.md", crumpled: true }, ctx);
 	assert.equal((await listNotes(ctx, { scope: "session", wastebasket: true }))[0]?.meta.crumpledAt, basket.meta.crumpledAt);
-	await call(captured, "notes_edit", { address: "journal.md", crumpled: false }, ctx);
+	await call(captured, "notes_update", { address: "journal.md", crumpled: false }, ctx);
 	assert.deepEqual(await listNotes(ctx, { scope: "session", wastebasket: true }), []);
 	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.crumpledAt, undefined);
 
 	// writing to a crumpled address always produces an uncrumpled note
-	await call(captured, "notes_edit", { address: "journal.md", crumpled: true }, ctx);
+	await call(captured, "notes_update", { address: "journal.md", crumpled: true }, ctx);
 	await call(captured, "notes_write", { address: "journal.md", content: "reopened" }, ctx);
 	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.crumpledAt, undefined, "writing always produces an uncrumpled note");
 
 	// metadata-only on a missing path is the typed not-found arm
-	const missing = resultJson<{ error?: string }>(await call(captured, "notes_edit", { address: "missing.md", crumpled: true }, ctx));
+	const missing = resultJson<{ error?: string }>(await call(captured, "notes_update", { address: "missing.md", crumpled: true }, ctx));
 	assert.equal(missing.error, "note not found");
 });
 

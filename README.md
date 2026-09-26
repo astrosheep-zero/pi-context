@@ -29,7 +29,8 @@ pi -e npm:@astrosheep/pi-context
 | `history.read_item` | `history_read` |
 | `history.search_contents` | `history_search` |
 | `notes.write` | `notes_write` |
-| `notes.edit` | `notes_edit` |
+| `notes.update` | `notes_update` |
+| `notes.rename` | `notes_update` (`rename_to`) |
 | `notes.read` | `notes_read` |
 | `notes.list` | `notes_list` |
 | `notes.search` | `notes_search` |
@@ -87,7 +88,7 @@ const context: NotesContext = {
 };
 const notes = createNotesStore(context);
 await notes.write("@project/decisions.md", "Use a shared notes library.", { origin: "user" });
-await notes.edit("@project/decisions.md", [
+await notes.update("@project/decisions.md", [
   { oldText: "shared", newText: "host-independent" },
 ]);
 const note = await notes.read("@project/decisions.md"); // full text/body/metadata, or undefined
@@ -103,7 +104,8 @@ const matches = await notes.search(["library"]);
 
 - `write(address, content, { origin? }?)` returns `Promise<{ meta }>`. Default origin is `self`; overwriting preserves creation time, existing project ownership, and unknown metadata, and always produces an uncrumpled note (it clears any `crumpledAt`).
 - `read(address)` returns `Promise<{ meta, body, text, resolvedScope } | undefined>`. **Reads update** `lastAccessed` and `accessCount` on disk; `text` includes frontmatter.
-- `edit(address, edits?, { origin?, crumpled?, replaceAll? }?)` returns `Promise<{ meta, applied, resolvedScope, change }>`. Edits affect the body; metadata-only changes need no edits, but must supply `origin` or `crumpled`. `crumpled: true` records `crumpledAt` (keeping the original time if already set); `crumpled: false` removes it; omitted leaves it unchanged. Crumpling and smoothing never change `updatedAt`, which tracks body or origin changes only. Each replacement uses the evolving body in array order; the complete batch is written atomically only after every edit succeeds. `change` is a typed `{ kind, before, after }`: `kind` is `body`, `metadata`, or `file` to identify the diff inputs, or `none` with empty strings when neither body, origin, nor `crumpledAt` changed. It is not a rendered diff.
+- `update(address, edits?, { origin?, crumpled?, replaceAll? }?)` returns `Promise<{ meta, applied, resolvedScope, change }>`. Edits affect the body; metadata-only changes need no edits, but must supply `origin` or `crumpled`. `crumpled: true` records `crumpledAt` (keeping the original time if already set); `crumpled: false` removes it; omitted leaves it unchanged. Crumpling and smoothing never change `updatedAt`, which tracks body or origin changes only. Each replacement uses the evolving body in array order; the complete batch is written atomically only after every edit succeeds. `change` is a typed `{ kind, before, after }`: `kind` is `body`, `metadata`, or `file` to identify the diff inputs, or `none` with empty strings when neither body, origin, nor `crumpledAt` changed. It is not a rendered diff.
+- `rename(fromAddress, toAddress)` returns `Promise<{ meta, replacedCrumpledTarget }>`. The note moves with every metadata key preserved (`updatedAt` is bumped); a live note at the target refuses with `already_exists`, a crumpled target is replaced, and renaming onto the same resolved path is `nothing_to_do`.
 - `list({ pattern?, scope?, who?, wastebasket? }?)` returns `Promise<NoteRow[]>`, sorted by update time descending with address tie-breaking. Rows contain address, scope, virtual path, metadata, body, and body byte size. `scope` narrows the five-home view; `who` names a concrete agent/model home. By default crumpled notes are excluded; `wastebasket: true` returns only crumpled notes instead.
 - `search(queries: string[], { pattern?, scope?, who?, wastebasket? }?)` returns `Promise<NoteSearchRow[]>`, sorted by address, with the same crumpled-note rule as `list`. Matching is case-insensitive literal OR over body lines; matches contain one-based `line`, `text`, and `offsetChars` into the serialized read text. Neither listing nor search increments access metadata.
 
@@ -135,7 +137,7 @@ src/
 
 The public runtime exports are `createNotesStore`, `NoteError`, `projectKey(cwd)`, and `slugify(value)`, alongside the API's TypeScript types. The factory and `projectKey` remain synchronous; `projectKey` provides the existing repository/worktree identity algorithm, while `slugify` normalizes an agent/model name. The five store methods return promises and use asynchronous filesystem operations. Path/glob helpers, serialization, validation internals and constants are implementation details, not exported through `/notes`.
 
-The Pi adapter supplies the root and live session/project/agent/model identity on each call. Tools and boot use the same storage implementation. Tool schemas, Pi-style edit diff rendering, wire budgets, pagination, boot selection, and legacy activation migration stay outside the library. There are no parallel legacy store/path adapters. Internal source paths are not the supported library API.
+The Pi adapter supplies the root and live session/project/agent/model identity on each call. Tools and boot use the same storage implementation. Tool schemas, Pi-style edit diff rendering, wire budgets, pagination, and boot selection stay outside the library. There are no parallel legacy store/path adapters. Internal source paths are not the supported library API.
 
 ## SDK integration
 

@@ -2,7 +2,7 @@
  * OWNER: pi-context (adopted).
  * STATUS: tracked acceptance spec for the real-file notes store and its five tools.
  * CLAIM: notes live as markdown files under $PI_NOTES_HOME with harness-owned frontmatter;
- *   the five tools (notes_write/edit/read/list/search) are the only note surface, and the
+ *   the five tools (notes_write/update/read/list/search) are the only note surface, and the
  *   boot index reads the physical store across scopes.
  * HERMETIC: every test points PI_NOTES_HOME at its own temp root; no real ~/.agents is touched.
  */
@@ -53,14 +53,14 @@ function assertNoPublicScope(value: unknown, label: string): void {
 
 test("exactly the five notes tools are registered; the legacy five are gone", () => {
 	const captured = makeExtension(manager());
-	for (const name of ["notes_write", "notes_edit", "notes_read", "notes_list", "notes_search"]) {
+	for (const name of ["notes_write", "notes_update", "notes_read", "notes_list", "notes_search"]) {
 		assert.ok(captured.tools.get(name), `${name} is registered`);
 	}
 	for (const legacy of ["notes_write_file", "notes_append_to_file", "notes_read_file", "notes_search_contents", "notes_list_files"]) {
 		assert.equal(captured.tools.get(legacy), undefined, `${legacy} is unregistered`);
 	}
 	assert.equal(captured.tools.get("notes_write")?.executionMode, "sequential");
-	assert.equal(captured.tools.get("notes_edit")?.executionMode, "sequential");
+	assert.equal(captured.tools.get("notes_update")?.executionMode, "sequential");
 	assert.equal(captured.tools.get("notes_read")?.executionMode, undefined);
 });
 
@@ -71,9 +71,9 @@ test("note schemas drop status/stale and expose crumpled plus wastebasket", () =
 	assert.equal(Check(write, { address: "a.md", content: "x" }), true);
 	assert.equal(Check(write, { address: "a.md", content: "x", stale: true }), false, "notes_write no longer accepts stale");
 	assert.equal(Check(write, { address: "a.md", content: "x", crumpled: true }), false, "notes_write does not accept crumpled");
-	const edit = schema("notes_edit");
+	const edit = schema("notes_update");
 	assert.equal(Check(edit, { address: "a.md", crumpled: true }), true);
-	assert.equal(Check(edit, { address: "a.md", stale: true }), false, "notes_edit no longer accepts stale");
+	assert.equal(Check(edit, { address: "a.md", stale: true }), false, "notes_update no longer accepts stale");
 	assert.equal(Check(edit, { address: "a.md", status: "archived" }), false, "status is gone");
 	for (const name of ["notes_list", "notes_search"]) {
 		const base = name === "notes_search" ? { query: "x" } : {};
@@ -157,7 +157,7 @@ test("session-note project ownership is per note, persistent across sessions, an
 	const movedContext = context(firstSession, undefined, undefined, true, cwdB);
 	await call(firstCaptured, "notes_write", { address: "first.md", content: "overwritten from another cwd" }, movedContext);
 	assert.equal(parseNote(readFileSync(firstFile, "utf8")).meta.project, projectA, "overwriting an existing note does not silently reassign it");
-	await call(firstCaptured, "notes_edit", { address: "first.md", edits: [{ oldText: "overwritten", newText: "edited" }] }, movedContext);
+	await call(firstCaptured, "notes_update", { address: "first.md", edits: [{ oldText: "overwritten", newText: "edited" }] }, movedContext);
 	assert.equal(parseNote(readFileSync(firstFile, "utf8")).meta.project, projectA, "editing an existing note preserves its original project key");
 	await call(firstCaptured, "notes_read", { address: "first.md" }, movedContext);
 	assert.equal(parseNote(readFileSync(firstFile, "utf8")).meta.project, projectA, "reading preserves existing project ownership");
@@ -212,7 +212,7 @@ legacy body`);
 	assert.equal(parsed.meta.created_at, "2026-01-01T00:00:00.000+00:00", "unrecognized fields remain ordinary extras");
 	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.address, "legacy.md");
 	assert.match(resultRead(await call(captured, "notes_read", { address: "legacy.md" }, ctx)).content, /legacy body$/);
-	await call(captured, "notes_edit", { address: "legacy.md", edits: [{ oldText: "legacy body", newText: "edited body" }] }, ctx);
+	await call(captured, "notes_update", { address: "legacy.md", edits: [{ oldText: "legacy body", newText: "edited body" }] }, ctx);
 	await call(captured, "notes_write", { address: "legacy.md", content: "overwritten body" }, ctx);
 	const rewritten = parseNote(readFileSync(legacyFile, "utf8"));
 	assert.equal(rewritten.body, "overwritten body");
@@ -246,27 +246,27 @@ test("edit is body-scoped with named failures and a replace_all escape hatch", a
 
 	await call(captured, "notes_write", { address: "edit.md", content: "alpha\nbeta\nbeta\ngamma" }, ctx);
 	const ambiguous = resultJson<{ error: string; line_numbers?: number[] }>(
-		await call(captured, "notes_edit", { address: "edit.md", edits: [{ oldText: "beta", newText: "B" }] }, ctx),
+		await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "beta", newText: "B" }] }, ctx),
 	);
 	assert.match(ambiguous.error, /occurs 2 times/);
 	assert.deepEqual(ambiguous.line_numbers, [2, 3], "the multi-match error carries every match line number");
 
 	const missing = resultJson<{ error: string; edit_index?: number }>(
-		await call(captured, "notes_edit", { address: "edit.md", edits: [{ oldText: "absent", newText: "x" }] }, ctx),
+		await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "absent", newText: "x" }] }, ctx),
 	);
 	assert.equal(missing.edit_index, 0, "a zero-match anchor names the failing edit index");
 
 	const all = resultJson<{ address: string; applied: number; diff: string; meta: Meta }>(
-		await call(captured, "notes_edit", { address: "edit.md", edits: [{ oldText: "beta", newText: "B" }], replace_all: true }, ctx),
+		await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "beta", newText: "B" }], replace_all: true }, ctx),
 	);
 	assert.equal(all.applied, 1);
 	assert.equal(all.address, "edit.md");
-	assertNoPublicScope(all, "notes_edit");
+	assertNoPublicScope(all, "notes_update");
 	assert.equal(resultRead(await call(captured, "notes_read", { address: "edit.md" }, ctx)).content.endsWith("alpha\nB\nB\ngamma"), true, "replace_all replaces every occurrence");
 
 	// An anchor that occurs only in frontmatter is not matched: edits are body-only.
 	const frontmatterOnly = resultJson<{ edit_index?: number }>(
-		await call(captured, "notes_edit", { address: "edit.md", edits: [{ oldText: "scope", newText: "x" }] }, ctx),
+		await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "scope", newText: "x" }] }, ctx),
 	);
 	assert.equal(frontmatterOnly.edit_index, 0, "a frontmatter-only anchor is not a body match");
 });
@@ -277,14 +277,14 @@ test("nothing-to-do, not-found, atomic batches, and replace_all zero-match are n
 	const captured = makeExtension(session);
 	const ctx = context(session);
 
-	const nameOnly = resultJson<{ error: string }>(await call(captured, "notes_edit", { address: "edit.md" }, ctx));
+	const nameOnly = resultJson<{ error: string }>(await call(captured, "notes_update", { address: "edit.md" }, ctx));
 	assert.match(nameOnly.error, /nothing to do/, "neither edits nor setters is a named error");
 
 	await call(captured, "notes_write", { address: "edit.md", content: "alpha\nbeta" }, ctx);
-	const empty = resultJson<{ error: string }>(await call(captured, "notes_edit", { address: "edit.md", edits: [] }, ctx));
+	const empty = resultJson<{ error: string }>(await call(captured, "notes_update", { address: "edit.md", edits: [] }, ctx));
 	assert.match(empty.error, /nothing to do/, "an empty edits list with no setters is also nothing to do");
 
-	const editMissing = resultJson<{ error: string }>(await call(captured, "notes_edit", { address: "missing.md", crumpled: true }, ctx));
+	const editMissing = resultJson<{ error: string }>(await call(captured, "notes_update", { address: "missing.md", crumpled: true }, ctx));
 	assert.equal(editMissing.error, "note not found");
 	const readMissing = resultJson<{ error: string; address: string }>(await call(captured, "notes_read", { address: "missing.md" }, ctx));
 	assert.equal(readMissing.error, "note not found");
@@ -293,19 +293,48 @@ test("nothing-to-do, not-found, atomic batches, and replace_all zero-match are n
 	const file = physicalPath("session", "edit.md", ctx);
 	const before = readFileSync(file, "utf8");
 	const failed = resultJson<{ error: string; edit_index?: number }>(
-		await call(captured, "notes_edit", { address: "edit.md", edits: [{ oldText: "alpha", newText: "A" }, { oldText: "absent", newText: "x" }] }, ctx),
+		await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "alpha", newText: "A" }, { oldText: "absent", newText: "x" }] }, ctx),
 	);
 	assert.equal(failed.edit_index, 1, "the failing edit is named");
 	assert.equal(readFileSync(file, "utf8"), before, "a failing batch leaves the file byte-identical, frontmatter included");
 
-	const applied = resultJson<{ applied: number }>(await call(captured, "notes_edit", { address: "edit.md", edits: [{ oldText: "alpha", newText: "A" }, { oldText: "beta", newText: "B" }] }, ctx));
+	const applied = resultJson<{ applied: number }>(await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "alpha", newText: "A" }, { oldText: "beta", newText: "B" }] }, ctx));
 	assert.equal(applied.applied, 2);
 	assert.equal(resultRead(await call(captured, "notes_read", { address: "edit.md" }, ctx)).content.endsWith("A\nB"), true);
 
 	const zero = resultJson<{ error: string; edit_index?: number }>(
-		await call(captured, "notes_edit", { address: "edit.md", edits: [{ oldText: "zzz", newText: "y" }], replace_all: true }, ctx),
+		await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "zzz", newText: "y" }], replace_all: true }, ctx),
 	);
 	assert.equal(zero.edit_index, 0, "replace_all with zero matches is the same zero-match error, not a silent no-op");
+});
+
+test("notes_update rename_to moves a note and refuses combinations and live targets", async () => {
+	freshRoot();
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+
+	await call(captured, "notes_write", { address: "move-me.md", content: "body" }, ctx);
+	const combined = resultJson<{ error: string }>(
+		await call(captured, "notes_update", { address: "move-me.md", rename_to: "moved.md", edits: [{ oldText: "body", newText: "x" }] }, ctx),
+	);
+	assert.match(combined.error, /rename_to is used alone/, "rename_to rejects being combined with edits");
+
+	await call(captured, "notes_write", { address: "occupied.md", content: "live target" }, ctx);
+	const conflict = resultJson<{ error: string }>(await call(captured, "notes_update", { address: "move-me.md", rename_to: "occupied.md" }, ctx));
+	assert.match(conflict.error, /live note/, "a live target refuses the move");
+
+	const renamed = resultJson<{ address: string; rename_to: string; replaced_crumpled_target: boolean }>(
+		await call(captured, "notes_update", { address: "move-me.md", rename_to: "moved.md" }, ctx),
+	);
+	assert.equal(renamed.address, "move-me.md");
+	assert.equal(renamed.rename_to, "moved.md");
+	assert.equal(renamed.replaced_crumpled_target, false);
+	assertNoPublicScope(renamed, "notes_update rename_to");
+
+	const gone = resultJson<{ error: string }>(await call(captured, "notes_read", { address: "move-me.md" }, ctx));
+	assert.equal(gone.error, "note not found", "the old address is gone");
+	assert.equal(resultRead(await call(captured, "notes_read", { address: "moved.md" }, ctx)).content.endsWith("body"), true);
 });
 
 test("all notes tool results use address as the only home identity", async () => {
@@ -324,9 +353,9 @@ test("all notes tool results use address as the only home identity", async () =>
 		assert.equal(written.address, note.address, `notes_write returns ${note.address}`);
 		assertNoPublicScope(written, `notes_write ${note.address}`);
 
-		const edited = resultJson<{ address: string }>(await call(captured, "notes_edit", { address: note.address, edits: [{ oldText: "needle", newText: "match" }] }, ctx));
-		assert.equal(edited.address, note.address, `notes_edit returns ${note.address}`);
-		assertNoPublicScope(edited, `notes_edit ${note.address}`);
+		const edited = resultJson<{ address: string }>(await call(captured, "notes_update", { address: note.address, edits: [{ oldText: "needle", newText: "match" }] }, ctx));
+		assert.equal(edited.address, note.address, `notes_update returns ${note.address}`);
+		assertNoPublicScope(edited, `notes_update ${note.address}`);
 
 		const rawRead = await call(captured, "notes_read", { address: note.address }, ctx);
 		const read = resultRead(rawRead);
@@ -376,7 +405,7 @@ test("list and search merge scopes and carry addresses; the path jail rejects es
 	assert.deepEqual(Object.keys(hit).sort(), ["line", "offset_chars", "text", "truncated"]);
 
 	const escaped = ["../evil", "/abs", "a\\b"];
-	for (const tool of ["notes_write", "notes_edit", "notes_read"] as const) {
+	for (const tool of ["notes_write", "notes_update", "notes_read"] as const) {
 		for (const path of escaped) {
 			await assert.rejects(() => call(captured, tool, { address: path, content: "x", edits: [{ oldText: "a", newText: "b" }] }, ctx), `${tool} rejects ${path}`);
 		}
@@ -432,7 +461,7 @@ test("Pi adapter resolves agent and switched model identity on each notes call a
 		assert.ok(boot.includes("@models/second-model/private.md"));
 		assert.equal(boot.includes("@models/first-model/private.md"), false);
 		assert.match(resultRead(await call(captured, "notes_read", { address: "@models/first-model/private.md" }, ctx)).content, /first model note$/);
-		const refused = resultJson<{ error: string }>(await call(captured, "notes_edit", { address: "@models/first-model/private.md", crumpled: true }, ctx));
+		const refused = resultJson<{ error: string }>(await call(captured, "notes_update", { address: "@models/first-model/private.md", crumpled: true }, ctx));
 		assert.match(refused.error, /not your home/);
 		assert.match(readFileSync(join(root, "models/first-model/private.md"), "utf8"), /first model note$/);
 	});

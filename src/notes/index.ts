@@ -10,6 +10,7 @@ export type {
 	NoteMatch,
 	NoteMeta,
 	NoteReadResult,
+	NoteRenameResult,
 	NoteRow,
 	NoteSearchRow,
 	NoteWriteResult,
