@@ -335,6 +335,24 @@ test("notes_update rename_to moves a note and refuses combinations and live targ
 	const gone = resultJson<{ error: string }>(await call(captured, "notes_read", { address: "move-me.md" }, ctx));
 	assert.equal(gone.error, "note not found", "the old address is gone");
 	assert.equal(resultRead(await call(captured, "notes_read", { address: "moved.md" }, ctx)).content.endsWith("body"), true);
+
+	// Empty filler values are not a combination: a model passing every parameter still gets its crumple.
+	const crumpled = resultJson<{ address: string }>(
+		await call(captured, "notes_update", { address: "moved.md", crumpled: true, edits: [], origin: "self", rename_to: "", replace_all: false }, ctx),
+	);
+	assert.equal(crumpled.address, "moved.md", "an empty rename_to is ignored as if omitted");
+	const basket = resultJson<Listed>(await call(captured, "notes_list", { wastebasket: true }, ctx));
+	assert.equal(basket.files.some((file) => file.address === "moved.md"), true, "the note was crumpled");
+
+	const fillerRename = resultJson<{ rename_to: string }>(
+		await call(captured, "notes_update", { address: "moved.md", rename_to: "moved-again.md", edits: [], replace_all: false }, ctx),
+	);
+	assert.equal(fillerRename.rename_to, "moved-again.md", "empty edits and replace_all: false ride along with a rename");
+
+	const realCombo = resultJson<{ error: string }>(
+		await call(captured, "notes_update", { address: "moved-again.md", rename_to: "nope.md", replace_all: true }, ctx),
+	);
+	assert.match(realCombo.error, /rename_to is used alone/, "replace_all: true is a real combination and refuses");
 });
 
 test("all notes tool results use address as the only home identity", async () => {
