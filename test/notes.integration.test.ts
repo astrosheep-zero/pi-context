@@ -42,7 +42,7 @@ test("notes_list and notes_search are recent-first snapshots with narrowing hint
 	const listed = resultJson<{ files: Array<{ address: string; updated_at: string }>; more: number }>(await call(captured, "notes_list", { limit: 2 }, ctx));
 	assert.deepEqual(listed.files.map((file) => file.address), ["new.md", "@project/design.md"]);
 	assert.equal(listed.more, 1);
-	assert.deepEqual(Object.keys(listed).sort(), ["files", "more"]);
+	assert.deepEqual(Object.keys(listed).sort(), ["crumpled_excluded", "files", "homes_unavailable", "more"]);
 
 	const searched = resultJson<{ files: Array<{ address: string; updated_at: string }>; more: number }>(await call(captured, "notes_search", { query: "needle", limit: 2 }, ctx));
 	assert.deepEqual(searched.files.map((file) => file.address), ["new.md", "@project/design.md"]);
@@ -124,7 +124,7 @@ test("notes are real files that persist across sessions and round-trip Unicode",
 	);
 	assert.equal(rootOnly.files.length, 0, "glob * stays within one segment");
 	assert.equal(searched.files[0]?.updated_at, listedFiles.files[0]?.updated_at);
-	await assert.rejects(() => call(captured, "notes_write", { address: "../escape", content: "x" }, ctx), /unsupported component/);
+	assert.equal(resultJson<{ code: string }>(await call(captured, "notes_write", { address: "../escape", content: "x" }, ctx)).code, "invalid_address");
 });
 
 test("crumple lifecycle: metadata-only edits close and smooth a note without touching updatedAt", async () => {
@@ -320,8 +320,8 @@ test("an over-budget note is delivered as a prefix and resumed by next_offset_ch
 	assert.ok(first.content.length > 0, "the page is not empty");
 	assert.equal(first.content.includes("…"), false, "the payload is a plain prefix with no marker");
 	assert.ok(first.content.startsWith("---\n"), "the frontmatter is delivered first");
-	assert.equal(first.header, `--- READ WINDOW ---\naddress: huge.md\nchars: [0,${first.next_offset_chars}) of ${first.total_chars}\nnext_offset_chars: ${first.next_offset_chars}\n`, "the raw block names the address, half-open range, and resume cursor");
-	assert.deepEqual(Object.keys(first.details).sort(), ["address", "next_offset_chars", "offset_chars", "total_chars"], "notes_read details carries exactly the raw window address and cursor metadata");
+	assert.equal(first.header, `--- READ WINDOW ---\naddress: huge.md\nchars: [0,${first.next_offset_chars}) of ${first.total_chars}\nnext_offset_chars: ${first.next_offset_chars}\n`, "the raw block names the resolved address, range, and resume cursor");
+	assert.deepEqual(Object.keys(first.details).sort(), ["address", "next_offset_chars", "offset_chars", "total_chars"], "notes_read details carries resolved identity and cursor metadata");
 	assert.equal("content" in first.details, false, "details never duplicates the payload");
 	assert.equal(first.offset_chars, 0, "the default window starts at the resolved offset 0");
 	// Following the cursor reconstructs frontmatter + body by plain concatenation.
@@ -339,9 +339,21 @@ test("an over-budget note is delivered as a prefix and resumed by next_offset_ch
 
 	// A success carries structured details; an error stays a JSON envelope with no details.
 	const missingResult = await call(captured, "notes_read", { address: "no-such.md" }, ctx);
+	const root = process.env.PI_NOTES_HOME!;
+	for (const result of [
+		await call(captured, "notes_write", { address: "@project/receipt", content: "body" }, ctx),
+		await call(captured, "notes_update", { address: "@project/receipt", edits: [{ oldText: "body", newText: "changed" }] }, ctx),
+		await call(captured, "notes_list", { pattern: "@project/**" }, ctx),
+		await call(captured, "notes_search", { query: "changed", pattern: "@project/**" }, ctx),
+		await call(captured, "notes_read", { address: "@project/receipt" }, ctx),
+	]) {
+		assert.equal(JSON.stringify(result).includes(root), false, "notes receipts never expose the absolute home");
+	}
+	assert.equal(JSON.stringify(missingResult).includes(root), false, "failure receipts never expose the absolute home");
 	const missing = resultJson<Record<string, unknown>>(missingResult);
-	assert.deepEqual(Object.keys(missing).sort(), ["address", "error"], "the read error carries exactly error and address");
+	assert.deepEqual(Object.keys(missing).sort(), ["code", "error"], "the read error uses the shared failure envelope");
 	assert.equal(missing.error, "note not found");
+	assert.equal(missing.code, "not_found");
 	assert.equal(missingResult.details, undefined, "a JSON error carries no details metadata");
 });
 

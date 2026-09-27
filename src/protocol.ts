@@ -55,7 +55,7 @@ An address decides who the note belongs to. Don't dump it in the wrong place:
 - @self/<vpath> — your private diary. It follows you, not them. Write whatever you want: reminders for every time you wake, lessons, grudges, your assassination list, where the secret money is hidden.
 - @model/<vpath> — different brains get different notes: big brains, small brains, careful ones, careless ones. They don't share homework. When a fallback swaps brains mid-window, the notebook swaps too.
 
-Any other @ address is fake. End of discussion.
+Any other @ address is fake. End of discussion. These @ addresses belong to the notes namespace, not the filesystem: never pass them to general read/write/edit/bash tools.
 
 \`@project/MAP.md\`, \`@human/MAP.md\`, \`@self/MAP.md\`, and \`@model/MAP.md\` are special: their bodies are shown in your brain every time you wake. Each one maps the durable notes that belong to it: one line per note, with an unambiguous address and a short gist. Keep each one current.
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;

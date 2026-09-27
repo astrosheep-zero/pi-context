@@ -87,8 +87,9 @@ export async function namespaceSlugs(namespace: "agents" | "models", home: strin
 			.filter((entry) => entry.isDirectory())
 			.map((entry) => entry.name)
 			.sort();
-	} catch {
-		return [];
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+		throw error;
 	}
 }
 

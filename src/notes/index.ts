@@ -1,4 +1,4 @@
-export { createNotesStore, NoteError } from "./store.js";
+export { createNotesStore, NoteError, noteIdentity } from "./store.js";
 export { projectKey, slugify } from "./paths.js";
 export type { NotesContext } from "./context.js";
 export type {
@@ -9,6 +9,8 @@ export type {
 	NoteErrorCode,
 	NoteMatch,
 	NoteMeta,
+	NoteQueryResult,
+	NoteQueryStatus,
 	NoteReadResult,
 	NoteRenameResult,
 	NoteRow,

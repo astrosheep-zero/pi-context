@@ -7,11 +7,11 @@ import { assertAddress, assertGlobPattern, addressFor, globToRegExp } from "./ad
 import { snapshotNotesContext, type NotesContext } from "./context.js";
 import { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "./constants.js";
 import { isOrigin, isScope, localIso, parseNote, serializeNote, stripLeadingFrontmatter, type NoteMeta, type Origin } from "./frontmatter.js";
-import { namespaceSlugs, physicalPath, scopeDir, SLUG_PATTERN, type Scope } from "./paths.js";
+import { namespaceSlugs, noteFileName, physicalPath, scopeDir, SLUG_PATTERN, type Scope } from "./paths.js";
 
 export type { NoteMeta, Origin, Scope };
 
-export type NoteErrorCode = "not_found" | "already_exists" | "ambiguous_edit" | "no_match" | "nothing_to_do" | "too_large" | "invalid_scope" | "invalid_origin";
+export type NoteErrorCode = "not_found" | "already_exists" | "ambiguous_edit" | "no_match" | "nothing_to_do" | "too_large" | "invalid_scope" | "invalid_origin" | "invalid_address" | "invalid_pattern" | "invalid_query" | "invalid_offset" | "io_error" | "internal_error";
 
 /** Typed store refusal. Edit locations are exposed in camelCase. */
 export class NoteError extends Error {
@@ -39,12 +39,23 @@ export type NotesQuery = (
 	| { scope: "agent" | "model"; who?: string }
 ) & { pattern?: string; wastebasket?: boolean };
 export type NoteReadResult = { meta: NoteMeta; body: string; text: string; resolvedScope: Scope };
-export type NoteWriteResult = { meta: NoteMeta };
+export type NoteWriteResult = { meta: NoteMeta; outcome: "created" | "overwrote" | "uncrumpled" };
 export type NoteChange =
 	| { kind: "none"; before: ""; after: "" }
 	| { kind: "body" | "metadata" | "file"; before: string; after: string };
 export type NoteEditResult = { meta: NoteMeta; applied: number; resolvedScope: Scope; change: NoteChange };
 export type NoteRenameResult = { meta: NoteMeta; replacedCrumpledTarget: boolean };
+export type NoteQueryStatus = { crumpledExcluded: number; homesUnavailable: string[] };
+export type NoteQueryResult<T> = { rows: T[]; status: NoteQueryStatus };
+
+/** Public identity resolved for an operation, never a filesystem path. */
+export function noteIdentity(context: NotesContext, address: string): { address: string; project_key?: string } {
+	const resolved = assertAddress(address);
+	return {
+		address: addressFor(context, resolved.scope, noteFileName(resolved.path), resolved.who),
+		...(resolved.scope === "project" ? { project_key: context.projectKey } : {}),
+	};
+}
 
 /** Host-neutral, filesystem-backed notes API. */
 export interface NotesStore {
@@ -54,6 +65,8 @@ export interface NotesStore {
 	rename(fromAddress: string, toAddress: string): Promise<NoteRenameResult>;
 	list(options?: NotesQuery): Promise<NoteRow[]>;
 	search(queries: string[], options?: NotesQuery): Promise<NoteSearchRow[]>;
+	listWithStatus(options?: NotesQuery): Promise<NoteQueryResult<NoteRow>>;
+	searchWithStatus(queries: string[], options?: NotesQuery): Promise<NoteQueryResult<NoteSearchRow>>;
 }
 
 const SCOPE_ORDER: readonly Scope[] = ["session", "project", "human", "agent", "model"];
@@ -247,6 +260,7 @@ export function createNotesStore(input: NotesContext): NotesStore {
 			const cleanBody = stripLeadingFrontmatter(stableContent);
 			const existingRaw = await readFileIfExists(path);
 			const existing = existingRaw === undefined ? undefined : parseNote(existingRaw, now).meta;
+			const outcome = existing === undefined ? "created" : existing.crumpledAt === undefined ? "overwrote" : "uncrumpled";
 			const meta: NoteMeta = existing ?? {
 				scope,
 				origin,
@@ -263,7 +277,7 @@ export function createNotesStore(input: NotesContext): NotesStore {
 			const serialized = serializeNote(meta, cleanBody);
 			assertSerializedSize(serialized);
 			await atomicWrite(path, serialized);
-			return { meta };
+			return { meta, outcome };
 		});
 	}
 
@@ -303,6 +317,7 @@ export function createNotesStore(input: NotesContext): NotesStore {
 			meta.scope = scope;
 			const beforeMeta: NoteMeta = { ...meta };
 			let next = body;
+			let applied = 0;
 			operations.forEach((operation, index) => {
 				const oldText = operation?.oldText;
 				const newText = operation?.newText;
@@ -313,6 +328,7 @@ export function createNotesStore(input: NotesContext): NotesStore {
 				if (lines.length > 1 && !stableOptions.replaceAll) {
 					throw new NoteError("ambiguous_edit", `edit ${index}: oldText occurs ${lines.length} times (lines ${lines.join(", ")}); pass replace_all to replace every occurrence`, { lineNumbers: lines, editIndex: index });
 				}
+				if (oldText !== newText) applied++;
 				// Positional splicing preserves user replacement text byte-for-byte.
 				if (stableOptions.replaceAll) next = next.split(oldText).join(newText);
 				else {
@@ -335,7 +351,7 @@ export function createNotesStore(input: NotesContext): NotesStore {
 			else if (metadataChanged) change = { kind: "metadata", before: frontmatterOf(beforeMeta), after: frontmatterOf(meta) };
 			else change = { kind: "none", before: "", after: "" };
 			await atomicWrite(path, serialized);
-			return { meta, applied: operations.length, resolvedScope: scope, change };
+			return { meta, applied, resolvedScope: scope, change };
 		});
 	}
 
@@ -379,40 +395,72 @@ export function createNotesStore(input: NotesContext): NotesStore {
 		}));
 	}
 
-	async function* scan(options: NotesQuery): AsyncGenerator<Omit<NoteRow, "sizeBytes">> {
+	async function* scan(options: NotesQuery, status?: NoteQueryStatus): AsyncGenerator<Omit<NoteRow, "sizeBytes">> {
 		const matcher = matcherFor(normalizePattern(options.pattern, context));
-		const homes = await homesFor(context, options);
+		let homes: HomeRef[];
+		try {
+			homes = await homesFor(context, options);
+		} catch (error) {
+			if (!status || !isFilesystemError(error) || !/^@(agents|models)\//.test(options.pattern ?? "")) throw error;
+			status.homesUnavailable.push(options.pattern!.startsWith("@agents/") ? "@agents" : "@models");
+			return;
+		}
 		for (const home of homes) {
 			const scope = home.scope;
 			const root = scopeDir(scope, context, home.who);
-			for (const path of await walkMarkdown(root)) {
-				const address = addressFor(context, scope, path, home.who);
-				if (matcher && !matcher.test(address)) continue;
-				const fullPath = join(root, path);
-				const raw = await withPathQueue(fullPath, () => readFile(fullPath, "utf8"));
-				const { meta, body } = parseNote(raw);
-				meta.scope = scope;
-				if ((meta.crumpledAt !== undefined) !== (options.wastebasket === true)) continue;
-				yield { address, scope, path, meta, body };
+			const homeRows: Array<Omit<NoteRow, "sizeBytes">> = [];
+			let excluded = 0;
+			try {
+				for (const path of await walkMarkdown(root)) {
+					const address = addressFor(context, scope, path, home.who);
+					if (matcher && !matcher.test(address)) continue;
+					const fullPath = join(root, path);
+					const raw = await withPathQueue(fullPath, () => readFile(fullPath, "utf8"));
+					const { meta, body } = parseNote(raw);
+					meta.scope = scope;
+					if ((meta.crumpledAt !== undefined) !== (options.wastebasket === true)) {
+						if (meta.crumpledAt !== undefined) excluded++;
+						continue;
+					}
+					homeRows.push({ address, scope, path, meta, body });
+				}
+			} catch (error) {
+				if (!status || !isFilesystemError(error)) throw error;
+				status.homesUnavailable.push(addressFor(context, scope, "", home.who).replace(/\/$/, "") || "session");
+				continue;
 			}
+			if (status) status.crumpledExcluded += excluded;
+			for (const row of homeRows) yield row;
 		}
 	}
 
 	async function list(options: NotesQuery = {}): Promise<NoteRow[]> {
+		return (await listRows(options)).rows;
+	}
+
+	async function listRows(options: NotesQuery, status?: NoteQueryStatus): Promise<NoteQueryResult<NoteRow>> {
 		const stableOptions = { ...options } as NotesQuery;
 		const rows: NoteRow[] = [];
-		for await (const row of scan(stableOptions)) {
+		for await (const row of scan(stableOptions, status)) {
 			rows.push({ ...row, sizeBytes: Buffer.byteLength(row.body, "utf8") });
 		}
 		rows.sort((a, b) => b.meta.updatedAt - a.meta.updatedAt || a.address.localeCompare(b.address));
-		return rows;
+		return { rows, status: status ?? { crumpledExcluded: 0, homesUnavailable: [] } };
+	}
+
+	function listWithStatus(options: NotesQuery = {}): Promise<NoteQueryResult<NoteRow>> {
+		return listRows(options, { crumpledExcluded: 0, homesUnavailable: [] });
 	}
 
 	async function search(queries: string[], options: NotesQuery = {}): Promise<NoteSearchRow[]> {
+		return (await searchRows(queries, options)).rows;
+	}
+
+	async function searchRows(queries: string[], options: NotesQuery, status?: NoteQueryStatus): Promise<NoteQueryResult<NoteSearchRow>> {
 		const stableQueries = [...queries];
 		const stableOptions = { ...options } as NotesQuery;
 		const rows: NoteSearchRow[] = [];
-		for await (const note of scan(stableOptions)) {
+		for await (const note of scan(stableOptions, status)) {
 			const { address, path, scope, meta, body } = note;
 			const serializedBodyOffset = Array.from(serializeNote(accessedMeta(meta, scope, Date.now()), "")).length;
 			let baseChars = 0;
@@ -427,8 +475,17 @@ export function createNotesStore(input: NotesContext): NotesStore {
 			if (matches.length > 0) rows.push({ address, path, scope, meta, matches });
 		}
 		rows.sort((a, b) => a.address.localeCompare(b.address));
-		return rows;
+		return { rows, status: status ?? { crumpledExcluded: 0, homesUnavailable: [] } };
 	}
 
-	return { write, read, update, rename, list, search };
+	function searchWithStatus(queries: string[], options: NotesQuery = {}): Promise<NoteQueryResult<NoteSearchRow>> {
+		return searchRows(queries, options, { crumpledExcluded: 0, homesUnavailable: [] });
+	}
+
+	return { write, read, update, rename, list, search, listWithStatus, searchWithStatus };
+}
+
+function isFilesystemError(error: unknown): boolean {
+	const code = errno(error);
+	return typeof code === "string" && /^E[A-Z0-9_]+$/.test(code) && !code.startsWith("ERR_");
 }

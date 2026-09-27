@@ -1238,7 +1238,7 @@ test("real AgentSession: warning precedes a durable checkpoint, including failed
 			} else if (scenario === "write-error") {
 				assert.equal(resetMarkers(fixture).length, 1);
 				assert.equal(existsSync(noteFile), false, "a failed checkpoint does not create a note");
-				assert.ok(branch.some((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "notes_write" && entry.message.isError), "the failed write is a durable tool error");
+				assert.ok(branch.some((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "notes_write" && !entry.message.isError && entry.message.content.some((part) => part.type === "text" && part.text.includes('"code": "invalid_address"'))), "the failed write persists its coded error envelope");
 			} else {
 				assert.equal(resetMarkers(fixture).length, 1, "normal stop falls back to the same reset even when the warning was ignored");
 				assert.equal(existsSync(noteFile), false);

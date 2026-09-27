@@ -35,20 +35,12 @@ function setUpdatedAt(scope: Scope, path: string, ctx: ReturnType<typeof context
 }
 
 type Meta = Record<string, unknown>;
-type Listed = { files: Array<{ address: string; updated_at: string; crumpled_at?: string }> };
-type Searched = { files: Array<{ address: string; updated_at: string; crumpled_at?: string; matches_total: number; matches: Array<{ line: number; text: string; offset_chars: number; truncated: boolean }> }> };
+type Listed = { files: Array<{ address: string; project_key?: string; updated_at: string; crumpled_at?: string }> };
+type Searched = { files: Array<{ address: string; project_key?: string; updated_at: string; crumpled_at?: string; matches_total: number; matches: Array<{ line: number; text: string; offset_chars: number; truncated: boolean }> }> };
 
-function assertNoPublicScope(value: unknown, label: string): void {
-	if (Array.isArray(value)) {
-		for (const item of value) assertNoPublicScope(item, label);
-		return;
-	}
-	if (!value || typeof value !== "object") return;
-	for (const [key, child] of Object.entries(value)) {
-		assert.notEqual(key, "scope", `${label} does not expose scope`);
-		assert.notEqual(key, "resolved_scope", `${label} does not expose resolved_scope`);
-		assertNoPublicScope(child, label);
-	}
+function assertReceiptIdentity(value: { address: string; project_key?: string }, address: string, scope: Scope, ctx: ReturnType<typeof context>): void {
+	assert.equal(value.address, address);
+	assert.equal(value.project_key, scope === "project" ? projectKey(ctx.cwd) : undefined);
 }
 
 test("exactly the five notes tools are registered; the legacy five are gone", () => {
@@ -89,10 +81,10 @@ test("write lands a real markdown file with harness frontmatter and a pure body"
 	const ctx = context(session);
 	const sessionId = session.getSessionId();
 
-	const result = resultJson<{ address: string; written: true }>(
+	const result = resultJson<{ address: string; outcome: string }>(
 		await call(captured, "notes_write", { address: "a/b.md", content: "hello" }, ctx),
 	);
-	assert.deepEqual(Object.keys(result).sort(), ["address", "written"]);
+	assert.deepEqual(Object.keys(result).sort(), ["address", "outcome"]);
 	const file = physicalPath("session", "a/b.md", ctx);
 	assert.equal(file, join(root, "pi", "session", sessionId, "a", "b.md"));
 	assert.ok(existsSync(file), "the note is a real file under the session scope dir");
@@ -110,8 +102,8 @@ test("write lands a real markdown file with harness frontmatter and a pure body"
 		assert.match(raw, new RegExp(`^${key}: \\d{4}-\\d{2}-\\d{2}T`, "m"), `frontmatter renders ${key} via localIso`);
 	}
 	assert.equal(parseNote(raw).meta.project, projectKey(ctx.cwd), "a newly-created session note records its existing project key");
-	assert.equal(result.address, "a/b.md");
-	assert.equal(result.written, true);
+	assertReceiptIdentity(result, "a/b.md", "session", ctx);
+	assert.equal(result.outcome, "created");
 	assert.equal(existsSync(join(scopeDir("session", ctx), ".session.json")), false, "ownership is stored in note frontmatter, not a sidecar");
 
 	// A leading YAML block in user content is stripped from the body.
@@ -245,10 +237,11 @@ test("edit is body-scoped with named failures and a replace_all escape hatch", a
 	const ctx = context(session);
 
 	await call(captured, "notes_write", { address: "edit.md", content: "alpha\nbeta\nbeta\ngamma" }, ctx);
-	const ambiguous = resultJson<{ error: string; line_numbers?: number[] }>(
+	const ambiguous = resultJson<{ error: string; code: string; line_numbers?: number[] }>(
 		await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "beta", newText: "B" }] }, ctx),
 	);
 	assert.match(ambiguous.error, /occurs 2 times/);
+	assert.equal(ambiguous.code, "ambiguous_edit");
 	assert.deepEqual(ambiguous.line_numbers, [2, 3], "the multi-match error carries every match line number");
 
 	const missing = resultJson<{ error: string; edit_index?: number }>(
@@ -256,12 +249,13 @@ test("edit is body-scoped with named failures and a replace_all escape hatch", a
 	);
 	assert.equal(missing.edit_index, 0, "a zero-match anchor names the failing edit index");
 
-	const all = resultJson<{ address: string; applied: number; diff: string; meta: Meta }>(
+	const all = resultJson<{ address: string; applied: number; change_kind: string; diff: string; meta: Meta }>(
 		await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "beta", newText: "B" }], replace_all: true }, ctx),
 	);
 	assert.equal(all.applied, 1);
 	assert.equal(all.address, "edit.md");
-	assertNoPublicScope(all, "notes_update");
+	assertReceiptIdentity(all, "edit.md", "session", ctx);
+	assert.equal(all.change_kind, "body");
 	assert.equal(resultRead(await call(captured, "notes_read", { address: "edit.md" }, ctx)).content.endsWith("alpha\nB\nB\ngamma"), true, "replace_all replaces every occurrence");
 
 	// An anchor that occurs only in frontmatter is not matched: edits are body-only.
@@ -286,9 +280,9 @@ test("nothing-to-do, not-found, atomic batches, and replace_all zero-match are n
 
 	const editMissing = resultJson<{ error: string }>(await call(captured, "notes_update", { address: "missing.md", crumpled: true }, ctx));
 	assert.equal(editMissing.error, "note not found");
-	const readMissing = resultJson<{ error: string; address: string }>(await call(captured, "notes_read", { address: "missing.md" }, ctx));
+	const readMissing = resultJson<{ error: string; code: string }>(await call(captured, "notes_read", { address: "missing.md" }, ctx));
 	assert.equal(readMissing.error, "note not found");
-	assert.equal(readMissing.address, "missing.md");
+	assert.equal(readMissing.code, "not_found");
 
 	const file = physicalPath("session", "edit.md", ctx);
 	const before = readFileSync(file, "utf8");
@@ -324,13 +318,14 @@ test("notes_update rename_to moves a note and refuses combinations and live targ
 	const conflict = resultJson<{ error: string }>(await call(captured, "notes_update", { address: "move-me.md", rename_to: "occupied.md" }, ctx));
 	assert.match(conflict.error, /live note/, "a live target refuses the move");
 
-	const renamed = resultJson<{ address: string; rename_to: string; replaced_crumpled_target: boolean }>(
+	const renamed = resultJson<{ address: string; rename_from: string; rename_to: string; change_kind: string; replaced_crumpled_target: boolean }>(
 		await call(captured, "notes_update", { address: "move-me.md", rename_to: "moved.md" }, ctx),
 	);
-	assert.equal(renamed.address, "move-me.md");
+	assertReceiptIdentity(renamed, "moved.md", "session", ctx);
+	assert.equal(renamed.rename_from, "move-me.md");
+	assert.equal(renamed.change_kind, "file");
 	assert.equal(renamed.rename_to, "moved.md");
 	assert.equal(renamed.replaced_crumpled_target, false);
-	assertNoPublicScope(renamed, "notes_update rename_to");
 
 	const gone = resultJson<{ error: string }>(await call(captured, "notes_read", { address: "move-me.md" }, ctx));
 	assert.equal(gone.error, "note not found", "the old address is gone");
@@ -355,42 +350,79 @@ test("notes_update rename_to moves a note and refuses combinations and live targ
 	assert.match(realCombo.error, /rename_to is used alone/, "replace_all: true is a real combination and refuses");
 });
 
-test("all notes tool results use address as the only home identity", async () => {
+test("write and update receipts distinguish outcomes and no-op edits", async () => {
+	freshRoot();
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const alias = resultJson<{ address: string; outcome: string }>(await call(captured, "notes_write", { address: "@self/alias", content: "body" }, ctx));
+	assertReceiptIdentity(alias, "@agents/anonymous/alias.md", "agent", ctx);
+	assert.equal(alias.outcome, "created");
+	assert.equal(resultJson<{ outcome: string }>(await call(captured, "notes_write", { address: "@agents/anonymous/alias.md", content: "new body" }, ctx)).outcome, "overwrote");
+	await call(captured, "notes_update", { address: "@self/alias", crumpled: true }, ctx);
+	assert.equal(resultJson<{ outcome: string }>(await call(captured, "notes_write", { address: "@self/alias", content: "restored" }, ctx)).outcome, "uncrumpled");
+	const noChange = resultJson<{ applied: number; change_kind: string; diff: string }>(await call(captured, "notes_update", { address: "@self/alias", edits: [{ oldText: "restored", newText: "restored" }], crumpled: false }, ctx));
+	assert.deepEqual([noChange.applied, noChange.change_kind, noChange.diff], [0, "none", ""]);
+	const mixed = resultJson<{ applied: number; change_kind: string }>(await call(captured, "notes_update", { address: "@self/alias", edits: [{ oldText: "restored", newText: "restored" }, { oldText: "restored", newText: "changed" }] }, ctx));
+	assert.equal(mixed.applied, 1);
+	assert.equal(mixed.change_kind, "body");
+});
+
+test("empty results distinguish hidden notes and unavailable homes", async () => {
+	freshRoot();
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const empty = resultJson<{ files: unknown[]; crumpled_excluded: number; homes_unavailable: string[] }>(await call(captured, "notes_list", { pattern: "@human/**" }, ctx));
+	assert.deepEqual(empty, { files: [], more: 0, crumpled_excluded: 0, homes_unavailable: [] });
+	await call(captured, "notes_write", { address: "@human/hidden.md", content: "needle" }, ctx);
+	await call(captured, "notes_update", { address: "@human/hidden.md", crumpled: true }, ctx);
+	const hidden = resultJson<{ crumpled_excluded: number }>(await call(captured, "notes_search", { query: "needle", pattern: "@human/**" }, ctx));
+	assert.equal(hidden.crumpled_excluded, 1);
+	const broken = scopeDir("project", ctx);
+	mkdirSync(join(broken, ".."), { recursive: true });
+	writeFileSync(broken, "not a directory");
+	const partial = resultJson<{ files: Array<{ address: string }>; homes_unavailable: string[] }>(await call(captured, "notes_list", { pattern: "**" }, ctx));
+	assert.deepEqual(partial.homes_unavailable, ["@project"]);
+	assert.deepEqual(partial.files, []);
+	const searched = resultJson<{ homes_unavailable: string[] }>(await call(captured, "notes_search", { query: "needle", pattern: "**" }, ctx));
+	assert.deepEqual(searched.homes_unavailable, ["@project"]);
+	writeFileSync(join(process.env.PI_NOTES_HOME!, "agents"), "not a directory");
+	const namespace = resultJson<{ homes_unavailable: string[] }>(await call(captured, "notes_list", { pattern: "@agents/*/note.md" }, ctx));
+	assert.deepEqual(namespace.homes_unavailable, ["@agents"]);
+});
+
+test("notes receipts report resolved identity across scopes", async () => {
 	freshRoot();
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	const notes = [
-		{ address: "session.md", body: "session needle" },
-		{ address: "@project/project.md", body: "project needle" },
-		{ address: "@human/human.md", body: "human needle" },
+		{ address: "session.md", body: "session needle", scope: "session" },
+		{ address: "@project/project.md", body: "project needle", scope: "project" },
+		{ address: "@human/human.md", body: "human needle", scope: "human" },
 	] as const;
 
 	for (const note of notes) {
 		const written = resultJson<{ address: string }>(await call(captured, "notes_write", { address: note.address, content: note.body }, ctx));
-		assert.equal(written.address, note.address, `notes_write returns ${note.address}`);
-		assertNoPublicScope(written, `notes_write ${note.address}`);
+		assertReceiptIdentity(written, note.address, note.scope, ctx);
 
 		const edited = resultJson<{ address: string }>(await call(captured, "notes_update", { address: note.address, edits: [{ oldText: "needle", newText: "match" }] }, ctx));
-		assert.equal(edited.address, note.address, `notes_update returns ${note.address}`);
-		assertNoPublicScope(edited, `notes_update ${note.address}`);
+		assertReceiptIdentity(edited, note.address, note.scope, ctx);
 
 		const rawRead = await call(captured, "notes_read", { address: note.address }, ctx);
 		const read = resultRead(rawRead);
-		assert.equal(read.details.address, note.address, `notes_read details returns ${note.address}`);
-		assert.equal(read.header.startsWith("--- READ WINDOW ---\naddress: "), true, `notes_read starts a READ WINDOW block for ${note.address}`);
-		assert.equal(read.header.includes("scope"), false, `notes_read header omits scope for ${note.address}`);
-		assert.equal(read.header.includes("resolved_scope"), false, `notes_read header omits resolved_scope for ${note.address}`);
-		assertNoPublicScope(read.details, `notes_read ${note.address}`);
+		assertReceiptIdentity(read.details as { address: string }, note.address, note.scope, ctx);
+		assert.equal(read.header.includes("scope:"), false, "scope is derivable from the address and never echoed");
 	}
 
 	const listed = resultJson<Listed>(await call(captured, "notes_list", { pattern: "**" }, ctx));
 	assert.deepEqual(listed.files.map((file) => file.address).sort(), notes.map((note) => note.address).sort(), "notes_list returns each full address");
-	assertNoPublicScope(listed, "notes_list");
+	for (const row of listed.files) assertReceiptIdentity(row, row.address, notes.find((note) => note.address === row.address)!.scope, ctx);
 
 	const searched = resultJson<Searched>(await call(captured, "notes_search", { query: "match", pattern: "**" }, ctx));
 	assert.deepEqual(searched.files.map((file) => file.address), notes.map((note) => note.address).sort(), "notes_search returns each full address");
-	assertNoPublicScope(searched, "notes_search");
+	for (const row of searched.files) assertReceiptIdentity(row, row.address, notes.find((note) => note.address === row.address)!.scope, ctx);
 });
 
 test("list and search merge scopes and carry addresses; the path jail rejects escapes", async () => {
@@ -406,7 +438,7 @@ test("list and search merge scopes and carry addresses; the path jail rejects es
 	const listed = resultJson<Listed>(await call(captured, "notes_list", {}, ctx));
 	assert.deepEqual([...listed.files].map((file) => file.address).sort(), ["@human/three.md", "@project/two.md", "one.md"], "every merged row carries its full address");
 	for (const row of listed.files) {
-		assert.deepEqual(Object.keys(row).sort(), ["address", "updated_at"]);
+		assert.deepEqual(Object.keys(row).sort(), ["address", "updated_at", ...(row.address.startsWith("@project/") ? ["project_key"] : [])].sort());
 	}
 	const scoped = resultJson<Listed>(await call(captured, "notes_list", { pattern: "@human/**" }, ctx));
 	assert.deepEqual(scoped.files.map((file) => file.address), ["@human/three.md"], "an address-pattern filter narrows the set");
@@ -414,7 +446,7 @@ test("list and search merge scopes and carry addresses; the path jail rejects es
 	const searched = resultJson<Searched>(await call(captured, "notes_search", { query: "needle" }, ctx));
 	assert.equal(searched.files.length, 3, "literal search finds matches in every scope");
 	assert.deepEqual([...searched.files].map((file) => file.address).sort(), ["@human/three.md", "@project/two.md", "one.md"]);
-	for (const row of [...listed.files, ...searched.files]) assertNoPublicScope(row, "notes_list/search");
+	for (const row of [...listed.files, ...searched.files]) assert.equal("scope" in row, false, "scope is derivable from the address and never echoed");
 	assert.equal(searched.files.every((file) => file.matches_total === 1), true);
 	const hit = searched.files[0]!.matches[0]!;
 	assert.equal(hit.line, 1);
@@ -425,11 +457,14 @@ test("list and search merge scopes and carry addresses; the path jail rejects es
 	const escaped = ["../evil", "/abs", "a\\b"];
 	for (const tool of ["notes_write", "notes_update", "notes_read"] as const) {
 		for (const path of escaped) {
-			await assert.rejects(() => call(captured, tool, { address: path, content: "x", edits: [{ oldText: "a", newText: "b" }] }, ctx), `${tool} rejects ${path}`);
+			const failure = resultJson<{ error: string; code: string }>(await call(captured, tool, { address: path, content: "x", edits: [{ oldText: "a", newText: "b" }] }, ctx));
+			assert.equal(failure.code, "invalid_address");
 		}
 	}
-	await assert.rejects(() => call(captured, "notes_list", { pattern: "bad\\glob" }, ctx), /backslash/);
-	await assert.rejects(() => call(captured, "notes_search", { query: "needle", pattern: "bad\\glob" }, ctx), /backslash/);
+	assert.equal(resultJson<{ code: string }>(await call(captured, "notes_search", { query: "" }, ctx)).code, "invalid_query");
+	assert.equal(resultJson<{ code: string }>(await call(captured, "notes_read", { address: "one.md", offset_chars: 99999 }, ctx)).code, "invalid_offset");
+	assert.equal(resultJson<{ code: string }>(await call(captured, "notes_list", { pattern: "bad\\glob" }, ctx)).code, "invalid_pattern");
+	assert.equal(resultJson<{ code: string }>(await call(captured, "notes_search", { query: "needle", pattern: "bad\\glob" }, ctx)).code, "invalid_pattern");
 });
 
 test("@ addresses select one home, reject illegal sigils, and never fall back", async () => {
@@ -444,8 +479,8 @@ test("@ addresses select one home, reject illegal sigils, and never fall back", 
 	assert.ok(existsSync(physicalPath("human", "same.md", ctx)), "@human writes to the human home");
 	assert.match(resultRead(await call(captured, "notes_read", { address: "same.md" }, ctx)).content, /session$/);
 	assert.equal(resultJson<{ error?: string }>(await call(captured, "notes_read", { address: "@project/missing.md" }, ctx)).error, "note not found");
-	await assert.rejects(() => call(captured, "notes_read", { address: "@glboal/same.md" }, ctx), /@project\/.*@human\/.*bare names are this session/);
-	await assert.rejects(() => call(captured, "notes_write", { address: "bad@name.md", content: "no" }, ctx), /@project\/.*@human\/.*bare names are this session/);
+	assert.match(resultJson<{ error: string; code: string }>(await call(captured, "notes_read", { address: "@glboal/same.md" }, ctx)).error, /@project\/.*@human\/.*bare names are this session/);
+	assert.equal(resultJson<{ code: string }>(await call(captured, "notes_write", { address: "bad@name.md", content: "no" }, ctx)).code, "invalid_address");
 	assert.equal(existsSync(join(root, "human", "bad@name.md")), false, "a bad sigil creates nothing anywhere");
 });
 
