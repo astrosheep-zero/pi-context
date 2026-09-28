@@ -28,6 +28,14 @@ export class NoteError extends Error {
 }
 
 export type NoteRow = { address: string; scope: Scope; path: string; meta: NoteMeta; body: string; sizeBytes: number };
+
+// Recency sorts tie-break by address, so two writes sharing one Date.now() tick would silently invert the recent-first contract. Write stamps are strictly increasing per process.
+let lastWriteStamp = 0;
+function writeStamp(): number {
+	const now = Date.now();
+	lastWriteStamp = now > lastWriteStamp ? now : lastWriteStamp + 1;
+	return lastWriteStamp;
+}
 export type NoteMatch = { line: number; text: string; offsetChars: number };
 export type NoteSearchRow = { address: string; scope: Scope; path: string; meta: NoteMeta; matches: NoteMatch[] };
 export type EditOperation = { oldText: string; newText: string };
@@ -256,7 +264,7 @@ export function createNotesStore(input: NotesContext): NotesStore {
 		const origin = assertOrigin(stableOptions.origin ?? "self");
 		const path = physicalPath(scope, destination.path, context, destination.who);
 		return withPathQueue(path, async () => {
-			const now = Date.now();
+			const now = writeStamp();
 			const cleanBody = stripLeadingFrontmatter(stableContent);
 			const existingRaw = await readFileIfExists(path);
 			const existing = existingRaw === undefined ? undefined : parseNote(existingRaw, now).meta;
@@ -341,7 +349,7 @@ export function createNotesStore(input: NotesContext): NotesStore {
 			if (stableOptions.crumpled === false) delete meta.crumpledAt;
 			const bodyChanged = body !== next;
 			const originChanged = beforeMeta.origin !== meta.origin;
-			if (bodyChanged || originChanged) meta.updatedAt = Date.now();
+			if (bodyChanged || originChanged) meta.updatedAt = writeStamp();
 			const serialized = serializeNote(meta, next);
 			assertSerializedSize(serialized);
 			const metadataChanged = originChanged || beforeMeta.crumpledAt !== meta.crumpledAt;
@@ -386,7 +394,7 @@ export function createNotesStore(input: NotesContext): NotesStore {
 			// Project ownership only changes when the move crosses the session boundary.
 			if (fromScope !== "session" && toScope === "session") meta.project = context.projectKey;
 			if (fromScope === "session" && toScope !== "session") delete meta.project;
-			meta.updatedAt = Date.now();
+			meta.updatedAt = writeStamp();
 			const serialized = serializeNote(meta, body);
 			assertSerializedSize(serialized);
 			await atomicWrite(toPath, serialized);
