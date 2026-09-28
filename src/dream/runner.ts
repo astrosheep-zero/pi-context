@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
-import { lstat, mkdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createAgentSession, createEditToolDefinition, createWriteToolDefinition, ModelRuntime, resolveModelScopeWithDiagnostics, SessionManager, type AgentSession, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { Type, type Api, type Model } from "@earendil-works/pi-ai";
 import { contentText } from "../history/history.js";
+import { parseNote } from "../notes/frontmatter.js";
 
-export type DreamWrite = { tool: "write" | "edit"; path: string };
+export type DreamWrite = { tool: "write" | "edit" | "delete"; path: string };
 export type DreamResult = { report: string; writes: DreamWrite[]; error?: string };
 export type DreamerSession = Pick<AgentSession, "prompt" | "subscribe" | "dispose">;
 export type DreamerSessionFactory = (options: { cwd: string; modelPattern?: string; tools: string[] }) => Promise<DreamerSession>;
@@ -16,7 +17,7 @@ function isOutside(notesHome: string, target: string): boolean {
 	return fromHome === ".." || fromHome.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(fromHome);
 }
 
-async function jailWritePath(notesHome: string, path: string): Promise<void> {
+async function jailWritePath(notesHome: string, path: string, options: { createParent?: boolean } = {}): Promise<string> {
 	let realNotesHome: string;
 	try {
 		realNotesHome = await realpath(notesHome);
@@ -28,7 +29,8 @@ async function jailWritePath(notesHome: string, path: string): Promise<void> {
 	if (isOutside(realNotesHome, targetParent)) throw new Error(`write jail: ${path} is outside notes home ${notesHome}`);
 	// write creates parent directories itself. Create only after the lexical check, then
 	// canonicalize the parent so a symlink cannot lead the underlying tool out of home.
-	await mkdir(targetParent, { recursive: true });
+	// delete passes createParent:false: the parent must already exist for there to be anything to remove.
+	if (options.createParent !== false) await mkdir(targetParent, { recursive: true });
 	let realTargetParent: string;
 	try {
 		realTargetParent = await realpath(targetParent);
@@ -52,6 +54,7 @@ async function jailWritePath(notesHome: string, path: string): Promise<void> {
 		if (isOutside(realNotesHome, realTarget)) throw new Error(`write jail: ${path} is outside notes home ${notesHome}`);
 	}
 	if (targetStats && targetStats.nlink > 1) throw new Error(`write jail: ${path} has hard links and is not allowed in notes home ${notesHome}`);
+	return target;
 }
 
 function jailToolDefinition<T extends ToolDefinition<any, any, any>>(definition: T, notesHome: string): T {
@@ -65,12 +68,40 @@ function jailToolDefinition<T extends ToolDefinition<any, any, any>>(definition:
 	} as T;
 }
 
-/** The only custom definitions in the dream session replace the two built-ins with jailed versions. */
+/** The dream session's custom definitions: jailed versions of the two write built-ins, plus the jailed delete below. */
 export function dreamerWriteToolDefinitions(notesHome: string): ToolDefinition<any, any, any>[] {
 	return [
 		jailToolDefinition(createWriteToolDefinition(notesHome), notesHome),
 		jailToolDefinition(createEditToolDefinition(notesHome), notesHome),
 	];
+}
+
+const DELETE_PARAMETERS = Type.Object({ path: Type.String({ description: "Path of the crumpled note file, relative to the notes home." }) }, { additionalProperties: false });
+
+/**
+ * The dreamer's physical delete, jailed like the writes and restricted to crumpled notes: the
+ * playbook's wastebasket rule is the only legitimate target, so a live note refuses here even
+ * before policy is consulted. The time window itself stays playbook policy, not tool law.
+ */
+export function dreamerDeleteToolDefinition(notesHome: string): ToolDefinition<any, any, any> {
+	return {
+		name: "delete",
+		label: "delete",
+		description: "Physically delete one crumpled note file inside the notes home. Reserved for the playbook's wastebasket rule: a crumpled note whose full retention window has passed. Live notes refuse. Deletion is permanent beyond the Git audit.",
+		parameters: DELETE_PARAMETERS,
+		async execute(_toolCallId: string, params: { path: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) {
+			const target = await jailWritePath(notesHome, params.path, { createParent: false });
+			let raw: string;
+			try {
+				raw = await readFile(target, "utf8");
+			} catch (error: any) {
+				throw new Error(`delete: cannot read ${params.path} in notes home: ${error.message}`);
+			}
+			if (parseNote(raw).meta.crumpledAt === undefined) throw new Error(`delete: ${params.path} is not a crumpled note; only the wastebasket rule permits deletion`);
+			await unlink(target);
+			return { content: [{ type: "text", text: `deleted ${params.path}` }], details: undefined };
+		},
+	};
 }
 
 export const defaultDreamerSessionFactory: DreamerSessionFactory = async ({ cwd, modelPattern, tools }) => {
@@ -81,7 +112,7 @@ export const defaultDreamerSessionFactory: DreamerSessionFactory = async ({ cwd,
 		model = result.scopedModels[0]?.model;
 		if (!model) throw new Error(`dreamer model pattern "${modelPattern}" did not resolve to an available model`);
 	}
-	const { session } = await createAgentSession({ cwd, sessionManager: SessionManager.inMemory(cwd), tools, customTools: dreamerWriteToolDefinitions(cwd), noTools: "all", model, thinkingLevel: "off" });
+	const { session } = await createAgentSession({ cwd, sessionManager: SessionManager.inMemory(cwd), tools, customTools: [...dreamerWriteToolDefinitions(cwd), dreamerDeleteToolDefinition(cwd)], noTools: "all", model, thinkingLevel: "off" });
 	return session;
 };
 
@@ -98,7 +129,7 @@ export async function runDreamer(playbook: string, cwd: string, options: { model
 	const unsubscribe = session.subscribe((event: any) => {
 		const tool = event.toolName ?? event.tool?.name;
 		const args = event.args ?? event.arguments ?? event.tool?.arguments;
-		if ((tool === "write" || tool === "edit") && args && typeof args === "object" && typeof args.path === "string") writes.push({ tool, path: args.path });
+		if ((tool === "write" || tool === "edit" || tool === "delete") && args && typeof args === "object" && typeof args.path === "string") writes.push({ tool, path: args.path });
 		if (event.type !== "message_end" || event.message?.role !== "assistant") return;
 		if (event.message.stopReason === "error") { providerError = event.message.errorMessage ?? "unknown provider error"; return; }
 		answer = contentText(event.message.content);

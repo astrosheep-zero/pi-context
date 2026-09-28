@@ -3,9 +3,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import test from "node:test";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { acquireLock, releaseLock } from "../src/dream/lock.js";
-import { dreamerWriteToolDefinitions, type DreamerSession, type DreamerSessionFactory } from "../src/dream/runner.js";
+import { dreamerDeleteToolDefinition, dreamerWriteToolDefinitions, type DreamerSession, type DreamerSessionFactory } from "../src/dream/runner.js";
 import { main } from "../src/dream/cli.js";
 
 const fixture = () => mkdtempSync(join(tmpdir(), "dream-test-"));
@@ -72,6 +72,40 @@ test("dreamer writes stay inside the notes home, including symlink escapes", asy
 	symlinkSync(outside, join(home, "escape"));
 	await rejects("write", "escape/outside.md");
 	assert.equal(existsSync(join(outside, "outside.md")), false);
+});
+
+test("dreamer delete is jailed to the notes home and refuses live notes", async () => {
+	const home = fixture();
+	const outside = fixture();
+	mkdirSync(join(home, "global"), { recursive: true });
+	const frontmatter = "---\norigin: self\ncreatedAt: 2026-09-01T00:00:00.000+08:00\nupdatedAt: 2026-09-01T00:00:00.000+08:00\nlastAccessed: 2026-09-01T00:00:00.000+08:00\naccessCount: 0\n";
+	writeFileSync(join(home, "global/dead.md"), `${frontmatter}crumpledAt: 2026-09-02T00:00:00.000+08:00\n---\ndead\n`);
+	writeFileSync(join(home, "global/live.md"), `${frontmatter}---\nlive\n`);
+	writeFileSync(join(outside, "keep.md"), "stay");
+	const del = dreamerDeleteToolDefinition(home);
+	const ctx = { cwd: home } as any;
+	await del.execute("d1", { path: "global/dead.md" }, undefined, undefined, ctx);
+	assert.equal(existsSync(join(home, "global/dead.md")), false);
+	await assert.rejects(() => del.execute("d2", { path: "global/live.md" }, undefined, undefined, ctx), /not a crumpled note/);
+	assert.equal(existsSync(join(home, "global/live.md")), true);
+	await assert.rejects(() => del.execute("d3", { path: join("..", basename(outside), "keep.md") } as any, undefined, undefined, ctx), /write jail/);
+	symlinkSync(join(outside, "keep.md"), join(home, "link.md"));
+	await assert.rejects(() => del.execute("d4", { path: "link.md" }, undefined, undefined, ctx), /write jail/);
+	assert.equal(existsSync(join(outside, "keep.md")), true);
+});
+
+test("CLI lists dreamer deletions in the report", async () => {
+	const home = fixture();
+	const sessionFactory = scriptedSession((handler, cwd) => {
+		mkdirSync(join(cwd, "global"), { recursive: true });
+		handler({ type: "tool_execution_start", toolName: "delete", args: { path: "global/dead.md" } });
+		handler({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "dreamt" }] } });
+	});
+	const { code, errors } = await captureErrors(() => main(["--notes-home", home, "--force"], { sessionFactory, dreamerSettings: () => ({ warnings: [] }) }));
+	assert.equal(code, 0, errors.join("\n"));
+	const reports = readdirSync(join(home, "dreams"));
+	assert.equal(reports.length, 1);
+	assert.match(readFileSync(join(home, "dreams", reports[0]!), "utf8"), /- delete: global\/dead\.md/);
 });
 
 test("CLI records a final audit failure and preserves the report", async () => {

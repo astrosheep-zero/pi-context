@@ -24,10 +24,10 @@ The homes serve different readers:
 4. **Preserve meaning and provenance.** Keep facts, conditions, exceptions, uncertainty, authorship, and sources. When promoting a finding, cite its source. Do not relabel agent-authored material as human-authored. If its destination or authority is unclear, propose the promotion instead.
 5. **Keep notes manageable.** Aim below about 200 lines / 8KB per note. Split oversized notes by topic with one-line cross-links. Checkpoints may exceed the budget: trim prose, never facts.
 6. **Keep maps useful.** Each writable home's MAP.md lists its durable notes, one line per entry, with an unambiguous address and a short gist in your own words. Add promoted notes and drop entries that no longer hold. Maps follow the same size budget.
-7. **Preserve the record.** Never physically delete notes. After merging, crumple the absorbed note only if it is writable. Preserve existing metadata and provenance. Map entry lines are yours to maintain within the writable scope.
+7. **Preserve the record.** Never physically delete a live note; after merging, crumple the absorbed note only if it is writable. The wastebasket is the one exception: physically delete a crumpled note when its home is writable and both `crumpledAt` and its last access are more than 7 days old. Judge the clock from the raw frontmatter—`lastAccessed`, falling back to `crumpledAt` when `lastAccessed` is absent; if neither is readable, keep the note and report it. Never take the date through `notes_read`: reading refreshes `lastAccessed` and resets the very clock you are measuring. A venue with no way to delete files lists the doomed addresses in its report instead of blanking or truncating them. Preserve existing metadata and provenance. Map entry lines are yours to maintain within the writable scope.
 
 ## Report
 
-Give a concise report grouped by home: what you inspected, changed, promoted, and left unresolved. Mention coverage gaps and partial failures. If no notes changed, say so. Distinguish actual note changes from execution or audit artifacts; do not claim success for an incomplete run.
+Give a concise report grouped by home: what you inspected, changed, promoted, deleted, and left unresolved. Mention coverage gaps and partial failures. If no notes changed, say so. Distinguish actual note changes from execution or audit artifacts; do not claim success for an incomplete run.
 
 Put skill ideas and unresolved questions in the final message as proposals for the human, not new skill files.
