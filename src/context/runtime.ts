@@ -126,7 +126,7 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 	});
 
 	pi.registerCommand("wipe-memory", {
-		description: "Ask the agent to close out its notes, then start a fresh context window",
+		description: "Ask the agent to close out its notes, then stop in a fresh context window",
 		handler: async (_args, cmdCtx) => {
 			if (!enabled) {
 				cmdCtx.ui.notify("pi-context: /wipe-memory requires /pi-context on.", "error");
@@ -139,14 +139,17 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 				if (!enabled || currentWindowId(cmdCtx) !== requestedWindowId) return;
 				idle = true;
 			}
-			const armed = resets.requestManualAtTurnEnd(requestedWindowId);
+			// Manual wipes are close-outs: they commit at settlement so the run actually
+			// stops. The hidden warning goes out in both cases — triggered when idle,
+			// steered into the running turn when busy — so the agent closes out promptly
+			// instead of the reset waiting for the whole run.
+			const armed = resets.closeOut(requestedWindowId, "manual");
 			if (armed === "already-pending") return;
 			cmdCtx.ui.notify(idle
-				? "pi-context: /wipe-memory received; reset after the next turn."
-				: "pi-context: /wipe-memory queued for the next turn end.", "info");
-			if (!idle) return;
+				? "pi-context: /wipe-memory received; the agent closes out its notes, then stops in a fresh window."
+				: "pi-context: /wipe-memory queued; the agent is asked to close out and the reset commits when the run settles.", "info");
 			try {
-				pi.sendMessage({ customType: MANUAL_WIPE_TYPE, content: WARNING_CONTENT, display: false }, { triggerTurn: true });
+				pi.sendMessage({ customType: MANUAL_WIPE_TYPE, content: WARNING_CONTENT, display: false }, { triggerTurn: true, deliverAs: "steer" });
 			} catch (error) {
 				resets.clear();
 				cmdCtx.ui.notify(`pi-context: could not start manual close-out (${String(error)}).`, "error");

@@ -264,7 +264,7 @@ test("/wipe-memory waits out non-agent busy work before starting its single-turn
 	assert.equal(waits, 1);
 	assert.equal(captured.sent.length, 1);
 	assert.equal(captured.sent[0]?.options?.triggerTurn, true);
-	assert.equal(notices.filter((message) => message.includes("received; reset after the next turn")).length, 1);
+	assert.equal(notices.filter((message) => message.includes("received; the agent closes out its notes")).length, 1);
 });
 
 test("pi-context command toggles future work, /wipe-memory schedules a turn-end reset, and /compact remains disabled", async () => {
@@ -291,7 +291,7 @@ test("pi-context command toggles future work, /wipe-memory schedules a turn-end 
 	assert.match(notices[0]?.message ?? "", /on/);
 	notices = await runCommand(captured, "wipe-memory", "", low);
 	assert.equal(notices.length, 1, "the command acknowledges the reset request");
-	assert.match(notices[0]?.message ?? "", /next turn/);
+	assert.match(notices[0]?.message ?? "", /closes out its notes/);
 	assert.equal(captured.sent.length, 2, "the command persists one hidden warning after the startup boot");
 	assert.equal(captured.sent[1]?.options?.triggerTurn, true, "the manual checkpoint prompt starts an ordinary agent turn");
 	assert.equal(captured.sent[1]?.message.customType, MANUAL_WIPE_TYPE);

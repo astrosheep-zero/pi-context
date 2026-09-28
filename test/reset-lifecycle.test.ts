@@ -145,7 +145,7 @@ function beforeSettleFacts(overrides: Partial<ResetBeforeSettleFacts> = {}): Res
 	};
 }
 
-function fakeBoundaryEvent(entries: SessionBoundaryDraft[] = []): TurnEndEvent {
+function fakeBoundaryEvent(entries: SessionBoundaryDraft[] = [], message?: AgentMessage): TurnEndEvent {
 	return {
 		type: "turn_end",
 		entries,
@@ -153,7 +153,7 @@ function fakeBoundaryEvent(entries: SessionBoundaryDraft[] = []): TurnEndEvent {
 		context: { contextEntries: [], contextMessages: [], llmMessages: [], pendingMessages: [], canContinue: true },
 		outcome: "completed",
 		turnIndex: 0,
-		message: { role: "assistant", content: [], timestamp: Date.now() } as unknown as AgentMessage,
+		message: message ?? ({ role: "assistant", content: [], timestamp: Date.now() } as unknown as AgentMessage),
 		toolResults: [],
 		messageEntryId: "assistant-entry",
 		toolResultEntryIds: [],
@@ -188,6 +188,30 @@ test("public reset boundary drafts one marker, one boot, and one continuation af
 	const branch = h.sessionManager.getBranch();
 	assert.deepEqual(branch.filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE).map((entry) => entry.type === "custom" ? entry.data : undefined), [{ windowId }]);
 	assert.equal(branch.filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE).length, 1);
+});
+
+test("manual /wipe-memory spans tool turns and commits the stop at settlement", async () => {
+	const h = harness();
+	await h.runCommand("wipe-memory");
+	assert.ok(h.sent.some((message) => message.customType === MANUAL_WIPE_TYPE && message.triggerTurn === true), "the idle close-out warning starts a turn");
+	const toolCallMessage = {
+		role: "assistant",
+		content: [{ type: "toolCall", id: "call-1", name: "notes_write", arguments: {} }],
+		timestamp: Date.now(),
+	} as unknown as AgentMessage;
+	const midBatch = resultEntries(await h.emit("turn_end", fakeBoundaryEvent([], toolCallMessage)));
+	assert.equal(midBatch.entries.length, 0, "a tool-call turn does not commit a manual close-out");
+	const cleanTurn = resultEntries(await h.emit("turn_end", fakeBoundaryEvent()));
+	assert.equal(cleanTurn.entries.length, 0, "even a clean turn end only keeps the close-out armed");
+	const settle = resultEntries(await h.emit("agent_before_settle", {
+		type: "agent_before_settle",
+		entries: [],
+		outcome: "completed",
+		context: { contextEntries: [], contextMessages: [], llmMessages: [], pendingMessages: [], canContinue: true },
+	}));
+	const markers = settle.entries.filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
+	assert.equal(markers.length, 1, "the reset commits at settlement");
+	assert.equal(settle.continue, false, "a manual wipe does not continue after the reset");
 });
 
 test("off stops future automatic/manual reset requests while an existing marker remains authoritative", async () => {
@@ -362,7 +386,7 @@ test("a queued success clears an overflow failure before settle recovery can res
 	assert.equal(resetCount, 0);
 });
 
-test("reset-control: close-out phases deduplicate, span turns, and upgrade to a tool commit", () => {
+test("reset-control: close-out phases deduplicate, span turns, and a tool call only acknowledges a manual close-out", () => {
 	const windowId = "pcw:test:window";
 	const first = reduceResetControl(initialResetControl(), { type: "close_out", windowId, source: "manual" });
 	assert.equal(first.effect, "close-out-armed");
@@ -373,19 +397,33 @@ test("reset-control: close-out phases deduplicate, span turns, and upgrade to a 
 	assert.equal(noteTurn.effect, "none");
 	assert.deepEqual(noteTurn.state.request, first.state.request, "note/tool turns do not consume close-out");
 	const tool = reduceResetControl(noteTurn.state, { type: "tool_request", windowId });
-	assert.deepEqual(tool.state.request, { phase: "tool-requested", windowId, source: "manual" });
-	const commit = reduceResetControl(tool.state, { type: "turn_end", facts: turnEndFacts() });
-	assert.equal(commit.effect, "commit-boundary-stop");
+	assert.equal(tool.effect, "already-pending", "the agent's wipe call must not convert a manual close-out into a turn-end commit pi can overrun");
+	assert.deepEqual(tool.state.request, { phase: "close-out", windowId, source: "manual" });
+	const commit = reduceResetControl(tool.state, { type: "before_settle", facts: beforeSettleFacts() });
+	assert.equal(commit.effect, "commit-boundary-stop", "a manual close-out commits at settlement and stops");
 	assert.deepEqual(commit.state, initialResetControl());
 });
 
-test("reset-control: manual turn-end request upgrades a pending tool request", () => {
+test("reset-control: manual close-out converts a pending tool request into a settle stop", () => {
 	const windowId = "pcw:test:window";
 	const tool = reduceResetControl(initialResetControl(), { type: "tool_request", windowId });
-	const manual = reduceResetControl(tool.state, { type: "tool_request", windowId, source: "manual" });
-	assert.equal(manual.effect, "already-pending");
-	assert.deepEqual(manual.state.request, { phase: "tool-requested", windowId, source: "manual" });
-	assert.equal(reduceResetControl(manual.state, { type: "turn_end", facts: turnEndFacts() }).effect, "commit-boundary-stop");
+	const manual = reduceResetControl(tool.state, { type: "close_out", windowId, source: "manual" });
+	assert.equal(manual.effect, "close-out-armed", "the user's stop intent outranks the pending rollover");
+	assert.deepEqual(manual.state.request, { phase: "close-out", windowId, source: "manual" });
+	assert.equal(reduceResetControl(manual.state, { type: "turn_end", facts: turnEndFacts() }).effect, "none", "the converted request no longer commits at turn end");
+	assert.equal(reduceResetControl(manual.state, { type: "before_settle", facts: beforeSettleFacts() }).effect, "commit-boundary-stop");
+	const automatic = reduceResetControl(tool.state, { type: "close_out", windowId, source: "automatic" });
+	assert.equal(automatic.effect, "already-pending", "an automatic close-out must not displace a pending tool commit");
+});
+
+test("reset-control: a tool call upgrades a budget close-out for a turn-end commit", () => {
+	const windowId = "pcw:test:window";
+	const budget = reduceResetControl(initialResetControl(), { type: "close_out", windowId, source: "automatic" }).state;
+	const upgraded = reduceResetControl(budget, { type: "tool_request", windowId });
+	assert.equal(upgraded.effect, "close-out-armed");
+	assert.deepEqual(upgraded.state.request, { phase: "tool-requested", windowId, source: "automatic" }, "context pressure cannot wait for settlement");
+	const commit = reduceResetControl(upgraded.state, { type: "turn_end", facts: turnEndFacts() });
+	assert.equal(commit.effect, "commit-boundary", "the budget rollover continues in the fresh window");
 });
 
 test("reset-control: fallback is normal-stop only; hard reserve remains safety", () => {

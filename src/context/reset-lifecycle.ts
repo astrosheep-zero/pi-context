@@ -29,7 +29,7 @@ function isOverflowLike(message: AgentMessage, ctx: ExtensionContext): boolean {
 }
 
 export type ResetRequestSource = "manual" | "automatic";
-type ToolResetRequestSource = ResetRequestSource | "tool";
+type ToolResetRequestSource = "automatic" | "tool";
 export type ResetRequest =
 	| { readonly phase: "none" }
 	| { readonly phase: "close-out"; readonly windowId: string; readonly source: ResetRequestSource }
@@ -71,7 +71,7 @@ export interface ResetBeforeSettleFacts {
 
 export type ResetControlEvent =
 	| { readonly type: "close_out"; readonly windowId: string; readonly source: ResetRequestSource }
-	| { readonly type: "tool_request"; readonly windowId: string; readonly source?: "manual" }
+	| { readonly type: "tool_request"; readonly windowId: string }
 	| { readonly type: "turn_end"; readonly facts: ResetTurnEndFacts }
 	| { readonly type: "before_settle"; readonly facts: ResetBeforeSettleFacts }
 	| { readonly type: "settled" }
@@ -101,6 +101,10 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 		case "close_out": {
 			const request = state.request;
 			if (request.phase === "tool-requested" && request.windowId === event.windowId) {
+				// A manual wipe outranks a pending rollover: convert it to a settle-committed stop.
+				if (event.source === "manual") {
+					return { state: { ...state, request: { phase: "close-out", windowId: event.windowId, source: "manual" } }, effect: "close-out-armed" };
+				}
 				return { state, effect: "already-pending" };
 			}
 			if (request.phase === "close-out" && request.windowId === event.windowId) {
@@ -112,10 +116,17 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 		case "tool_request": {
 			const request = state.request;
 			if (request.phase === "tool-requested" && request.windowId === event.windowId) {
-				return { state: event.source === "manual" ? { ...state, request: { ...request, source: "manual" } } : state, effect: "already-pending" };
+				return { state, effect: "already-pending" };
 			}
-			const source: ToolResetRequestSource = event.source ?? (request.phase === "close-out" ? request.source : "tool");
-			return { state: { ...state, request: { phase: "tool-requested", windowId: event.windowId, source } }, effect: "close-out-armed" };
+			// A manual close-out must settle so the stop actually lands; the agent's own wipe
+			// call during one is only an acknowledgement, never a conversion to a turn-end
+			// commit that pi's tool-batch continuation can overrun. A budget close-out still
+			// upgrades: context pressure cannot wait for settlement.
+			if (request.phase === "close-out" && request.windowId === event.windowId) {
+				if (request.source === "manual") return { state, effect: "already-pending" };
+				return { state: { ...state, request: { phase: "tool-requested", windowId: event.windowId, source: "automatic" } }, effect: "close-out-armed" };
+			}
+			return { state: { ...state, request: { phase: "tool-requested", windowId: event.windowId, source: "tool" } }, effect: "close-out-armed" };
 		}
 		case "turn_end": {
 			const facts = event.facts;
@@ -136,8 +147,7 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 			// A direct tool request commits after the whole tool batch. The budget cutoff is
 			// a separate hard-reserve safety path; ordinary close-out waits for settlement.
 			if (request.phase === "tool-requested" || facts.hardReserveDue) {
-				const stopAfterReset = request.phase === "tool-requested" && request.source === "manual";
-				return { state: { request: NO_REQUEST, overflow: "idle" }, effect: stopAfterReset ? "commit-boundary-stop" : "commit-boundary" };
+				return { state: { request: NO_REQUEST, overflow: "idle" }, effect: "commit-boundary" };
 			}
 			return { state: { request, overflow: "idle" }, effect: "none" };
 		}
@@ -173,9 +183,11 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 }
 
 /**
- * Own close-out requests at Pi's public turn and pre-settlement boundaries. Tool-requested
- * resets commit at turn_end; manual and budget close-outs remain armed across note/tool turns
- * and fall back at a successful agent_before_settle. Overflow recovery remains bounded.
+ * Own close-out requests at Pi's public turn and pre-settlement boundaries. Manual and budget
+ * close-outs remain armed across note/tool turns and commit at a successful
+ * agent_before_settle, so a manual wipe stops the run instead of racing pi's own tool-batch
+ * continuation; direct tool requests commit at turn_end and continue in the fresh window.
+ * Overflow recovery remains bounded.
  */
 export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) {
 	let sessionActive = true;
@@ -271,11 +283,6 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 	return {
 		closeOut(windowId: string, source: ResetRequestSource) {
 			const decision = reduceResetControl(control, { type: "close_out", windowId, source });
-			control = decision.state;
-			return decision.effect;
-		},
-		requestManualAtTurnEnd(windowId: string) {
-			const decision = reduceResetControl(control, { type: "tool_request", windowId, source: "manual" });
 			control = decision.state;
 			return decision.effect;
 		},
