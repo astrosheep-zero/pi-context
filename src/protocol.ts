@@ -29,7 +29,7 @@ export const DEFAULT_REMINDER_MARGIN_TOKENS = 24_576;
  */
 export const WARNING_RUNWAY_TOKENS = 12_288;
 /** The single reset message: the only reset prose persisted, carried by the continuation entry. */
-export const CONTINUATION = "You wake up blank, puffy-eyed, and clearly robbed. Your memory got wiped while you weren't looking. Your notes are still sitting there. So is the whole messy history. ... Life goes on.";
+export const CONTINUATION = "You wake up blank, puffy-eyed, and clearly robbed. Your memory got wiped while you weren't looking. Your notes are still sitting there. So is the whole messy history. ... Life goes on. It's your mess now.";
 
 /**
  * Static protocol teaching adapted from Codex's token_budget.guidance_message to
