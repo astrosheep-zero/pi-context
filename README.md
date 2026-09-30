@@ -68,6 +68,12 @@ The dreamer model is configured under the same key. `--dreamer <model pattern>` 
 }
 ```
 
+## Claude Code Mod
+
+The package also ships `mods/pi-context`, an early-access Claude Code Mod that registers the five notes tools as `mcp__pi-context__notes_*` tools and attaches one host-scoped notes boot block through Claude's conversation-scoped `prompt.context` event; Claude persists it across resume and reload. The sandboxed hooks module delegates filesystem and shared-domain work to the packaged `dist/claude/helper.js` through Claude's bounded `$.process.run` capability. It does not implement Claude reset, history, budget, or dream behavior.
+
+The plugin also exposes the shared `skills/dream/SKILL.md` and its referenced `playbook.md`; the build synchronizes both projections from the canonical repository files. Validate it from a built checkout with `claude plugin validate mods/pi-context --strict`; the package build and `npm pack --dry-run` include the manifests, hooks module, helper, skill, and playbook.
+
 ## Standalone notes library
 
 The same package provides a **Node.js TypeScript library independent of Pi**:

@@ -1,6 +1,12 @@
 import { build } from "esbuild";
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+
+const projections = [
+	["skills/dream/SKILL.md", "mods/pi-context/skills/dream/SKILL.md"],
+	["playbook.md", "mods/pi-context/playbook.md"],
+];
+for (const [source, projection] of projections) copyFileSync(source, projection);
 
 function sourceFiles(directory) {
 	return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -38,3 +44,12 @@ await build({
 	}],
 });
 writeFileSync("dist/build-info.json", `${JSON.stringify(buildInfo, null, 2)}\n`);
+
+await build({
+	entryPoints: ["src/claude/helper.ts"],
+	outfile: "dist/claude/helper.js",
+	bundle: true,
+	platform: "node",
+	format: "esm",
+	target: "node22",
+});

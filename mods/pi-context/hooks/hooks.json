@@ -1,0 +1,4 @@
+{
+  "description": "Claude Code notes tools and a session-scoped notes boot section",
+  "modules": ["./register.ts"]
+}

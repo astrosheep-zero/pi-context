@@ -41,7 +41,8 @@
     "LICENSE",
     "README.md",
     "playbook.md",
-    "skills"
+    "skills",
+    "mods"
   ],
   "bin": {
     "dream": "dist/src/pi/dream/cli.js"
