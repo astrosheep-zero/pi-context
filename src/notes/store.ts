@@ -4,7 +4,7 @@ import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promise
 import { dirname, join, resolve } from "node:path";
 import { earliestMatchOffsetChars } from "../text-match.js";
 import { assertAddress, assertGlobPattern, addressFor, globToRegExp } from "./address.js";
-import { snapshotNotesContext, type NotesContext } from "./context.js";
+import { snapshotNotesIdentity, type NotesIdentity } from "./identity.js";
 import { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "./constants.js";
 import { isOrigin, isScope, localIso, parseNote, serializeNote, stripLeadingFrontmatter, type NoteMeta, type Origin } from "./frontmatter.js";
 import { namespaceSlugs, noteFileName, physicalPath, scopeDir, SLUG_PATTERN, type Scope } from "./paths.js";
@@ -57,11 +57,11 @@ export type NoteQueryStatus = { crumpledExcluded: number; homesUnavailable: stri
 export type NoteQueryResult<T> = { rows: T[]; status: NoteQueryStatus };
 
 /** Public identity resolved for an operation, never a filesystem path. */
-export function noteIdentity(context: NotesContext, address: string): { address: string; project_key?: string } {
+export function noteIdentity(identity: NotesIdentity, address: string): { address: string; project_key?: string } {
 	const resolved = assertAddress(address);
 	return {
-		address: addressFor(context, resolved.scope, noteFileName(resolved.path), resolved.who),
-		...(resolved.scope === "project" ? { project_key: context.projectKey } : {}),
+		address: addressFor(identity, resolved.scope, noteFileName(resolved.path), resolved.who),
+		...(resolved.scope === "project" ? { project_key: identity.projectKey } : {}),
 	};
 }
 
@@ -135,7 +135,7 @@ function matcherFor(pattern: unknown): RegExp | undefined {
 /** Which homes one call iterates; reserved heads narrow traversal before any file is read. */
 type HomeRef = { scope: Scope; who?: string };
 
-async function homesForPattern(pattern: string | undefined, context: NotesContext): Promise<HomeRef[] | undefined> {
+async function homesForPattern(pattern: string | undefined, identity: NotesIdentity): Promise<HomeRef[] | undefined> {
 	if (!pattern || !pattern.startsWith("@")) return undefined;
 	const head = /^@([^/]+)\//.exec(pattern)?.[1];
 	if (head === "project") return [{ scope: "project" }];
@@ -146,16 +146,16 @@ async function homesForPattern(pattern: string | undefined, context: NotesContex
 		const scope: Scope = head === "agents" ? "agent" : "model";
 		const name = pattern.slice(head.length + 2).split("/")[0] ?? "";
 		if (name.length > 0 && !/[*?]/.test(name)) return [{ scope, who: assertWho(name) }];
-		return (await namespaceSlugs(head, context.home)).map((who) => ({ scope, who }));
+		return (await namespaceSlugs(head, identity.home)).map((who) => ({ scope, who }));
 	}
 	return [];
 }
 
 /** Relative pattern heads resolve to canonical names, so they match rendered addresses. */
-function normalizePattern(pattern: string | undefined, context: NotesContext): string | undefined {
+function normalizePattern(pattern: string | undefined, identity: NotesIdentity): string | undefined {
 	if (!pattern) return pattern;
-	if (pattern.startsWith("@self/")) return `@agents/${context.agent}/${pattern.slice("@self/".length)}`;
-	if (pattern.startsWith("@model/")) return `@models/${context.model}/${pattern.slice("@model/".length)}`;
+	if (pattern.startsWith("@self/")) return `@agents/${identity.agent}/${pattern.slice("@self/".length)}`;
+	if (pattern.startsWith("@model/")) return `@models/${identity.model}/${pattern.slice("@model/".length)}`;
 	return pattern;
 }
 
@@ -176,7 +176,7 @@ function assertWho(value: unknown): string {
 	return value;
 }
 
-async function homesFor(context: NotesContext, opts: NotesQuery): Promise<HomeRef[]> {
+async function homesFor(identity: NotesIdentity, opts: NotesQuery): Promise<HomeRef[]> {
 	if (opts.scope !== undefined) {
 		const scope = assertScope(opts.scope);
 		if (opts.who !== undefined) {
@@ -187,7 +187,7 @@ async function homesFor(context: NotesContext, opts: NotesQuery): Promise<HomeRe
 		return [{ scope }];
 	}
 	if (opts.who !== undefined) throw new NoteError("invalid_scope", "who requires agent or model scope");
-	return await homesForPattern(normalizePattern(opts.pattern, context), context) ?? SCOPE_ORDER.map((scope) => ({ scope }));
+	return await homesForPattern(normalizePattern(opts.pattern, identity), identity) ?? SCOPE_ORDER.map((scope) => ({ scope }));
 }
 
 /** Line numbers (1-based) of every occurrence of `needle` in `body`. */
@@ -233,9 +233,9 @@ function frontmatterOf(meta: NoteMeta): string {
 }
 
 /** Named agent/model homes are read-only to whoever is not running there. */
-function assertWritableHome(scope: Scope, who: string | undefined, context: NotesContext): void {
+function assertWritableHome(scope: Scope, who: string | undefined, identity: NotesIdentity): void {
 	if (who === undefined) return;
-	const current = scope === "agent" ? context.agent : context.model;
+	const current = scope === "agent" ? identity.agent : identity.model;
 	if (who === current) return;
 	const home = scope === "agent" ? `@agents/${who}/` : `@models/${who}/`;
 	throw new NoteError("invalid_scope", `${home} is not your home: writable homes are this session, @project/, @human/, @self/, and the current @model/ home`);
@@ -250,8 +250,8 @@ function accessedMeta(meta: NoteMeta, scope: Scope, now: number): NoteMeta {
 }
 
 /** Create a store over one validated, immutable snapshot of the supplied explicit identity. */
-export function createNotesStore(input: NotesContext): NotesStore {
-	const context = snapshotNotesContext(input);
+export function createNotesStore(input: NotesIdentity): NotesStore {
+	const identity = snapshotNotesIdentity(input);
 
 	async function write(address: string, content: string, options: WriteOptions = {}): Promise<NoteWriteResult> {
 		const stableAddress = address;
@@ -260,9 +260,9 @@ export function createNotesStore(input: NotesContext): NotesStore {
 		const destination = assertAddress(stableAddress);
 		assertWritablePath(destination.path);
 		const scope = assertScope(destination.scope);
-		assertWritableHome(scope, destination.who, context);
+		assertWritableHome(scope, destination.who, identity);
 		const origin = assertOrigin(stableOptions.origin ?? "self");
-		const path = physicalPath(scope, destination.path, context, destination.who);
+		const path = physicalPath(scope, destination.path, identity, destination.who);
 		return withPathQueue(path, async () => {
 			const now = writeStamp();
 			const cleanBody = stripLeadingFrontmatter(stableContent);
@@ -276,7 +276,7 @@ export function createNotesStore(input: NotesContext): NotesStore {
 				updatedAt: now,
 				lastAccessed: now,
 				accessCount: 0,
-				...(scope === "session" ? { project: context.projectKey } : {}),
+				...(scope === "session" ? { project: identity.projectKey } : {}),
 			};
 			meta.scope = scope;
 			meta.origin = origin;
@@ -293,7 +293,7 @@ export function createNotesStore(input: NotesContext): NotesStore {
 		const stableAddress = address;
 		const destination = assertAddress(stableAddress);
 		const scope = assertScope(destination.scope);
-		const path = physicalPath(scope, destination.path, context, destination.who);
+		const path = physicalPath(scope, destination.path, identity, destination.who);
 		return withPathQueue(path, async () => {
 			const raw = await readFileIfExists(path);
 			if (raw === undefined) return undefined;
@@ -313,11 +313,11 @@ export function createNotesStore(input: NotesContext): NotesStore {
 		const destination = assertAddress(stableAddress);
 		assertWritablePath(destination.path);
 		const scope = assertScope(destination.scope);
-		assertWritableHome(scope, destination.who, context);
+		assertWritableHome(scope, destination.who, identity);
 		if (operations.length === 0 && stableOptions.origin === undefined && stableOptions.crumpled === undefined) {
 			throw new NoteError("nothing_to_do", "nothing to do: provide edits or at least one of origin, crumpled");
 		}
-		const path = physicalPath(scope, destination.path, context, destination.who);
+		const path = physicalPath(scope, destination.path, identity, destination.who);
 		return withPathQueue(path, async () => {
 			const raw = await readFileIfExists(path);
 			if (raw === undefined) throw new NoteError("not_found", "note not found");
@@ -376,10 +376,10 @@ export function createNotesStore(input: NotesContext): NotesStore {
 		const fromScope = assertScope(from.scope);
 		const toScope = assertScope(to.scope);
 		assertWritablePath(to.path);
-		assertWritableHome(fromScope, from.who, context);
-		assertWritableHome(toScope, to.who, context);
-		const fromPath = physicalPath(fromScope, from.path, context, from.who);
-		const toPath = physicalPath(toScope, to.path, context, to.who);
+		assertWritableHome(fromScope, from.who, identity);
+		assertWritableHome(toScope, to.who, identity);
+		const fromPath = physicalPath(fromScope, from.path, identity, from.who);
+		const toPath = physicalPath(toScope, to.path, identity, to.who);
 		if (resolve(fromPath) === resolve(toPath)) throw new NoteError("nothing_to_do", "rename_to resolves to the same note");
 		const [first, second] = [fromPath, toPath].sort();
 		return withPathQueue(first!, () => withPathQueue(second!, async () => {
@@ -392,7 +392,7 @@ export function createNotesStore(input: NotesContext): NotesStore {
 			const { meta, body } = parseNote(raw);
 			meta.scope = toScope;
 			// Project ownership only changes when the move crosses the session boundary.
-			if (fromScope !== "session" && toScope === "session") meta.project = context.projectKey;
+			if (fromScope !== "session" && toScope === "session") meta.project = identity.projectKey;
 			if (fromScope === "session" && toScope !== "session") delete meta.project;
 			meta.updatedAt = writeStamp();
 			const serialized = serializeNote(meta, body);
@@ -404,10 +404,10 @@ export function createNotesStore(input: NotesContext): NotesStore {
 	}
 
 	async function* scan(options: NotesQuery, status?: NoteQueryStatus): AsyncGenerator<Omit<NoteRow, "sizeBytes">> {
-		const matcher = matcherFor(normalizePattern(options.pattern, context));
+		const matcher = matcherFor(normalizePattern(options.pattern, identity));
 		let homes: HomeRef[];
 		try {
-			homes = await homesFor(context, options);
+			homes = await homesFor(identity, options);
 		} catch (error) {
 			if (!status || !isFilesystemError(error) || !/^@(agents|models)\//.test(options.pattern ?? "")) throw error;
 			status.homesUnavailable.push(options.pattern!.startsWith("@agents/") ? "@agents" : "@models");
@@ -415,12 +415,12 @@ export function createNotesStore(input: NotesContext): NotesStore {
 		}
 		for (const home of homes) {
 			const scope = home.scope;
-			const root = scopeDir(scope, context, home.who);
+			const root = scopeDir(scope, identity, home.who);
 			const homeRows: Array<Omit<NoteRow, "sizeBytes">> = [];
 			let excluded = 0;
 			try {
 				for (const path of await walkMarkdown(root)) {
-					const address = addressFor(context, scope, path, home.who);
+					const address = addressFor(identity, scope, path, home.who);
 					if (matcher && !matcher.test(address)) continue;
 					const fullPath = join(root, path);
 					const raw = await withPathQueue(fullPath, () => readFile(fullPath, "utf8"));
@@ -434,7 +434,7 @@ export function createNotesStore(input: NotesContext): NotesStore {
 				}
 			} catch (error) {
 				if (!status || !isFilesystemError(error)) throw error;
-				status.homesUnavailable.push(addressFor(context, scope, "", home.who).replace(/\/$/, "") || "session");
+				status.homesUnavailable.push(addressFor(identity, scope, "", home.who).replace(/\/$/, "") || "session");
 				continue;
 			}
 			if (status) status.crumpledExcluded += excluded;

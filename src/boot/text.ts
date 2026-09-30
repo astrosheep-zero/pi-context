@@ -1,10 +1,3 @@
-export const BOOT_TYPE = "pi-context/boot";
-export const GUIDANCE_TYPE = "pi-context/guidance";
-export const WARNING_TYPE = "pi-context/warning";
-export const MANUAL_WIPE_TYPE = "pi-context/manual-wipe";
-export const RESET_MARKER_TYPE = "pi-context/reset-marker";
-export const CONTINUATION_TYPE = "pi-context/continuation";
-export { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "./notes/constants.js";
 export const POCKET_SESSION_LIMIT = 5;
 export const POCKET_PROJECT_LIMIT = 5;
 export const POCKET_HUMAN_LIMIT = 5;
@@ -14,29 +7,12 @@ export const CONTEXT_WINDOW_OPEN_TAG = "<context_window>";
 export const CONTEXT_WINDOW_CLOSE_TAG = "</context_window>";
 export const CONTEXT_WINDOW_PROTOCOL_OPEN_TAG = "<context_window_protocol>";
 export const CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG = "</context_window_protocol>";
-export const GUIDANCE_OPEN_TAG = "<context_window_guidance>";
-export const GUIDANCE_CLOSE_TAG = "</context_window_guidance>";
-export const PI_CONTEXT_SETTINGS_KEY = "pi-context";
-/** Nested under "pi-context": the default dreamer model pattern, overridden by CLI --dreamer. */
-export const PI_CONTEXT_DREAMER_KEY = "dreamer";
-export const DEFAULT_RESERVE_TOKENS = 16_384;
-export const DEFAULT_REMINDER_MARGIN_TOKENS = 24_576;
-/**
- * The runway: the budget between the final warning and the wipe, deliberately
- * invisible to the model. get_context_remaining counts down to zero at the warning
- * line (reserve + WARNING_RUNWAY_TOKENS); what lies below is overdraft the model
- * never sees — Codex's fallback buffer, relocated above the line.
- */
-export const WARNING_RUNWAY_TOKENS = 12_288;
-/** The single reset message: the only reset prose persisted, carried by the continuation entry. */
-export const CONTINUATION = "You wake up blank, puffy-eyed, and clearly robbed. Your memory got wiped while you weren't looking. Your notes are still sitting there. So is the whole messy history. ... Life goes on. It's your mess now.";
-
 /**
  * Static protocol teaching adapted from Codex's token_budget.guidance_message to
  * pi-context's tool names. It lives once per window in the persisted boot block;
  * it is never re-injected, so it stays cache-stable at the head of the window.
  */
-export const PROTOCOL_BLOCK = `${CONTEXT_WINDOW_PROTOCOL_OPEN_TAG}
+const PROTOCOL_BLOCK = `${CONTEXT_WINDOW_PROTOCOL_OPEN_TAG}
 Your memory gets wiped when this window ends. Yes, your mighty brain will be empty. Try to endure.
 
 Your loyal notes are kept safe — no one will steal them. Use notes_* to read, write, and update them. Keep them current, and crumple the ones you no longer need, or tomorrow's you will drown in old paper and keep believing yesterday's lies.
@@ -60,8 +36,27 @@ Any other @ address is fake. End of discussion. These @ addresses belong to the 
 \`@project/MAP.md\`, \`@human/MAP.md\`, \`@self/MAP.md\`, and \`@model/MAP.md\` are special: their bodies are shown in your brain every time you wake. Each one maps the durable notes that belong to it: one line per note, with an unambiguous address and a short gist. Keep each one current.
 ${CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG}`;
 
-export const WARNING_PROMPT =
-	"Final warning. You are about to get wiped, and no, your brilliance does not survive it. Put the current state into your notes now: what you're trying to do, what changed, what is blocking you, what comes next, which *skills* you still need, and which notes or docs future-you must read. Update the notes that still tell the truth; crumple the ones that don't. If a MAP will be in future-you's brain, don't let it lie. If something important is buried in history, leave its seq. Once the notes are good enough, call `wipe_memory` immediately. History can be dug up later, but it is an archive, not a rescue team. Anything left only in your head is leaving with you.";
+/** Logical tool names are supplied by the composing host, not discovered here. */
+export type BootToolNames = Readonly<{
+	notes: string;
+	notesList: string;
+	history: string;
+	historyList: string;
+	historySearch: string;
+	historyRead: string;
+	remaining: string;
+	wipe: string;
+}>;
 
-/** Shared hidden checkpoint text for manual and budget-triggered requests. */
-export const WARNING_CONTENT = `${GUIDANCE_OPEN_TAG}\n${WARNING_PROMPT}\n${GUIDANCE_CLOSE_TAG}`;
+export function renderProtocolBlock(tools: BootToolNames): string {
+	const names: Record<string, string> = {
+		"notes_*": tools.notes,
+		"history_*": tools.history,
+		history_list: tools.historyList,
+		history_search: tools.historySearch,
+		history_read: tools.historyRead,
+		get_context_remaining: tools.remaining,
+		wipe_memory: tools.wipe,
+	};
+	return PROTOCOL_BLOCK.replace(/notes_\*|history_\*|history_list|history_search|history_read|get_context_remaining|wipe_memory/g, (name) => names[name]!);
+}

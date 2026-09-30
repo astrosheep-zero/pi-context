@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
-import type { NotesContext } from "./context.js";
+import type { NotesIdentity } from "./identity.js";
 
 export type Scope = "session" | "project" | "human" | "agent" | "model";
 
@@ -69,15 +69,15 @@ export function sessionHomesRoot(home: string): string {
 	return join(home, "pi", "session");
 }
 
-/** Absolute directory holding one scope's notes. The context's home is already resolved. */
-export function scopeDir(scope: Scope, context: NotesContext, who?: string): string {
+/** Absolute directory holding one scope's notes. The identity's home is already resolved. */
+export function scopeDir(scope: Scope, identity: NotesIdentity, who?: string): string {
 	if (!["session", "project", "human", "agent", "model"].includes(scope)) throw new TypeError("invalid notes scope");
 	if (who !== undefined && (scope !== "agent" && scope !== "model" || !SLUG_PATTERN.test(who))) throw new TypeError("who must be a canonical agent/model slug");
-	if (scope === "human") return join(context.home, "human");
-	if (scope === "project") return join(context.home, "project", context.projectKey);
-	if (scope === "agent") return join(context.home, "agents", who ?? context.agent);
-	if (scope === "model") return join(context.home, "models", who ?? context.model);
-	return join(sessionHomesRoot(context.home), context.sessionId);
+	if (scope === "human") return join(identity.home, "human");
+	if (scope === "project") return join(identity.home, "project", identity.projectKey);
+	if (scope === "agent") return join(identity.home, "agents", who ?? identity.agent);
+	if (scope === "model") return join(identity.home, "models", who ?? identity.model);
+	return join(sessionHomesRoot(identity.home), identity.sessionId);
 }
 
 /** Every existing home directory of the agents/ or models/ namespace, as names. */
@@ -102,8 +102,8 @@ export function noteFileName(vpath: string): string {
 }
 
 /** Absolute file path for a virtual path in a scope. Callers validate the vpath first. */
-export function physicalPath(scope: Scope, vpath: string, context: NotesContext, who?: string): string {
+export function physicalPath(scope: Scope, vpath: string, identity: NotesIdentity, who?: string): string {
 	if (typeof vpath !== "string" || vpath.length === 0 || vpath.includes("\0") || vpath.includes("\\") || vpath.startsWith("/")) throw new TypeError("path must be a safe virtual relative path");
 	if (vpath.split("/").some((part) => part.length === 0 || part === "." || part === "..")) throw new TypeError("path contains an unsupported component");
-	return join(scopeDir(scope, context, who), ...noteFileName(vpath).split("/"));
+	return join(scopeDir(scope, identity, who), ...noteFileName(vpath).split("/"));
 }

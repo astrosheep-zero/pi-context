@@ -3,8 +3,8 @@ import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
 import type { TSchema } from "typebox";
-import { historyFromSession } from "../src/index.js";
-import { TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
+import { historyFromSession } from "../src/pi/history.js";
+import { TOOL_OUTPUT_MAX_BYTES } from "../src/tools/output.js";
 import {
 	appendText,
 	assertWithinBudget,

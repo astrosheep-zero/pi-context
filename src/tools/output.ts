@@ -1,4 +1,4 @@
-export { earliestMatchOffsetChars } from "./text-match.js";
+export { earliestMatchOffsetChars } from "../text-match.js";
 
 export const TOOL_OUTPUT_MAX_BYTES = 32 * 1024;
 export const DEFAULT_READ_WINDOW_CHARS = 12000;

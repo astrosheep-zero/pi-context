@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext, SessionBoundaryDraft, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { BOOT_TYPE, CONTINUATION, CONTINUATION_TYPE, RESET_MARKER_TYPE } from "../protocol.js";
-import { currentWindowId, isWindowBootEntry, isWindowMarker, previousWindowId, type WindowMarker } from "./context-window.js";
-import { buildBootMessage, sendBoot, type IncompleteNotesNotifier } from "./boot.js";
+import { BOOT_TYPE, CONTINUATION_TYPE, RESET_MARKER_TYPE } from "../entries.js";
+import { CONTINUATION } from "./text.js";
+import { currentWindowId, isWindowBootEntry, isWindowMarker, previousWindowId, type WindowMarker } from "../window.js";
+import { buildBootMessage, sendBoot, type IncompleteNotesNotifier } from "../boot.js";
 
 export type ResetTailState = { readonly boot: boolean; readonly continuation: boolean };
 
@@ -76,12 +77,6 @@ export function inspectResetTail(ctx: ExtensionContext, markerId: string, window
 		}
 	}
 	return { boot, continuation };
-}
-
-/** True once the marker's tail already carries its boot and continuation in a valid order. */
-export function resetTailCommitted(ctx: ExtensionContext, markerId: string, windowId: string): boolean {
-	const tail = inspectResetTail(ctx, markerId, windowId);
-	return tail?.boot === true && tail.continuation === true;
 }
 
 /** Emit only the reset artifacts an incomplete tail is missing, in the closed order. */

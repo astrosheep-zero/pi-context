@@ -1,6 +1,6 @@
 export { createNotesStore, NoteError, noteIdentity } from "./store.js";
 export { projectKey, slugify } from "./paths.js";
-export type { NotesContext } from "./context.js";
+export type { NotesIdentity } from "./identity.js";
 export type {
 	EditOperation,
 	EditOptions,

@@ -1,11 +1,13 @@
+import { resetBoundaryCommitted } from "./reset/committed.js";
 import { getCurrentSystemMessage, Type } from "@earendil-works/pi-ai";
 import { VERSION, defineTool, type ExtensionAPI, type ExtensionContext, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { registerBudget } from "./budget.js";
-import { output } from "../tool-output.js";
-import { currentReset, currentWindowId, isCheckpointBackedReset, isWindowBoot, isWindowMarker, projectRootWindow, projectWindow, rootWindowId, type WindowMarker } from "./context-window.js";
-import { registerResetLifecycle } from "./reset-lifecycle.js";
-import { buildResetDrafts, resetTailCommitted } from "./reset-artifacts.js";
-import { BOOT_TYPE, MANUAL_WIPE_TYPE, WARNING_CONTENT } from "../protocol.js";
+import { output } from "../tools/output.js";
+import { currentReset, currentWindowId, isCheckpointBackedReset, isWindowBoot, isWindowMarker, projectRootWindow, projectWindow, rootWindowId, type WindowMarker } from "./window.js";
+import { registerResetLifecycle } from "./reset/lifecycle.js";
+import { buildResetDrafts } from "./reset/artifacts.js";
+import { BOOT_TYPE, MANUAL_WIPE_TYPE } from "./entries.js";
+import { WARNING_CONTENT } from "./reset/text.js";
 import { ensureBoot, type IncompleteNotesNotifier } from "./boot.js";
 
 declare const __PI_CONTEXT_BUILD__: { version: string; sourceHash: string };
@@ -34,7 +36,7 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 		const branch = ctx.sessionManager.getBranch();
 		for (const windowId of pendingResetNotices) {
 			const marker = branch.find((entry): entry is WindowMarker => isWindowMarker(entry) && entry.data.windowId === windowId);
-			if (!marker || !isCheckpointBackedReset(ctx, marker) || !resetTailCommitted(ctx, marker.id, windowId)) continue;
+			if (!marker || !isCheckpointBackedReset(ctx, marker) || !resetBoundaryCommitted(ctx, marker.id, windowId)) continue;
 			pendingResetNotices.delete(windowId);
 			ctx.ui.notify(`pi-context: memory cleared · ${windowId}`, "info");
 		}

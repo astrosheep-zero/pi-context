@@ -1,14 +1,18 @@
 #!/usr/bin/env node
-import { appendFileSync, existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { finishDream } from "../../dream/report.js";
+import type { DreamerSetting } from "../../dream/settings.js";
+import { loadPlaybook } from "../../dream/playbook.js";
+import type { DreamResult } from "../../dream/result.js";
+import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { acquireLock, failLock, lastRunPath, releaseLock } from "./lock.js";
-import { materialGate, timeGate } from "./gates.js";
-import { loadPlaybook, runDreamer, type DreamerSessionFactory, type DreamResult, type DreamWrite } from "./runner.js";
-import { gitCommit } from "./git.js";
-import { readDreamerSettings, type DreamerSetting } from "./settings.js";
-import { doctor } from "./doctor.js";
-import { notesRoot } from "../pi/notes/adapter.js";
+import { acquireLock, failLock, lastRunPath, releaseLock } from "../../dream/lock.js";
+import { materialGate, timeGate } from "../../dream/gates.js";
+import { runDreamer, type DreamerSessionFactory } from "./runner.js";
+import { gitCommit } from "../../dream/git.js";
+import { readDreamerSettings } from "./settings.js";
+import { doctor } from "../../dream/doctor.js";
+import { notesRoot } from "../notes/adapter.js";
 
 function args(argv: string[]) { const out: Record<string, string | boolean> = {}; for (let i=0;i<argv.length;i++) { const a=argv[i]!; if (a === "--force" || a === "--help") out[a.slice(2)] = true; else if (a.startsWith("--")) out[a.slice(2)] = argv[++i] ?? ""; } return out; }
 function packageRoot(): string {
@@ -22,38 +26,6 @@ export type DreamDependencies = {
 	dreamerSettings?: (cwd?: string) => DreamerSetting;
 	runDreamer?: typeof runDreamer;
 };
-
-function writeList(writes: DreamWrite[]): string {
-	return writes.length ? writes.map((w) => `- ${w.tool}: ${w.path}`).join("\n") : "- no changes";
-}
-
-/** Best-effort text write; returns the failure message instead of throwing. */
-function writeText(path: string, content: string): string | undefined {
-	try { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, content); return undefined; }
-	catch (error) { return error instanceof Error ? error.message : String(error); }
-}
-
-function appendText(path: string, content: string): string | undefined {
-	try { appendFileSync(path, content); return undefined; }
-	catch (error) { return error instanceof Error ? error.message : String(error); }
-}
-
-/**
- * Close one dream: record the report, then run the final audit commit. The audit always
- * runs even when the report cannot be written, and a failed audit is appended to the
- * report (when it exists) as well as named on stderr, so neither failure hides the other.
- */
-function finishDream(home: string, stamp: string, reportPath: string, failed: boolean, body: string, writes: DreamWrite[]): number {
-	const header = failed ? `# Dream ${stamp} (failed)` : `# Dream ${stamp}`;
-	let reportError = writeText(reportPath, `${header}\n\n${body}\n\n${writeList(writes)}\n`);
-	const audit = gitCommit(home, `dream ${stamp}${failed ? " (failed)" : ""}`);
-	if (!audit.ok) {
-		console.error(`dream: final audit failed: ${audit.error}`);
-		reportError ??= appendText(reportPath, `\n## Final audit failed\n\n${audit.error}\n`);
-	}
-	if (reportError) console.error(`dream: could not write report at ${reportPath}: ${reportError}`);
-	return failed || !audit.ok || reportError !== undefined ? 1 : 0;
-}
 
 export async function main(argv = process.argv.slice(2), deps: DreamDependencies = {}): Promise<number> {
 	if (argv[0] === "doctor") {

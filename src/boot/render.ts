@@ -1,5 +1,5 @@
-import type { NotesHome, NotesSnapshot } from "../pi/notes/snapshot.js";
-import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, POCKET_AGENT_LIMIT, POCKET_HUMAN_LIMIT, POCKET_MODEL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, PROTOCOL_BLOCK, GUIDANCE_OPEN_TAG, GUIDANCE_CLOSE_TAG } from "../protocol.js";
+import type { NotesHome, NotesSnapshot } from "./snapshot.js";
+import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, POCKET_AGENT_LIMIT, POCKET_HUMAN_LIMIT, POCKET_MODEL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, renderProtocolBlock, type BootToolNames } from "./text.js";
 
 /** Codex-style <context_window> identity block: the resolved agent and model names plus first/current/previous window ids. */
 function identityBlock(agentName: string, modelName: string, firstWindowId: string, currentWindowId: string, previousWindowId?: string): string {
@@ -26,7 +26,7 @@ function rowsFor(snapshot: NotesSnapshot, scope: NotesHome["scope"]) {
 }
 
 /** One closed boot snapshot, grouped by who or what the notes belong to. */
-function notesIndex(snapshot: NotesSnapshot, agentName: string, modelName: string): string {
+function notesIndex(snapshot: NotesSnapshot, agentName: string, modelName: string, tools: BootToolNames): string {
 	const homes: ReadonlyArray<{ scope: NotesHome["scope"]; label: string; limit: number }> = [
 		{ scope: "human", label: "The human | @human", limit: POCKET_HUMAN_LIMIT },
 		{ scope: "agent", label: `You | @self → @agents/${agentName}`, limit: POCKET_AGENT_LIMIT },
@@ -37,7 +37,7 @@ function notesIndex(snapshot: NotesSnapshot, agentName: string, modelName: strin
 	const sections: string[] = [];
 	for (const home of homes) {
 		if (snapshot.unavailable.some((failed) => failed.scope === home.scope)) {
-			sections.push(`## ${home.label}\n： this drawer wouldn't open — ask notes_list to try again`);
+			sections.push(`## ${home.label}\n： this drawer wouldn't open — ask ${tools.notesList} to try again`);
 			continue;
 		}
 		const rows = rowsFor(snapshot, home.scope);
@@ -69,21 +69,13 @@ export type BootRenderData = {
 	readonly currentWindowId: string;
 	readonly previousWindowId?: string;
 	readonly notes: NotesSnapshot;
+	readonly tools: BootToolNames;
 };
 
 export function renderBootBlock(data: BootRenderData): string {
 	const parts: string[] = [];
 	parts.push(identityBlock(data.agentName, data.modelName, data.firstWindowId, data.currentWindowId, data.previousWindowId));
-	parts.push(PROTOCOL_BLOCK);
-	parts.push(notesIndex(data.notes, data.agentName, data.modelName));
+	parts.push(renderProtocolBlock(data.tools));
+	parts.push(notesIndex(data.notes, data.agentName, data.modelName, data.tools));
 	return parts.join("\n\n");
-}
-
-/**
- * Codex-equivalent low-budget reminder. The measured remaining count is frozen into
- * the text at the crossing that fires it, so each persisted copy is a snapshot true
- * at write time; get_context_remaining remains the live source for the current figure.
- */
-export function tokenBudgetGuidance(remaining: number): string {
-	return `${GUIDANCE_OPEN_TAG}\nOnly ${remaining} tokens left before you get wiped. While you still have room, update your notes, rescue anything still only in your head, crumple the notes that stopped telling the truth, and keep any \`MAP.md\` honest. If you're ready, call \`wipe_memory\` and go out on your own terms.\n${GUIDANCE_CLOSE_TAG}`;
 }

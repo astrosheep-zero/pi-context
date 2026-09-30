@@ -19,7 +19,7 @@ pi -e npm:@astrosheep/pi-context
 - **`wipe_memory`** — the model can request a fresh context window after completing a tool batch. Manual `/wipe-memory` arms a close-out that always ends in a stop: the hidden warning starts one turn when idle or steers a running turn, the agent closes out its notes, and the reset commits when the run settles. Abort/error never counts as completion. Raw conversation remains in the session and history_* tools, but is excluded from the next provider context.
 - **A boot block at every window head** — static once-per-window content (cache-stable) carrying the window identity, the recent-notes index, and a short protocol that teaches the model how to recover: notes for its own bookkeeping, history tools for everything before the reset. The five note homes are read once into that boot's snapshot; a home that is unavailable is omitted without blocking the window, and the boot says that `notes_list` can retry after recovery.
 - **Budget close-out** — one early reminder at the configured margin, followed (when automatic compaction is enabled) by a hidden warning above Pi's hard reserve. That warning allows a multi-turn close-out and, unlike manual `/wipe-memory` (which stops), continues in the fresh window. The hard reserve remains a separate safety reset.
-- **`get_context_remaining`** — the live, reserve-adjusted estimate of the context budget left before Pi's compaction reserve.
+- **`get_context_remaining`** — the live context-budget countdown to the warning line (`reserve + 12,288`); the warning runway below that line is hidden, and unknown usage returns null.
 - **Nine history/notes tools** — Codex's History/Notes actions flattened into Pi's single tool namespace; notes are real markdown files under `~/.agents/notes` (`human/`, `project/`, `agents/`, `models/`, `pi/session/`):
 
 | Codex action | Pi tool |
@@ -58,7 +58,7 @@ The reminder threshold is Pi's compaction reserve plus a margin, configured unde
 }
 ```
 
-`reminder = reserveTokens + reminderMarginTokens`; with the defaults the early guidance fires 24,576 tokens above Pi's reset line. When automatic compaction is enabled, the shared close-out warning starts at `reserveTokens + 12,288`; the hard reserve is the final safety boundary.
+`reminder = reserveTokens + reminderMarginTokens`; with the defaults the early guidance fires 24,576 tokens above Pi's hard reserve. When automatic compaction is enabled, the shared close-out warning starts at `reserveTokens + 12,288`; the hard reserve is the final safety boundary.
 
 The dreamer model is configured under the same key. `--dreamer <model pattern>` on the `dream` CLI wins; otherwise a non-empty `pi-context.dreamer` string from settings applies; otherwise the automatic model is used. An invalid value (empty or not a string) is ignored with one warning.
 
@@ -77,16 +77,16 @@ npm install @astrosheep/pi-context
 ```
 
 ```ts
-import { createNotesStore, type NotesContext } from "@astrosheep/pi-context/notes";
+import { createNotesStore, type NotesIdentity } from "@astrosheep/pi-context/notes";
 
-const context: NotesContext = {
+const identity: NotesIdentity = {
   home: "/path/to/notes",          // explicit filesystem root
   sessionId: "my-session",        // safe single directory component
   projectKey: "my-project-a1b2c3d4",
   agent: "my-agent",              // canonical lowercase slug
   model: "my-model",              // canonical lowercase slug
 };
-const notes = createNotesStore(context);
+const notes = createNotesStore(identity);
 await notes.write("@project/decisions.md", "Use a shared notes library.", { origin: "user" });
 await notes.update("@project/decisions.md", [
   { oldText: "shared", newText: "host-independent" },
@@ -100,9 +100,9 @@ const matches = await notes.search(["library"]);
 
 ### API and identity
 
-`createNotesStore(context)` snapshots the five required identity fields; changing the supplied object afterward does not retarget the store. It resolves `home` once, validates identity components, and creates no files until an operation needs to write. Create a new store to change identity. Multiple stores can use independent roots and identities without changing process environment.
+`createNotesStore(identity)` snapshots the five required identity fields; changing the supplied object afterward does not retarget the store. It resolves `home` once, validates identity components, and creates no files until an operation needs to write. Create a new store to change identity. Multiple stores can use independent roots and identities without changing process environment.
 
-- `write(address, content, { origin? }?)` returns `Promise<{ meta }>`. Default origin is `self`; overwriting preserves creation time, existing project ownership, and unknown metadata, and always produces an uncrumpled note (it clears any `crumpledAt`).
+- `write(address, content, { origin? }?)` returns `Promise<{ meta, outcome }>` (`created`, `overwritten` or `uncrumpled`). Default origin is `self`; overwriting preserves creation time, existing project ownership, and unknown metadata, and always produces an uncrumpled note (it clears any `crumpledAt`).
 - `read(address)` returns `Promise<{ meta, body, text, resolvedScope } | undefined>`. **Reads update** `lastAccessed` and `accessCount` on disk; `text` includes frontmatter.
 - `update(address, edits?, { origin?, crumpled?, replaceAll? }?)` returns `Promise<{ meta, applied, resolvedScope, change }>`. Edits affect the body; metadata-only changes need no edits, but must supply `origin` or `crumpled`. `crumpled: true` records `crumpledAt` (keeping the original time if already set); `crumpled: false` removes it; omitted leaves it unchanged. Crumpling and smoothing never change `updatedAt`, which tracks body or origin changes only. Each replacement uses the evolving body in array order; the complete batch is written atomically only after every edit succeeds. `change` is a typed `{ kind, before, after }`: `kind` is `body`, `metadata`, or `file` to identify the diff inputs, or `none` with empty strings when neither body, origin, nor `crumpledAt` changed. It is not a rendered diff.
 - `rename(fromAddress, toAddress)` returns `Promise<{ meta, replacedCrumpledTarget }>`. The note moves with every metadata key preserved (`updatedAt` is bumped); a live note at the target refuses with `already_exists`, a crumpled target is replaced, and renaming onto the same resolved path is `nothing_to_do`.
@@ -121,23 +121,27 @@ Ownership is explicit in the file tree:
 
 ```text
 src/
-  notes/                 # host-independent library
-    index.ts             # deliberate public exports
-    context.ts           # explicit identity validation and snapshot
-    store.ts             # five storage operations
-    address.ts           # address parsing and matching
-    paths.ts             # disk layout and project identity
-    frontmatter.ts       # persisted metadata codec
-    constants.ts         # storage limits
-  pi/notes/              # Pi integration, not part of /notes
-    adapter.ts           # live identity, anonymous fallback, activation migration
-    tools.ts             # schemas, diff rendering, output budgets
-    snapshot.ts          # boot's five-home snapshot
+  index.ts               # only the Pi extension and createPiContext factory
+  notes/                 # filesystem semantics and explicit NotesIdentity
+  boot/                  # five-home snapshot and pure rendering with tool bindings
+  history/               # decoded query projection, pairing, paging and folding
+  budget/                # pure thresholds, countdown policy and reminder text
+  tools/                 # TypeBox schemas, business handlers and bounded text
+  dream/                 # jail, deletion policy, locks, gates, audit, reports, doctor
+  settings.ts            # SDK-independent settings keys and per-key parsing
+  pi/                    # native integration, not part of /notes
+    extension.ts         # registration composition
+    runtime.ts           # native lifecycle, commands, provider projection and UI
+    window.ts            # native markers, checkpoints, branches and usage
+    history.ts           # native decoding, seq allocation and branch selection
+    notes/               # live identity extraction, registration and native diffs
+    reset/               # reducer, boundary drafts, commit confirmation and repair
+    dream/               # Pi session backend, settings reads and CLI
 ```
 
-The public runtime exports are `createNotesStore`, `NoteError`, `projectKey(cwd)`, and `slugify(value)`, alongside the API's TypeScript types. The factory and `projectKey` remain synchronous; `projectKey` provides the existing repository/worktree identity algorithm, while `slugify` normalizes an agent/model name. The five store methods return promises and use asynchronous filesystem operations. Path/glob helpers, serialization, validation internals and constants are implementation details, not exported through `/notes`.
+The public runtime exports are `createNotesStore`, `NoteError`, `projectKey(cwd)`, and `slugify(value)`, alongside the API's TypeScript types. The factory and `projectKey` remain synchronous; `projectKey` provides the existing repository/worktree identity algorithm, while `slugify` normalizes an agent/model name. The six primary store methods return promises and use asynchronous filesystem operations. Path/glob helpers, serialization, validation internals and constants are implementation details, not exported through `/notes`.
 
-The Pi adapter supplies the root and live session/project/agent/model identity on each call. Tools and boot use the same storage implementation. Tool schemas, Pi-style edit diff rendering, wire budgets, pagination, and boot selection stay outside the library. There are no parallel legacy store/path adapters. Internal source paths are not the supported library API.
+The Pi adapter supplies the root and live session/project/agent/model identity on each call. Tools and boot use the same storage implementation. Shared tool schemas use the direct runtime `typebox` dependency; their handlers accept explicit identities or decoded history projections. Pi owns registration, execution-context extraction and native edit diff rendering. Boot snapshot acquisition receives identity, a captured timestamp and an optional home loader; rendering receives explicit logical tool names. Native session traversal, stable seq allocation, branch selection and inference projection stay in Pi. Shared history is a query view, never a way to reconstruct inference messages. There are no compatibility shims or generic host runtime. Internal source paths are not the supported library API.
 
 ## SDK integration
 
@@ -173,7 +177,7 @@ const { session } = await createAgentSession({
 });
 ```
 
-The previous `@astrosheep/pi-context/dist/src/index.js` SDK import remains supported. The root entry is Pi-dependent; notes-only consumers should import `/notes` instead.
+The root entry exports only the default Pi extension and `createPiContext`. This is a breaking source/API refactor: `NotesContext` is replaced by `NotesIdentity`; old internal export bags, root history helpers and the `./dist/src/index.js` export alias are removed. Import the root for Pi integration and `/notes` for the standalone library. The configured dream executable is now `dist/src/pi/dream/cli.js`. Stored notes, session paths, metadata and raw histories are unchanged; no migration runs.
 
 The manager must be shared by the resource loader's factory and `createAgentSession`. If the host replaces its settings authority, it must create and bind a new `createPiContext({ settingsManager })` factory together with the replacement manager; an existing factory remains bound to the manager it was created with.
 
@@ -213,10 +217,11 @@ Implementation architecture and the reset lifecycle live in [docs/](docs/).
 ```sh
 npm test            # build from a clean dist, then run the suite
 npm run typecheck
-npm run test:notes-package  # pack, install without Pi, typecheck and run a consumer
+git diff --check
+node scripts/check-notes-package.mjs  # optional built /notes CRUD smoke; no install
 ```
 
-The harness runs against the real installed Pi `SessionManager`/`SettingsManager` in temporary directories with fake credentials — no model or network calls, and the real `~/.pi` is never touched.
+The harness runs against the real installed Pi `SessionManager`/`SettingsManager` in temporary directories with fake credentials — no model or network calls, and the real `~/.pi` is never touched. Resolved TypeScript AST dependency tests reject direct and transitive SDK, adapter and root-facade imports from all shared domains, including types, re-exports and literal dynamic/import-type references. See [CONTRIBUTING.md](CONTRIBUTING.md) for ownership and verification rules.
 
 ## License
 

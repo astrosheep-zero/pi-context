@@ -1,10 +1,13 @@
+import { PI_TOOL_NAMES } from "./tool-names.js";
+import { remainingBudget, type ResolvedThresholds } from "../budget/policy.js";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext, type SessionBoundaryDraft, type SettingsManager } from "@earendil-works/pi-coding-agent";
-import { GUIDANCE_TYPE, WARNING_CONTENT, WARNING_TYPE } from "../protocol.js";
-import { readThresholdSettings, type ResolvedThresholds, type ThresholdSettingsResolution } from "./thresholds.js";
-import { currentWindowId, hasWindowMessage, isWindowMarker, rootWindowId, windowUsage } from "./context-window.js";
-import { tokenBudgetGuidance } from "./prompts.js";
-import { output } from "../tool-output.js";
+import { GUIDANCE_TYPE, WARNING_TYPE } from "./entries.js";
+import { WARNING_CONTENT } from "./reset/text.js";
+import { readThresholdSettings, type ThresholdSettingsResolution } from "./thresholds.js";
+import { currentWindowId, hasWindowMessage, isWindowMarker, rootWindowId, windowUsage } from "./window.js";
+import { tokenBudgetGuidance } from "../budget/text.js";
+import { output } from "../tools/output.js";
 
 /** Remaining tokens in the provider's active window, or null without a usable estimate. */
 export function remainingTokens(ctx: Pick<ExtensionContext, "sessionManager" | "getContextUsage" | "model">): number | null {
@@ -146,7 +149,7 @@ export function registerBudget(
 			// Persist at turn_end, before any reset drafts. A queued sendMessage could
 			// otherwise cross the marker and leak the old window's reminder forward.
 			const left = Math.max(0, remaining - warning);
-			pendingGuidance = { windowId, content: tokenBudgetGuidance(left), remaining };
+			pendingGuidance = { windowId, content: tokenBudgetGuidance(left, PI_TOOL_NAMES.wipe), remaining };
 		}
 		return undefined;
 	});
@@ -158,9 +161,9 @@ export function registerBudget(
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_id, _params, _signal, _update, ctx) {
 			// The countdown the model sees ends at the warning line (reserve + runway);
-			// the runway below it is overdraft the model never sees. See protocol.ts.
+			// the runway below it is overdraft the model never sees. See budget/constants.ts.
 			const remaining = remainingTokens(ctx);
-			return output({ remaining_tokens: remaining === null ? null : Math.max(0, remaining - thresholdsFor(ctx as ExtensionContext).warning) });
+			return output({ remaining_tokens: remainingBudget(remaining, thresholdsFor(ctx as ExtensionContext).warning) });
 		},
 	}));
 

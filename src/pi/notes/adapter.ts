@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import type { NotesContext } from "../../notes/context.js";
+import type { NotesIdentity } from "../../notes/identity.js";
 import { projectKey, slugify } from "../../notes/paths.js";
 
 /** Pi's default notes root; environment access stays on the host side of the library boundary. */
@@ -22,7 +22,7 @@ export function modelSlug(ctx: ExtensionContext): string {
 }
 
 /** Translate the current Pi runtime into one explicit notes identity snapshot. */
-export function notesContextFromPi(ctx: ExtensionContext, home = notesRoot()): NotesContext {
+export function notesIdentityFromPi(ctx: ExtensionContext, home = notesRoot()): NotesIdentity {
 	return {
 		home,
 		sessionId: ctx.sessionManager.getSessionId(),

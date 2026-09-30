@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 export const nullableString = () => Type.Optional(Type.Union([Type.String(), Type.Null()]));
 export const positiveInteger = () => Type.Optional(Type.Integer({ minimum: 1 }));
 export const historyRole = Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool"), Type.Literal("context")]);

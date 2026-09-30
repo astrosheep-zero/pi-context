@@ -1,12 +1,17 @@
+import { resetBoundaryCommitted } from "../src/pi/reset/committed.js";
+import { inspectResetTail } from "../src/pi/reset/artifacts.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { historyFromSession, internal } from "../src/index.js";
+import { historyFromSession } from "../src/pi/history.js";
+import { BOOT_TYPE, GUIDANCE_TYPE, RESET_MARKER_TYPE } from "../src/pi/entries.js";
+import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_PROTOCOL_OPEN_TAG } from "../src/boot/text.js";
+import { CONTINUATION } from "../src/pi/reset/text.js";
 import { listNotes, physicalPath } from "./helpers/notes.js";
-import { CONTINUATION_TYPE, MANUAL_WIPE_TYPE } from "../src/protocol.js";
+import { CONTINUATION_TYPE, MANUAL_WIPE_TYPE } from "../src/pi/entries.js";
 import {
 	appendText,
 	call,
@@ -40,7 +45,7 @@ test("custom reset marker removes old provider context while history remains sea
 	const boundary = await commitTurnEndBoundary(captured, sessionManager, ctx);
 	assert.equal(boundary.continue, true);
 	const branch = sessionManager.getBranch();
-	const marker = branch.find((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
+	const marker = branch.find((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE);
 	assert.ok(marker && marker.type === "custom");
 	const checkpoint = branch.find((entry) => entry.type === "compaction");
 	assert.ok(checkpoint && checkpoint.type === "compaction", "reset persists a native retain-none checkpoint");
@@ -52,8 +57,8 @@ test("custom reset marker removes old provider context while history remains sea
 	const projected = await runContextWithSystemHook(captured, ctx, sessionManager.buildSessionContext().messages);
 	const providerText = JSON.stringify(projected?.messages ?? []);
 	assert.equal(providerText.includes("OLD-UNIQUE-TRANSCRIPT"), false);
-	assert.equal(providerText.includes(internal.CONTEXT_WINDOW_OPEN_TAG), true);
-	assert.equal(providerText.includes(internal.RESET_MARKER_TYPE), false, "plain reset state never reaches the provider");
+	assert.equal(providerText.includes(CONTEXT_WINDOW_OPEN_TAG), true);
+	assert.equal(providerText.includes(RESET_MARKER_TYPE), false, "plain reset state never reaches the provider");
 
 	const projection = historyFromSession(ctx);
 	const windows = projection.windows;
@@ -81,7 +86,7 @@ test("the root boot and reset boot carry durable window identity", async () => {
 	await runHandlers(captured, "session_start", { reason: "startup" }, ctx);
 	assert.equal(captured.sent.length, 1);
 	const rootBoot = captured.sent[0];
-	assert.equal(rootBoot?.message.customType, internal.BOOT_TYPE);
+	assert.equal(rootBoot?.message.customType, BOOT_TYPE);
 	assert.equal(rootBoot?.message.display, false, "boot block stays out of the TUI");
 	assert.equal(rootBoot?.options?.triggerTurn, false);
 	assert.equal(noticesOf(ctx).length, 0, "initial boot is silent");
@@ -89,8 +94,8 @@ test("the root boot and reset boot carry durable window identity", async () => {
 	assert.equal(noticesOf(ctx).length, 0, "reload is silent");
 	assert.deepEqual(rootBoot?.message.details, { windowId: `pcw:${sessionManager.getSessionId().slice(0, 8)}:root` });
 	const rootText = typeof rootBoot?.message.content === "string" ? rootBoot.message.content : "";
-	assert.ok(rootText.startsWith(internal.CONTEXT_WINDOW_OPEN_TAG), "root block omits the reset line");
-	assert.equal(rootText.includes(internal.CONTINUATION), false, "root startup carries no reset message");
+	assert.ok(rootText.startsWith(CONTEXT_WINDOW_OPEN_TAG), "root block omits the reset line");
+	assert.equal(rootText.includes(CONTINUATION), false, "root startup carries no reset message");
 	assert.equal(rootText.includes("Previous context window id:"), false, "root block omits the previous-id line");
 	assert.match(rootText, new RegExp(`First context window id: pcw:${sessionManager.getSessionId().slice(0, 8)}:root`));
 	assert.match(rootText, new RegExp(`Current context window id: pcw:${sessionManager.getSessionId().slice(0, 8)}:root`));
@@ -98,7 +103,7 @@ test("the root boot and reset boot carry durable window identity", async () => {
 	const decisionsMeta = (await listNotes(ctx, { scope: "session" })).find((row) => row.path === "decisions.md")?.meta;
 	assert.ok(decisionsMeta);
 	assert.match(rootText, /\| (?:just now|\d+s ago)/, "boot note metadata carries a relative update time");
-	assert.ok(rootText.includes(internal.CONTEXT_WINDOW_PROTOCOL_OPEN_TAG));
+	assert.ok(rootText.includes(CONTEXT_WINDOW_PROTOCOL_OPEN_TAG));
 
 	// Reset: the marker and boot are committed together at the turn boundary.
 	await call(captured, "wipe_memory", {}, ctx);
@@ -109,10 +114,10 @@ test("the root boot and reset boot carry durable window identity", async () => {
 	await runHandlers(captured, "agent_settled", {}, ctx);
 	assert.equal(noticesOf(ctx).filter((notice) => notice.message.includes("memory cleared")).length, 1, "the committed reset is announced once");
 	const entries = sessionManager.getBranch();
-	const marker = entries.find((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
+	const marker = entries.find((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE);
 	assert.ok(marker && marker.type === "custom");
 	const resetWindowId = (marker.data as { windowId: string }).windowId;
-	const resetBoot = entries.find((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE && entry.details && typeof entry.details === "object" && (entry.details as { windowId?: unknown }).windowId === resetWindowId);
+	const resetBoot = entries.find((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && entry.details && typeof entry.details === "object" && (entry.details as { windowId?: unknown }).windowId === resetWindowId);
 	assert.ok(resetBoot && resetBoot.type === "custom_message");
 	assert.equal((resetBoot.details as { windowId: string }).windowId, (marker.data as { windowId: string }).windowId);
 	const continuation = entries.find((entry) => entry.type === "custom_message" && entry.customType === CONTINUATION_TYPE);
@@ -126,7 +131,7 @@ test("an aborted async boot repair emits no boot, continuation, or incomplete-no
 	writeFileSync(notesHome, "not a directory");
 	const sessionManager = manager();
 	const windowId = "pcw:aborted-boot-repair";
-	sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId });
+	sessionManager.appendCustomEntry(RESET_MARKER_TYPE, { windowId });
 	const captured = makeExtension(sessionManager);
 	const ctx = context(sessionManager);
 	const controller = new AbortController();
@@ -139,13 +144,13 @@ test("an aborted async boot repair emits no boot, continuation, or incomplete-no
 
 	assert.equal(captured.sent.length, 0, "aborted snapshot work cannot append the reset boot or continuation");
 	assert.equal(noticesOf(ctx).some((notice) => notice.message.includes("notes index incomplete")), false, "aborted snapshot work cannot notify about missing homes");
-	assert.equal(sessionManager.getBranch().some((entry) => entry.type === "custom_message" && [internal.BOOT_TYPE, CONTINUATION_TYPE].includes(entry.customType)), false);
+	assert.equal(sessionManager.getBranch().some((entry) => entry.type === "custom_message" && [BOOT_TYPE, CONTINUATION_TYPE].includes(entry.customType)), false);
 });
 
 test("a marker tail with only metadata repairs its missing boot and continuation without moving the boundary", async () => {
 	const sessionManager = manager(true);
 	const windowId = "pcw:metadata-tail";
-	const markerId = sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId });
+	const markerId = sessionManager.appendCustomEntry(RESET_MARKER_TYPE, { windowId });
 	const modelChangeId = sessionManager.appendModelChange("openai", "scripted-model");
 	sessionManager.appendThinkingLevelChange("low");
 	const captured = makeExtension(sessionManager);
@@ -154,7 +159,7 @@ test("a marker tail with only metadata repairs its missing boot and continuation
 	await runHandlers(captured, "session_start", { reason: "startup" }, ctx);
 	const branch = sessionManager.getBranch();
 	const markerIndex = branch.findIndex((entry) => entry.id === markerId);
-	const bootEntries = branch.filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE && entry.details && typeof entry.details === "object" && (entry.details as { windowId?: unknown }).windowId === windowId);
+	const bootEntries = branch.filter((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && entry.details && typeof entry.details === "object" && (entry.details as { windowId?: unknown }).windowId === windowId);
 	const continuationEntries = branch.filter((entry) => entry.type === "custom_message" && entry.customType === CONTINUATION_TYPE);
 	assert.equal(bootEntries.length, 1, "an incomplete marker tail gets one repaired boot");
 	assert.equal(continuationEntries.length, 1, "the same repair completes the missing continuation");
@@ -162,7 +167,7 @@ test("a marker tail with only metadata repairs its missing boot and continuation
 	assert.ok(branch.findIndex((entry) => entry.id === bootEntries[0]?.id) > markerIndex, "the repaired boot remains in the marked window");
 	assert.ok(branch.findIndex((entry) => entry.id === continuationEntries[0]?.id) > branch.findIndex((entry) => entry.id === bootEntries[0]?.id), "the continuation follows its boot");
 	assert.equal(captured.sent.length, 2, "repair emits only the missing boot and continuation, without a model turn");
-	assert.equal(captured.sent[0]?.message.customType, internal.BOOT_TYPE);
+	assert.equal(captured.sent[0]?.message.customType, BOOT_TYPE);
 	assert.equal(captured.sent[1]?.message.customType, CONTINUATION_TYPE);
 	assert.equal(noticesOf(ctx).length, 0, "repairing a reset tail is not a new reset");
 });
@@ -170,7 +175,7 @@ test("a marker tail with only metadata repairs its missing boot and continuation
 test("a bare marker tail repairs the full ordered reset shape", async () => {
 	const sessionManager = manager(true);
 	const windowId = "pcw:bare-marker";
-	const markerId = sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId });
+	const markerId = sessionManager.appendCustomEntry(RESET_MARKER_TYPE, { windowId });
 	const captured = makeExtension(sessionManager);
 	const ctx = context(sessionManager);
 
@@ -178,7 +183,7 @@ test("a bare marker tail repairs the full ordered reset shape", async () => {
 	assert.equal(captured.sent.length, 2, "a bare marker emits a boot and a continuation");
 	const branch = sessionManager.getBranch();
 	const markerIndex = branch.findIndex((entry) => entry.id === markerId);
-	const bootIndex = branch.findIndex((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE && (entry.details as { windowId?: string } | undefined)?.windowId === windowId);
+	const bootIndex = branch.findIndex((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && (entry.details as { windowId?: string } | undefined)?.windowId === windowId);
 	const continuationIndex = branch.findIndex((entry) => entry.type === "custom_message" && entry.customType === CONTINUATION_TYPE);
 	assert.ok(bootIndex > markerIndex, "the repaired boot follows its marker");
 	assert.ok(continuationIndex > bootIndex, "the repaired continuation follows its boot");
@@ -187,16 +192,16 @@ test("a bare marker tail repairs the full ordered reset shape", async () => {
 test("a marker tail that already carries a boot repairs only its missing continuation, once", async () => {
 	const sessionManager = manager(true);
 	const windowId = "pcw:missing-continuation";
-	const markerId = sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId });
+	const markerId = sessionManager.appendCustomEntry(RESET_MARKER_TYPE, { windowId });
 	sessionManager.appendModelChange("openai", "scripted-model");
-	sessionManager.appendCustomMessageEntry(internal.BOOT_TYPE, "already-persisted boot", false, { windowId });
+	sessionManager.appendCustomMessageEntry(BOOT_TYPE, "already-persisted boot", false, { windowId });
 	const captured = makeExtension(sessionManager);
 	const ctx = context(sessionManager);
 
 	await runHandlers(captured, "session_start", { reason: "startup" }, ctx);
 	assert.equal(captured.sent.length, 1, "only the missing continuation is emitted");
 	assert.equal(captured.sent[0]?.message.customType, CONTINUATION_TYPE);
-	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE).length, 1, "the existing boot is never duplicated");
+	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE).length, 1, "the existing boot is never duplicated");
 	assert.ok(sessionManager.getBranch().findIndex((entry) => entry.id === markerId) >= 0);
 
 	await runHandlers(captured, "session_start", { reason: "reload" }, ctx);
@@ -207,14 +212,14 @@ test("a marker tail that already carries a boot repairs only its missing continu
 test("a marker tail followed by real conversation is never repaired", async () => {
 	const sessionManager = manager(true);
 	const windowId = "pcw:unsafe-tail";
-	sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId });
+	sessionManager.appendCustomEntry(RESET_MARKER_TYPE, { windowId });
 	appendText(sessionManager, "user", "post-marker work that must not be pushed behind a late boot");
 	const captured = makeExtension(sessionManager);
 	const ctx = context(sessionManager);
 
 	await runHandlers(captured, "session_start", { reason: "startup" }, ctx);
 	assert.equal(captured.sent.length, 0, "an unsafe marker tail emits nothing");
-	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE).length, 0, "no boot is appended after real work");
+	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE).length, 0, "no boot is appended after real work");
 	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === CONTINUATION_TYPE).length, 0, "no continuation is appended after real work");
 });
 
@@ -224,8 +229,8 @@ test("off preserves an existing marker window and still cancels native compactio
 	const ctx = context(sessionManager);
 	appendText(sessionManager, "user", "old context must stay hidden");
 	const windowId = "pcw:test:existing";
-	sessionManager.appendCustomEntry(internal.RESET_MARKER_TYPE, { windowId });
-	sessionManager.appendCustomMessageEntry(internal.BOOT_TYPE, "fresh boot", false, { windowId });
+	sessionManager.appendCustomEntry(RESET_MARKER_TYPE, { windowId });
+	sessionManager.appendCustomMessageEntry(BOOT_TYPE, "fresh boot", false, { windowId });
 	await runCommand(captured, "pi-context", "off", ctx);
 	const before = await runManualCompact(captured, ctx);
 	assert.deepEqual(before, { cancel: true });
@@ -244,8 +249,8 @@ test("wipe_memory uses one turn boundary and never calls ctx.compact", async () 
 	assert.ok(result.status);
 	const boundary = await commitTurnEndBoundary(captured, sessionManager, ctx);
 	assert.equal(boundary.continue, true);
-	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE).length, 1);
-	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE && entry.details && typeof entry.details === "object" && "windowId" in entry.details).length, 1);
+	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE).length, 1);
+	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && entry.details && typeof entry.details === "object" && "windowId" in entry.details).length, 1);
 });
 
 test("/wipe-memory waits out non-agent busy work before starting its single-turn request", async () => {
@@ -276,12 +281,12 @@ test("pi-context command toggles future work, /wipe-memory schedules a turn-end 
 	// On by default: session_start persists the root boot block.
 	await runHandlers(captured, "session_start", { reason: "startup" }, low);
 	assert.equal(captured.sent.length, 1);
-	assert.equal(captured.sent[0]?.message.customType, internal.BOOT_TYPE);
+	assert.equal(captured.sent[0]?.message.customType, BOOT_TYPE);
 
 	let notices = await runCommand(captured, "pi-context", "off", low);
 	assert.match(notices[0]?.message ?? "", /off/);
 	assert.equal(await runContextHook(captured, low), undefined, "no guidance while off");
-	assert.equal(sentOf(captured, internal.GUIDANCE_TYPE).length, 0, "no guidance persisted while off");
+	assert.equal(sentOf(captured, GUIDANCE_TYPE).length, 0, "no guidance persisted while off");
 	await runHandlers(captured, "session_start", { reason: "startup" }, low);
 	assert.equal(captured.sent.length, 1, "no new boot block is persisted while off");
 	const offResult = resultJson<{ error?: string }>(await call(captured, "wipe_memory", {}, low));
@@ -296,7 +301,7 @@ test("pi-context command toggles future work, /wipe-memory schedules a turn-end 
 	assert.equal(captured.sent[1]?.options?.triggerTurn, true, "the manual checkpoint prompt starts an ordinary agent turn");
 	assert.equal(captured.sent[1]?.message.customType, MANUAL_WIPE_TYPE);
 	assert.equal(captured.sent[1]?.message.display, false);
-	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE).length, 0, "no reset is claimed until close-out completes");
+	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE).length, 0, "no reset is claimed until close-out completes");
 	const markerContext = await runManualCompact(captured, low);
 	assert.deepEqual(markerContext, { cancel: true }, "/compact is canceled while context windows are enabled");
 	const projected = await runContextWithSystemHook(captured, low, sessionManager.buildSessionContext().messages);
@@ -308,4 +313,31 @@ test("pi-context command toggles future work, /wipe-memory schedules a turn-end 
 	// Bare command reports current state without changing it.
 	notices = await runCommand(captured, "pi-context", "", low);
 	assert.match(notices[0]?.message ?? "", /on/);
+});
+
+
+test("committed reset confirmation survives later work while repair refuses that suffix", async () => {
+	const sessionManager = manager();
+	const captured = makeExtension(sessionManager);
+	const ctx = context(sessionManager);
+	await call(captured, "wipe_memory", {}, ctx);
+	await commitTurnEndBoundary(captured, sessionManager, ctx);
+	const marker = sessionManager.getBranch().find((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE);
+	assert.ok(marker && marker.type === "custom");
+	const windowId = (marker.data as { windowId: string }).windowId;
+	assert.equal(resetBoundaryCommitted(ctx, marker.id, windowId), true);
+	appendText(sessionManager, "user", "work after the completed boundary");
+	assert.equal(inspectResetTail(ctx, marker.id, windowId), undefined, "conversation refuses suffix repair");
+	assert.equal(resetBoundaryCommitted(ctx, marker.id, windowId), true, "later work does not undo a committed native boundary");
+	await runHandlers(captured, "agent_settled", {}, ctx);
+	await runHandlers(captured, "turn_start", {}, ctx);
+	assert.equal(noticesOf(ctx).filter((notice) => notice.message.includes("memory cleared")).length, 1);
+	assert.equal(resetBoundaryCommitted(ctx, marker.id, "wrong-window"), false);
+
+	const partial = manager();
+	const partialCtx = context(partial);
+	const partialMarker = partial.appendCustomEntry(RESET_MARKER_TYPE, { windowId });
+	partial.appendCustomMessageEntry(BOOT_TYPE, "boot", false, { windowId });
+	partial.appendCustomMessageEntry(CONTINUATION_TYPE, "continuation", false);
+	assert.equal(resetBoundaryCommitted(partialCtx, partialMarker, windowId), false, "a bare legacy marker is not evidence of a new checkpoint commit");
 });

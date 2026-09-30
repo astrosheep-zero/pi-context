@@ -18,7 +18,8 @@ import { parseNote } from "../src/notes/frontmatter.js";
 import { projectKey } from "../src/notes/paths.js";
 import type { Scope } from "../src/notes/index.js";
 import { listNotes, physicalPath, scopeDir } from "./helpers/notes.js";
-import { CONTEXT_WINDOW_PROTOCOL_OPEN_TAG, MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "../src/protocol.js";
+import { CONTEXT_WINDOW_PROTOCOL_OPEN_TAG } from "../src/boot/text.js";
+import { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "../src/notes/constants.js";
 import { call, context, explicitBoot, makeExtension, manager, resultJson, resultRead, runHandlers } from "./helpers/extension.js";
 import { installExtensionTestHooks } from "./helpers/extension-test-environment.js";
 

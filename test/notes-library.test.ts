@@ -3,12 +3,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createNotesStore, NoteError, type NotesContext } from "../src/notes/index.js";
+import { createNotesStore, NoteError, type NotesIdentity } from "../src/notes/index.js";
 
 function fixture(t: test.TestContext) {
 	const home = mkdtempSync(join(tmpdir(), "notes-library-"));
 	t.after(() => rmSync(home, { recursive: true, force: true }));
-	const context: NotesContext = { home, sessionId: "session-a", projectKey: "project-12345678", agent: "root", model: "test-model" };
+	const context: NotesIdentity = { home, sessionId: "session-a", projectKey: "project-12345678", agent: "root", model: "test-model" };
 	return { home, context, notes: createNotesStore(context) };
 }
 

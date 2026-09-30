@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadSkillsFromDir } from "@earendil-works/pi-coding-agent";
-import { loadPlaybook } from "../src/dream/runner.js";
+import { loadPlaybook } from "../src/dream/playbook.js";
 
 function packageRoot(): string {
 	let dir = dirname(fileURLToPath(import.meta.url));
@@ -32,7 +32,7 @@ test("dream skill is publicly discoverable and resolves the CLI's shared playboo
 	const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 	assert.deepEqual(manifest.pi.skills, ["./skills"]);
 	assert.deepEqual(manifest.pi.extensions, ["./dist/extension.js"]);
-	assert.equal(manifest.bin.dream, "dist/src/dream/cli.js");
+	assert.equal(manifest.bin.dream, "dist/src/pi/dream/cli.js");
 	assert.ok(manifest.files.includes("skills"));
 
 	const skill = discoverDreamSkill(join(root, "skills"));
@@ -57,7 +57,7 @@ test("npm tarball keeps the skill's relative playbook path portable after extrac
 		assert.ok(packedPaths.includes("skills/dream/SKILL.md"));
 		assert.ok(packedPaths.includes("playbook.md"));
 		assert.ok(packedPaths.includes("dist/extension.js"));
-		assert.ok(packedPaths.includes("dist/src/dream/cli.js"));
+		assert.ok(packedPaths.includes("dist/src/pi/dream/cli.js"));
 
 		const extracted = join(fixture, "extracted");
 		execFileSync("mkdir", ["-p", extracted]);

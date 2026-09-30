@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
-import { internal } from "../src/index.js";
+import { DEFAULT_REMINDER_MARGIN_TOKENS, DEFAULT_RESERVE_TOKENS } from "../src/budget/constants.js";
+import { GUIDANCE_TYPE, WARNING_TYPE } from "../src/pi/entries.js";
+import { PI_CONTEXT_SETTINGS_KEY } from "../src/settings.js";
 import {
 	appendText,
 	call,
@@ -30,17 +32,17 @@ test("low-budget guidance and warning persist at turn_end, once per active windo
 	assert.equal(await runContextHook(captured, low), undefined, "guidance is staged, not injected into this request");
 	assert.equal(captured.sent.length, 0, "guidance does not trigger a detached turn");
 	const guidanceBoundary = await commitTurnEndBoundary(captured, sessionManager, low);
-	assert.equal(guidanceBoundary.entries.filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1);
-	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1);
+	assert.equal(guidanceBoundary.entries.filter((entry) => entry.type === "custom_message" && entry.customType === GUIDANCE_TYPE).length, 1);
+	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === GUIDANCE_TYPE).length, 1);
 	assert.equal(await runContextHook(captured, low), undefined, "the same window does not repeat guidance");
 
 	const warningContext = context(sessionManager, undefined, { tokens: 199_000, percent: 99.5, contextWindow: 200_000 });
 	const warning = await runContextHook(captured, warningContext);
 	assert.equal(warning?.messages.length, 1, "the warning is visible in the current provider request");
-	assert.equal((warning?.messages[0] as { customType?: string }).customType, internal.WARNING_TYPE);
+	assert.equal((warning?.messages[0] as { customType?: string }).customType, WARNING_TYPE);
 	const warningBoundary = await commitTurnEndBoundary(captured, sessionManager, warningContext);
-	assert.equal(warningBoundary.entries.filter((entry) => entry.type === "custom_message" && entry.customType === internal.WARNING_TYPE).length, 1);
-	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.WARNING_TYPE).length, 1);
+	assert.equal(warningBoundary.entries.filter((entry) => entry.type === "custom_message" && entry.customType === WARNING_TYPE).length, 1);
+	assert.equal(sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === WARNING_TYPE).length, 1);
 });
 
 test("early guidance stays silent and the committed final warning notifies once", async () => {
@@ -51,11 +53,11 @@ test("early guidance stays silent and the committed final warning notifies once"
 	await commitTurnEndBoundary(captured, sm, early);
 	await runHandlers(captured, "agent_settled", {}, early);
 	assert.equal(noticesOf(early).filter((notice) => notice.message.includes("Context running low") || notice.message.includes("Context almost full")).length, 0, "early model guidance has no UI toast");
-	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1, "early guidance remains durable for the model");
+	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === GUIDANCE_TYPE).length, 1, "early guidance remains durable for the model");
 
 	const final = context(sm, undefined, { tokens: 181_000, percent: 90.5, contextWindow: 200_000 });
 	const warning = await runContextHook(captured, final);
-	assert.equal((warning?.messages[0] as { customType?: string } | undefined)?.customType, internal.WARNING_TYPE);
+	assert.equal((warning?.messages[0] as { customType?: string } | undefined)?.customType, WARNING_TYPE);
 	await commitTurnEndBoundary(captured, sm, final);
 	await runHandlers(captured, "turn_start", {}, final);
 	await runHandlers(captured, "agent_settled", {}, final);
@@ -87,12 +89,12 @@ test("the visible countdown ends at the warning line, clamps at zero, and preser
 });
 
 test("absent pi-context key or margins reproduce the default reminder threshold at Pi's default reserve", async () => {
-	assert.equal(internal.DEFAULT_RESERVE_TOKENS, 16_384);
-	assert.equal(internal.DEFAULT_RESERVE_TOKENS + internal.DEFAULT_REMINDER_MARGIN_TOKENS, 40_960);
+	assert.equal(DEFAULT_RESERVE_TOKENS, 16_384);
+	assert.equal(DEFAULT_RESERVE_TOKENS + DEFAULT_REMINDER_MARGIN_TOKENS, 40_960);
 
 	for (const [label, options] of [
 		["absent key", { global: {} }],
-		["absent margins", { global: { [internal.PI_CONTEXT_SETTINGS_KEY]: {} } }],
+		["absent margins", { global: { [PI_CONTEXT_SETTINGS_KEY]: {} } }],
 	] as const) {
 		const fixture = settingsFixture(options);
 		const sm = manager();
@@ -104,11 +106,11 @@ test("absent pi-context key or margins reproduce the default reminder threshold 
 		const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
 		const first = at(40_961);
 		assert.equal(await runContextHook(captured, first), undefined, `${label}: nothing injected above the default reminder`);
-		assert.equal(sentOf(captured, internal.GUIDANCE_TYPE).length, 0, `${label}: no guidance above the default reminder`);
+		assert.equal(sentOf(captured, GUIDANCE_TYPE).length, 0, `${label}: no guidance above the default reminder`);
 		const crossing = at(40_960);
 		assert.equal(await runContextHook(captured, crossing), undefined, `${label}: default reminder crossing persists only`);
 		await commitTurnEndBoundary(captured, sm, crossing);
-		assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1, `${label}: default reminder fires`);
+		assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === GUIDANCE_TYPE).length, 1, `${label}: default reminder fires`);
 		assert.equal(noticesOf(first).length, 0, `${label}: valid defaults warn nobody`);
 	}
 });
@@ -116,8 +118,8 @@ test("absent pi-context key or margins reproduce the default reminder threshold 
 test("project pi-context reminder margin and reserve override global per key", async () => {
 	const fixture = settingsFixture({
 		reserveTokens: 20_000,
-		global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 30_000 } },
-		project: { compaction: { reserveTokens: 50_000 }, [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 40_000 } },
+		global: { [PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 30_000 } },
+		project: { compaction: { reserveTokens: 50_000 }, [PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 40_000 } },
 	});
 	// Project reserve wins: reminder = 50000 + 40000 (project margin).
 	const sm = manager();
@@ -126,15 +128,15 @@ test("project pi-context reminder margin and reserve override global per key", a
 	const window = 300_000;
 	const at = (remaining: number) => context(sm, undefined, { tokens: window - remaining, percent: 0, contextWindow: window }, true, fixture.cwd);
 	assert.equal(await runContextHook(captured, at(90_001)), undefined, "nothing injected above the project-derived reminder");
-	assert.equal(sentOf(captured, internal.GUIDANCE_TYPE).length, 0);
+	assert.equal(sentOf(captured, GUIDANCE_TYPE).length, 0);
 	const crossing = at(90_000);
 	assert.equal(await runContextHook(captured, crossing), undefined, "project-derived reminder crossing persists only");
 	await commitTurnEndBoundary(captured, sm, crossing);
-	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1, "project reminder margin wins");
+	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === GUIDANCE_TYPE).length, 1, "project reminder margin wins");
 });
 
 test("an invalid reminder margin degrades to its default with one warning and never throws", async () => {
-	const fixture = settingsFixture({ global: { [internal.PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 0 } } });
+	const fixture = settingsFixture({ global: { [PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 0 } } });
 	const sm = manager();
 	const captured = makeExtension(sm);
 	const ctx = context(sm, undefined, undefined, true, fixture.cwd);
@@ -153,7 +155,7 @@ test("an invalid reminder margin degrades to its default with one warning and ne
 	const crossing = at(40_960);
 	assert.equal(await runContextHook(captured, crossing), undefined, "degraded reminder uses its default");
 	await commitTurnEndBoundary(captured, sm, crossing);
-	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === internal.GUIDANCE_TYPE).length, 1, "the degraded reminder is persisted once");
+	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === GUIDANCE_TYPE).length, 1, "the degraded reminder is persisted once");
 	assert.equal(noticesOf(ctx).filter((notice) => notice.type === "warning").length, 1, "warning stays one-time across handler calls");
 });
 
@@ -163,7 +165,7 @@ test("the warning supersedes the early reminder when usage jumps across both thr
 	const captured = makeExtension(sm);
 	const ctx = context(sm, undefined, { tokens: 199_000, percent: 99.5, contextWindow: 200_000 }, false);
 	const warningResult = await runContextHook(captured, ctx);
-	assert.deepEqual(warningResult?.messages.map((message) => (message as { customType?: string }).customType), [internal.WARNING_TYPE]);
+	assert.deepEqual(warningResult?.messages.map((message) => (message as { customType?: string }).customType), [WARNING_TYPE]);
 	await commitTurnEndBoundary(captured, sm, ctx);
 	const reloaded = makeExtension(sm);
 	await runHandlers(reloaded, "context", {}, ctx);

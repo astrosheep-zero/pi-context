@@ -1,3 +1,5 @@
+import { notesIdentityFromPi } from "../../src/pi/notes/adapter.js";
+import { PI_TOOL_NAMES } from "../../src/pi/tool-names.js";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,12 +18,12 @@ import {
 	type ToolDefinition,
 	type TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
-import piContext, { createPiContext } from "../../src/index.js";
-import { loadNotesSnapshot } from "../../src/pi/notes/snapshot.js";
-import { renderBootBlock } from "../../src/context/prompts.js";
+import piContext, { createPiContext } from "../../src/pi/extension.js";
+import { loadNotesSnapshot } from "../../src/boot/snapshot.js";
+import { renderBootBlock } from "../../src/boot/render.js";
 import { agentSlug, modelSlug } from "../../src/pi/notes/adapter.js";
-import { rootWindowId } from "../../src/context/context-window.js";
-import { TOOL_OUTPUT_MAX_BYTES } from "../../src/tool-output.js";
+import { rootWindowId } from "../../src/pi/window.js";
+import { TOOL_OUTPUT_MAX_BYTES } from "../../src/tools/output.js";
 
 let defaultCwd = "/private/tmp/pi-context-test-cwd";
 let registerTempPath: ((path: string) => void) | undefined;
@@ -184,12 +186,13 @@ export function makeExtension(sessionManager: SessionManager, settingsManager?: 
 
 export async function explicitBoot(ctx: ExtensionContext, currentWindowId: string, previousWindowId: string | undefined): Promise<string> {
 	return renderBootBlock({
+		tools: PI_TOOL_NAMES,
 		agentName: agentSlug(ctx),
 		modelName: modelSlug(ctx),
 		firstWindowId: rootWindowId(ctx.sessionManager.getSessionId()),
 		currentWindowId,
 		previousWindowId,
-		notes: await loadNotesSnapshot(ctx),
+		notes: await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now()),
 	});
 }
 

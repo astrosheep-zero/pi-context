@@ -1,10 +1,11 @@
+import { PI_TOOL_NAMES } from "./tool-names.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { notesContextFromPi } from "../pi/notes/adapter.js";
-import { loadNotesSnapshot, type NotesSnapshot } from "../pi/notes/snapshot.js";
-import { BOOT_TYPE } from "../protocol.js";
-import { renderBootBlock } from "./prompts.js";
-import { currentReset, currentWindowId, isWindowBoot, rootWindowId } from "./context-window.js";
-import { repairResetTail } from "./reset-artifacts.js";
+import { notesIdentityFromPi } from "./notes/adapter.js";
+import { loadNotesSnapshot, type NotesSnapshot } from "../boot/snapshot.js";
+import { BOOT_TYPE } from "./entries.js";
+import { renderBootBlock } from "../boot/render.js";
+import { currentReset, currentWindowId, isWindowBoot, rootWindowId } from "./window.js";
+import { repairResetTail } from "./reset/artifacts.js";
 
 export type IncompleteNotesNotifier = (ctx: ExtensionContext, windowId: string, snapshot: NotesSnapshot) => void;
 
@@ -25,7 +26,7 @@ function bootContent(
 	previousId: string | undefined,
 	notes: NotesSnapshot,
 ): string {
-	return renderBootBlock({ agentName, modelName, firstWindowId, currentWindowId: currentId, previousWindowId: previousId, notes });
+	return renderBootBlock({ agentName, modelName, firstWindowId, currentWindowId: currentId, previousWindowId: previousId, notes, tools: PI_TOOL_NAMES });
 }
 
 /**
@@ -39,8 +40,8 @@ export async function buildBootMessage(
 	notifyIncompleteNotes?: IncompleteNotesNotifier,
 	isCurrent: () => boolean = () => true,
 ): Promise<BootMessage> {
-	const identity = notesContextFromPi(ctx);
-	const notes = await loadNotesSnapshot(ctx, undefined, identity);
+	const identity = notesIdentityFromPi(ctx);
+	const notes = await loadNotesSnapshot(identity, Date.now());
 	if (isCurrent()) notifyIncompleteNotes?.(ctx, windowId, notes);
 	return {
 		customType: BOOT_TYPE,

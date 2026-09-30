@@ -1,4 +1,4 @@
-import type { NotesContext } from "./context.js";
+import type { NotesIdentity } from "./identity.js";
 import { SLUG_PATTERN, type Scope } from "./paths.js";
 
 export type NoteAddress = { scope: Scope; path: string; who?: string };
@@ -84,10 +84,10 @@ export function assertAddress(value: unknown): NoteAddress {
 }
 
 /** Render a virtual path in its one unambiguous public address form. */
-export function addressFor(context: NotesContext, scope: Scope, path: string, who?: string): string {
+export function addressFor(identity: NotesIdentity, scope: Scope, path: string, who?: string): string {
 	if (scope === "session") return path;
 	if (scope === "project") return `@project/${path}`;
 	if (scope === "human") return `@human/${path}`;
-	if (scope === "agent") return `@agents/${who ?? context.agent}/${path}`;
-	return `@models/${who ?? context.model}/${path}`;
+	if (scope === "agent") return `@agents/${who ?? identity.agent}/${path}`;
+	return `@models/${who ?? identity.model}/${path}`;
 }

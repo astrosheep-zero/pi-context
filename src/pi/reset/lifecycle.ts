@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { isContextOverflow, isRecoverableLength } from "@earendil-works/pi-ai";
 import type { AgentBeforeSettleEvent, ExtensionAPI, ExtensionContext, SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
-import { currentReset, currentWindowId } from "./context-window.js";
+import { currentReset, currentWindowId } from "../window.js";
 
 type BudgetOwner = {
 	automaticResetEnabled: (ctx: ExtensionContext) => boolean;

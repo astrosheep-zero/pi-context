@@ -15,8 +15,11 @@ import {
 	type ExtensionAPI,
 	type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
-import piContext, { createPiContext } from "../src/index.js";
-import { BOOT_TYPE, CONTEXT_WINDOW_OPEN_TAG, CONTINUATION, CONTINUATION_TYPE, GUIDANCE_OPEN_TAG, GUIDANCE_TYPE, MANUAL_WIPE_TYPE, RESET_MARKER_TYPE, WARNING_CONTENT, WARNING_PROMPT, WARNING_TYPE } from "../src/protocol.js";
+import piContext, { createPiContext } from "../src/pi/extension.js";
+import { BOOT_TYPE, CONTINUATION_TYPE, GUIDANCE_TYPE, MANUAL_WIPE_TYPE, RESET_MARKER_TYPE, WARNING_TYPE } from "../src/pi/entries.js";
+import { CONTEXT_WINDOW_OPEN_TAG } from "../src/boot/text.js";
+import { CONTINUATION, WARNING_CONTENT, WARNING_PROMPT } from "../src/pi/reset/text.js";
+import { GUIDANCE_OPEN_TAG } from "../src/budget/text.js";
 
 type StreamScript = (request: number, context: AgentContext) => AssistantMessage | Promise<AssistantMessage>;
 type Hook = (pi: ExtensionAPI, getSession: () => AgentSession, requests: AgentContext[]) => void;

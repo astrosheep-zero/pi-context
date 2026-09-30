@@ -1,4 +1,6 @@
-import { PI_CONTEXT_SETTINGS_KEY } from "./protocol.js";
+export const PI_CONTEXT_SETTINGS_KEY = "pi-context";
+/** Nested under "pi-context": the default dreamer model pattern, overridden by CLI --dreamer. */
+export const PI_CONTEXT_DREAMER_KEY = "dreamer";
 
 export type PiContextSettings = { reminderMarginTokens?: unknown; dreamer?: unknown };
 

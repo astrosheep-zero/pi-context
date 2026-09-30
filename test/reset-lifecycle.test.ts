@@ -14,8 +14,10 @@ import type {
 	TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import { SessionManager as Manager } from "@earendil-works/pi-coding-agent";
-import piContext, { internal } from "../src/index.js";
-import { MANUAL_WIPE_TYPE, WARNING_CONTENT } from "../src/protocol.js";
+import piContext from "../src/pi/extension.js";
+import { BOOT_TYPE, CONTINUATION_TYPE, GUIDANCE_TYPE, RESET_MARKER_TYPE } from "../src/pi/entries.js";
+import { MANUAL_WIPE_TYPE } from "../src/pi/entries.js";
+import { WARNING_CONTENT } from "../src/pi/reset/text.js";
 import {
 	initialResetControl,
 	reduceResetControl,
@@ -23,7 +25,7 @@ import {
 	type ResetBeforeSettleFacts,
 	type ResetControlState,
 	type ResetTurnEndFacts,
-} from "../src/context/reset-lifecycle.js";
+} from "../src/pi/reset/lifecycle.js";
 
 const previousNotesHome = process.env.PI_NOTES_HOME;
 const testNotesHome = mkdtempSync(join(tmpdir(), "pi-context-lifecycle-notes-"));
@@ -170,8 +172,8 @@ test("public reset boundary drafts one marker, one boot, and one continuation af
 	const toolBatch: SessionBoundaryDraft[] = [{ type: "custom_message", customType: "foreign/tool-batch", content: "tool finished", display: false }];
 	const boundary = resultEntries(await h.emit("turn_end", fakeBoundaryEvent(toolBatch)));
 	assert.equal(boundary.continue, true, "the whole tool batch continues only after the boundary is committed");
-	const markerDrafts = boundary.entries.filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
-	const bootDrafts = boundary.entries.filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE);
+	const markerDrafts = boundary.entries.filter((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE);
+	const bootDrafts = boundary.entries.filter((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE);
 	assert.equal(markerDrafts.length, 1, "duplicate wipe requests in one turn dedupe");
 	assert.equal(bootDrafts.length, 1);
 	assert.equal(boundary.entries[0]?.type, "custom_message", "ordinary tool-batch entries precede the reset drafts");
@@ -181,13 +183,13 @@ test("public reset boundary drafts one marker, one boot, and one continuation af
 	const windowId = (markerDrafts[0] as { data: { windowId: string } }).data.windowId;
 	assert.match(windowId, /^pcw:/);
 	assert.equal((bootDrafts[0] as { details: { windowId: string } }).details.windowId, windowId);
-	const continuationDrafts = boundary.entries.filter((entry) => entry.type === "custom_message" && entry.customType === internal.CONTINUATION_TYPE);
+	const continuationDrafts = boundary.entries.filter((entry) => entry.type === "custom_message" && entry.customType === CONTINUATION_TYPE);
 	assert.equal(continuationDrafts.length, 1, "the boundary persists exactly one reset message");
 	assert.equal(boundary.entries[4]?.type, "custom_message", "the continuation closes the ordered reset shape");
 	appendDrafts(h.sessionManager, boundary.entries);
 	const branch = h.sessionManager.getBranch();
-	assert.deepEqual(branch.filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE).map((entry) => entry.type === "custom" ? entry.data : undefined), [{ windowId }]);
-	assert.equal(branch.filter((entry) => entry.type === "custom_message" && entry.customType === internal.BOOT_TYPE).length, 1);
+	assert.deepEqual(branch.filter((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE).map((entry) => entry.type === "custom" ? entry.data : undefined), [{ windowId }]);
+	assert.equal(branch.filter((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE).length, 1);
 });
 
 test("manual /wipe-memory spans tool turns and commits the stop at settlement", async () => {
@@ -209,7 +211,7 @@ test("manual /wipe-memory spans tool turns and commits the stop at settlement", 
 		outcome: "completed",
 		context: { contextEntries: [], contextMessages: [], llmMessages: [], pendingMessages: [], canContinue: true },
 	}));
-	const markers = settle.entries.filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
+	const markers = settle.entries.filter((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE);
 	assert.equal(markers.length, 1, "the reset commits at settlement");
 	assert.equal(settle.continue, false, "a manual wipe does not continue after the reset");
 });
@@ -218,7 +220,7 @@ test("off stops future automatic/manual reset requests while an existing marker 
 	const h = harness();
 	await h.callTool("wipe_memory");
 	const first = resultEntries(await h.emit("turn_end", fakeBoundaryEvent()));
-	assert.ok(first.entries.some((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE));
+	assert.ok(first.entries.some((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE));
 	appendDrafts(h.sessionManager, first.entries);
 	await h.runCommand("pi-context", "off");
 	const before = await h.emit("session_before_compact", {
@@ -240,7 +242,7 @@ test("off stops future automatic/manual reset requests while an existing marker 
 	const warning = h.sessionManager.getBranch().find((entry) => entry.type === "custom_message" && entry.customType === MANUAL_WIPE_TYPE);
 	assert.ok(warning && warning.type === "custom_message");
 	assert.equal(warning.content, WARNING_CONTENT);
-	const markers = h.sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
+	const markers = h.sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE);
 	assert.equal(markers.length, 1, "manual command waits for an agent boundary; it does not persist an immediate reset");
 });
 
@@ -263,7 +265,7 @@ test("reset construction failure preserves incoming and budget drafts without co
 		hasPendingMessages: () => false,
 		ui: { notify: (message: string, type?: string) => notices.push({ message, type }) },
 	} as unknown as ExtensionContext;
-	const budgetDraft: SessionBoundaryDraft = { type: "custom_message", customType: internal.GUIDANCE_TYPE, content: "budget draft", display: false };
+	const budgetDraft: SessionBoundaryDraft = { type: "custom_message", customType: GUIDANCE_TYPE, content: "budget draft", display: false };
 	const lifecycle = registerResetLifecycle(api, {
 		isEnabled: () => true,
 		budget: {
@@ -325,7 +327,7 @@ test("a stale async reset is discarded after a lifecycle switch without staging 
 	assert.ok(turnEnd && sessionTree);
 	const pending = turnEnd(fakeBoundaryEvent([incoming]), ctx);
 	await sessionTree({}, ctx);
-	resolveBuild([{ type: "custom_message", customType: internal.BOOT_TYPE, content: "stale", display: false }]);
+	resolveBuild([{ type: "custom_message", customType: BOOT_TYPE, content: "stale", display: false }]);
 	const result = resultEntries([await pending]);
 	assert.deepEqual(result.entries, [incoming], "a switched lifecycle keeps incoming drafts but discards stale reset drafts");
 	assert.equal(result.continue, false);
@@ -550,7 +552,7 @@ test("a committed reset places incoming and budget drafts before marker -> boot 
 		ui: { notify() {} },
 	} as unknown as ExtensionContext;
 	const windowId = "pcw:ordering:test";
-	const budgetDraft: SessionBoundaryDraft = { type: "custom_message", customType: internal.GUIDANCE_TYPE, content: "budget draft", display: false };
+	const budgetDraft: SessionBoundaryDraft = { type: "custom_message", customType: GUIDANCE_TYPE, content: "budget draft", display: false };
 	const lifecycle = registerResetLifecycle(api, {
 		isEnabled: () => true,
 		budget: {
@@ -561,9 +563,9 @@ test("a committed reset places incoming and budget drafts before marker -> boot 
 		},
 		buildReset: () => [
 			{ type: "compaction", summary: "", firstKeptEntryId: null },
-			{ type: "custom", customType: internal.RESET_MARKER_TYPE, data: { windowId } },
-			{ type: "custom_message", customType: internal.BOOT_TYPE, content: "boot", display: false, details: { windowId } },
-			{ type: "custom_message", customType: internal.CONTINUATION_TYPE, content: "continuation", display: false },
+			{ type: "custom", customType: RESET_MARKER_TYPE, data: { windowId } },
+			{ type: "custom_message", customType: BOOT_TYPE, content: "boot", display: false, details: { windowId } },
+			{ type: "custom_message", customType: CONTINUATION_TYPE, content: "continuation", display: false },
 		],
 	});
 	lifecycle.request(`pcw:${sessionManager.getSessionId().slice(0, 8)}:root`);
@@ -579,15 +581,15 @@ test("a committed reset places incoming and budget drafts before marker -> boot 
 	});
 	assert.deepEqual(customTypes(result.entries), [
 		"foreign/boundary",
-		internal.GUIDANCE_TYPE,
+		GUIDANCE_TYPE,
 		"native-compaction",
-		internal.RESET_MARKER_TYPE,
-		internal.BOOT_TYPE,
-		internal.CONTINUATION_TYPE,
+		RESET_MARKER_TYPE,
+		BOOT_TYPE,
+		CONTINUATION_TYPE,
 	], "ordinary and budget drafts precede the closed reset shape");
 	appendDrafts(sessionManager, result.entries);
 	const branch = sessionManager.getBranch();
-	const markerIndex = branch.findIndex((entry) => entry.type === "custom" && entry.customType === internal.RESET_MARKER_TYPE);
+	const markerIndex = branch.findIndex((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE);
 	assert.ok(markerIndex > 0);
 	assert.equal(branch[markerIndex - 1]?.type, "compaction", "the checkpoint is directly before the marker");
 	const checkpoint = branch[markerIndex - 1];
@@ -595,8 +597,8 @@ test("a committed reset places incoming and budget drafts before marker -> boot 
 	assert.equal(checkpoint.summary, "");
 	assert.equal(checkpoint.firstKeptEntryId, checkpoint.id, "Pi materializes null as retain-none");
 	assert.deepEqual(customTypes(branch.slice(markerIndex)), [
-		internal.RESET_MARKER_TYPE,
-		internal.BOOT_TYPE,
-		internal.CONTINUATION_TYPE,
+		RESET_MARKER_TYPE,
+		BOOT_TYPE,
+		CONTINUATION_TYPE,
 	], "the persisted reset shape remains marker -> boot -> continuation");
 });

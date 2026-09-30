@@ -1,14 +1,16 @@
+import { notesIdentityFromPi } from "../src/pi/notes/adapter.js";
+import { PI_TOOL_NAMES } from "../src/pi/tool-names.js";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { internal } from "../src/index.js";
-import { loadNotesSnapshot } from "../src/pi/notes/snapshot.js";
-import { renderBootBlock } from "../src/context/prompts.js";
+
+import { loadNotesSnapshot } from "../src/boot/snapshot.js";
+import { renderBootBlock } from "../src/boot/render.js";
 import { localIso } from "../src/notes/frontmatter.js";
 import type { NoteRow, Scope } from "../src/notes/index.js";
 import { listNotes, physicalPath, scopeDir } from "./helpers/notes.js";
-import { TOOL_OUTPUT_MAX_BYTES } from "../src/tool-output.js";
+import { TOOL_OUTPUT_MAX_BYTES } from "../src/tools/output.js";
 import {
 	assertWithinBudget,
 	call,
@@ -202,12 +204,13 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 		["model", [note("model", "model.md", "@models/default/model.md", "MODEL_POCKET_BODY")]],
 	]);
 	const calls = new Map<Scope, number>();
-	const snapshot = await loadNotesSnapshot(ctx, (_ctx, scope) => {
+	const snapshot = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), (scope) => {
 		calls.set(scope, (calls.get(scope) ?? 0) + 1);
 		return rows.get(scope) ?? [];
 	});
 	assert.deepEqual([...calls.entries()], [["session", 1], ["project", 1], ["human", 1], ["agent", 1], ["model", 1]], "each selected home is loaded exactly once");
 	const renderData = {
+		tools: PI_TOOL_NAMES,
 		agentName: "root",
 		modelName: "default",
 		firstWindowId: "pcw:test:root",
@@ -228,7 +231,7 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 	for (let i = 1; i < headings.length; i++) assert.ok(rendered.indexOf(headings[i - 1]!) < rendered.indexOf(headings[i]!), "homes proceed from durable to current session");
 	assert.ok(rendered.indexOf("HUMAN_MAP_BODY") < rendered.indexOf("- @human/human.md"), "each map stays next to its own recent notes");
 
-	const expanded = await loadNotesSnapshot(ctx, (_ctx, scope) => {
+	const expanded = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), (scope) => {
 		if (scope === "project" || scope === "human" || scope === "agent" || scope === "model") {
 			return Array.from({ length: 6 }, (_, i) => note(scope, `note-${i}.md`, `@${scope === "agent" ? "agents/root" : scope === "model" ? "models/default" : scope}/note-${i}.md`, `body ${i}`));
 		}
@@ -243,10 +246,10 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 	assert.equal(expandedText.includes("- @models/default/note-3.md | "), false, "@model is capped at three");
 	assert.equal(expandedText.includes("You find"), false, "the old pocket heading is gone");
 
-	const empty = await loadNotesSnapshot(ctx, () => []);
+	const empty = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), () => []);
 	assert.match(renderBootBlock({ ...renderData, notes: empty }), /# Your notes\n\n： None yet\. A blank slate is a fine place to start — just don't finish there\./);
 	const crumpledNote = note("session", "crumpled.md", "crumpled.md", "SHOULD_NOT_SHOW");
-	const mapAndUnicode = await loadNotesSnapshot(ctx, (_ctx, scope) => scope === "session" ? [
+	const mapAndUnicode = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), (scope) => scope === "session" ? [
 		note("session", "MAP.md", "MAP.md", "SESSION_MAP_BODY"),
 		note("session", "unicode.md", "unicode.md", "🐑字"),
 		{ ...crumpledNote, meta: { ...crumpledNote.meta, crumpledAt: localIso(updated) } },
@@ -258,12 +261,13 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 	assert.equal(mapAndUnicodeText.includes("## The human"), false, "empty sections are omitted");
 
 	const readFailure = (code: string): NodeJS.ErrnoException => Object.assign(new Error("scripted read failure"), { code });
-	const oneFailed = await loadNotesSnapshot(ctx, (_ctx, scope) => {
+	const oneFailed = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), (scope) => {
 		if (scope === "human") throw readFailure("EIO");
 		return rows.get(scope) ?? [];
 	});
 	assert.deepEqual(oneFailed.unavailable.map((home) => home.label), ["@human"]);
 	const oneFailedText = renderBootBlock({
+		tools: PI_TOOL_NAMES,
 		agentName: "root",
 		modelName: "default",
 		firstWindowId: "pcw:test:root",
@@ -273,11 +277,12 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 	assert.ok(oneFailedText.includes("PROJECT_MAP_BODY") && oneFailedText.includes("## The human | @human\n： this drawer wouldn't open — ask notes_list to try again"), "healthy homes and a per-section recovery notice survive one failure");
 	assert.equal(oneFailedText.includes("HUMAN_POCKET_BODY"), false, "the failed home's index is omitted");
 
-	const allFailed = await loadNotesSnapshot(ctx, (_ctx, scope) => {
+	const allFailed = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), (scope) => {
 		throw readFailure(scope === "session" ? "EACCES" : "EIO");
 	});
 	assert.equal(allFailed.unavailable.length, 5);
 	const allFailedText = renderBootBlock({
+		tools: PI_TOOL_NAMES,
 		agentName: "root",
 		modelName: "default",
 		firstWindowId: "pcw:test:root",
@@ -289,12 +294,12 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 	assert.ok(allFailedText.includes("Your memory gets wiped when this window ends"), "protocol survives an all-home failure");
 	assert.equal(allFailedText.includes("scripted read failure"), false, "the model-facing notice does not expose OS/error details");
 	await assert.rejects(
-		() => loadNotesSnapshot(ctx, () => { throw new TypeError("programmer failure"); }),
+		() => loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), () => { throw new TypeError("programmer failure"); }),
 		(error: unknown) => error instanceof TypeError,
 		"unrelated TypeError construction failures remain visible",
 	);
 	await assert.rejects(
-		() => loadNotesSnapshot(ctx, () => { throw Object.assign(new Error("invalid argument"), { code: "ERR_INVALID_ARG_TYPE" }); }),
+		() => loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), () => { throw Object.assign(new Error("invalid argument"), { code: "ERR_INVALID_ARG_TYPE" }); }),
 		(error: unknown) => (error as NodeJS.ErrnoException).code === "ERR_INVALID_ARG_TYPE",
 		"Node ERR_* failures are not treated as filesystem errno failures",
 	);
