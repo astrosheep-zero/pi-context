@@ -450,6 +450,40 @@ test("reset-control: fallback is normal-stop only; hard reserve remains safety",
 	assert.deepEqual(reduceResetControl(manual, { type: "settled" }).state, initialResetControl());
 });
 
+test("reset-control: manual stop survives a hard-reserve reset across windows without a second wipe", () => {
+	const windowId = "pcw:test:window";
+	const manual = reduceResetControl(initialResetControl(), { type: "close_out", windowId, source: "manual" }).state;
+	const safety = reduceResetControl(manual, { type: "turn_end", facts: turnEndFacts({ hardReserveDue: true }) });
+	assert.equal(safety.effect, "commit-boundary-stop");
+	assert.deepEqual(safety.state.request, { phase: "stop-pending", windowId });
+	const freshWindowId = "pcw:test:fresh";
+	assert.equal(reduceResetControl(safety.state, { type: "tool_request", windowId: freshWindowId }).effect, "already-pending");
+	assert.equal(reduceResetControl(safety.state, { type: "close_out", windowId: freshWindowId, source: "automatic" }).effect, "already-pending");
+	const queued = reduceResetControl(safety.state, { type: "before_settle", facts: beforeSettleFacts({ windowId: freshWindowId, queued: true }) });
+	assert.deepEqual(queued.state, safety.state);
+	const freshTurn = reduceResetControl(queued.state, { type: "turn_end", facts: turnEndFacts({ windowId: freshWindowId, hardReserveDue: true }) });
+	assert.equal(freshTurn.effect, "none");
+	const stop = reduceResetControl(freshTurn.state, { type: "before_settle", facts: beforeSettleFacts({ windowId: freshWindowId }) });
+	assert.equal(stop.effect, "stop", "the safety boundary already wiped; settlement must only stop");
+	assert.deepEqual(stop.state, initialResetControl());
+	assert.equal(reduceResetControl(safety.state, { type: "before_settle", facts: beforeSettleFacts() }).effect, "commit-boundary-stop", "a failed safety construction may be retried before settlement");
+	assert.deepEqual(reduceResetControl(safety.state, { type: "abort" }).state, initialResetControl());
+});
+
+test("reset-control: manual overflow keeps stop intent while queued work supersedes the failure", () => {
+	const windowId = "pcw:test:window";
+	const manual = reduceResetControl(initialResetControl(), { type: "close_out", windowId, source: "manual" }).state;
+	const overflow = reduceResetControl(manual, { type: "turn_end", facts: turnEndFacts({ overflow: true, failed: true, queued: true, automaticResetEnabled: false }) });
+	assert.deepEqual(overflow.state.request, manual.request);
+	const deferred = reduceResetControl(overflow.state, { type: "before_settle", facts: beforeSettleFacts({ failed: true, queued: true, automaticResetEnabled: false }) });
+	assert.deepEqual(deferred.state, overflow.state);
+	assert.equal(reduceResetControl(overflow.state, { type: "before_settle", facts: beforeSettleFacts({ failed: true, automaticResetEnabled: false }) }).effect, "commit-boundary-stop", "manual overflow resets but does not retry the model");
+	const success = reduceResetControl(deferred.state, { type: "turn_end", facts: turnEndFacts() });
+	assert.deepEqual(success.state.request, manual.request, "a successful queued turn clears only the overflow, not the manual wipe");
+	assert.equal(success.state.overflow, "idle");
+	assert.equal(reduceResetControl(success.state, { type: "before_settle", facts: beforeSettleFacts() }).effect, "commit-boundary-stop");
+});
+
 test("reset-control: abort and lifecycle transitions clear every pending phase", () => {
 	const windowId = "pcw:test:window";
 	const pending = reduceResetControl(initialResetControl(), { type: "close_out", windowId, source: "manual" }).state;

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -35,6 +36,26 @@ test("Claude helper boot uses actual Claude note tool bindings and a fresh snaps
   assert.doesNotMatch(boot, /memory cleared|continuation/);
 });
 
+
+test("Claude Mod helper runs from a standalone copied plugin directory", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "claude-mod-install-"));
+  try {
+    const plugin = join(fixture, "pi-context");
+    cpSync(join(process.cwd(), "mods/pi-context"), plugin, { recursive: true });
+    const hook = readFileSync(join(plugin, "hooks/register.ts"), "utf8");
+    assert.ok(hook.includes('${import.meta.dir}/../dist/claude/helper.js'));
+    const helper = join(plugin, "dist/claude/helper.js");
+    const run = (input: string) => JSON.parse(execFileSync(process.execPath, [helper], {
+      cwd: fixture, input, encoding: "utf8",
+    })) as { ok: boolean; result?: Array<{ name: string }>; error?: string };
+    const schemas = run('{"op":"schemas"}');
+    assert.equal(schemas.ok, true);
+    assert.equal(schemas.result?.length, 5);
+    assert.equal(run("not json").ok, false);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
 
 test("Claude Mod uses persisted prompt.context boot blocks exactly once", () => {
   const source = readFileSync(join(process.cwd(), "mods/pi-context/hooks/register.ts"), "utf8");

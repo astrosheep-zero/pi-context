@@ -1,3 +1,5 @@
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { notesList, notesRead, notesSearch, notesUpdate, notesWrite } from "../tools/notes.js";
 import { loadNotesSnapshot } from "../boot/snapshot.js";
 import { renderBootBlock } from "../boot/render.js";
@@ -43,7 +45,7 @@ export async function handleLine(line: string): Promise<string> {
  try { const result = await dispatch(JSON.parse(line)); const response = JSON.stringify({ ok: true, result }); return Buffer.byteLength(response, "utf8") <= MAX_RESPONSE_BYTES ? response : JSON.stringify({ ok: false, error: "response too large" }); }
  catch (error) { return JSON.stringify({ ok: false, error: safeError(error) }); }
 }
-if (process.argv[1] && new URL(`file://${process.argv[1]}`).href === import.meta.url) {
+if (process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url) {
  process.stdin.setEncoding("utf8"); let input = "";
  process.stdin.on("data", (chunk) => { input += chunk; });
  process.stdin.on("end", async () => { process.stdout.write(`${await handleLine(input.trim())}\n`); });

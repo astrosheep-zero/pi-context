@@ -47,7 +47,7 @@ writeFileSync("dist/build-info.json", `${JSON.stringify(buildInfo, null, 2)}\n`)
 
 await build({
 	entryPoints: ["src/claude/helper.ts"],
-	outfile: "dist/claude/helper.js",
+	outfile: "mods/pi-context/dist/claude/helper.js",
 	bundle: true,
 	platform: "node",
 	format: "esm",

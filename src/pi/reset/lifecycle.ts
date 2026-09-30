@@ -1,7 +1,8 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { isContextOverflow, isRecoverableLength } from "@earendil-works/pi-ai";
+import { getCurrentSystemMessage, isContextOverflow, isRecoverableLength } from "@earendil-works/pi-ai";
 import type { AgentBeforeSettleEvent, ExtensionAPI, ExtensionContext, SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
 import { currentReset, currentWindowId } from "../window.js";
+import { resetBoundaryCommitted } from "./committed.js";
 
 type BudgetOwner = {
 	automaticResetEnabled: (ctx: ExtensionContext) => boolean;
@@ -32,6 +33,9 @@ export type ResetRequestSource = "manual" | "automatic";
 type ToolResetRequestSource = "automatic" | "tool";
 export type ResetRequest =
 	| { readonly phase: "none" }
+	// The safety reset may change windows before Pi finishes its tool-batch continuation.
+	// This run-scoped stop intent survives that change; windowId is the pre-reset window.
+	| { readonly phase: "stop-pending"; readonly windowId: string }
 	| { readonly phase: "close-out"; readonly windowId: string; readonly source: ResetRequestSource }
 	| { readonly phase: "tool-requested"; readonly windowId: string; readonly source: ToolResetRequestSource };
 export type ResetOverflowPhase = "idle" | "pending" | "pending-spent" | "spent";
@@ -84,6 +88,7 @@ export type ResetControlEffect =
 	| "already-pending"
 	| "commit-boundary"
 	| "commit-boundary-stop"
+	| "stop"
 	| "recover-overflow";
 
 export interface ResetControlResult {
@@ -92,7 +97,7 @@ export interface ResetControlResult {
 }
 
 function requestForWindow(request: ResetRequest, windowId: string): ResetRequest {
-	return request.phase !== "none" && request.windowId === windowId ? request : NO_REQUEST;
+	return request.phase === "stop-pending" || (request.phase !== "none" && request.windowId === windowId) ? request : NO_REQUEST;
 }
 
 /** Pure reset-control transitions: request phases own close-out, tool commit, and fallback. */
@@ -100,6 +105,7 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 	switch (event.type) {
 		case "close_out": {
 			const request = state.request;
+			if (request.phase === "stop-pending") return { state, effect: "already-pending" };
 			if (request.phase === "tool-requested" && request.windowId === event.windowId) {
 				// A manual wipe outranks a pending rollover: convert it to a settle-committed stop.
 				if (event.source === "manual") {
@@ -115,6 +121,7 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 		}
 		case "tool_request": {
 			const request = state.request;
+			if (request.phase === "stop-pending") return { state, effect: "already-pending" };
 			if (request.phase === "tool-requested" && request.windowId === event.windowId) {
 				return { state, effect: "already-pending" };
 			}
@@ -132,13 +139,15 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 			const facts = event.facts;
 			const request = requestForWindow(state.request, facts.windowId);
 			if (facts.aborted) return { state: initialResetControl(), effect: "none" };
+			if (request.phase === "stop-pending") return { state: { request, overflow: "idle" }, effect: "none" };
+			const manual = request.phase === "close-out" && request.source === "manual";
 			if (facts.overflow) {
-				const pending = !facts.queued && facts.enabled && facts.automaticResetEnabled;
+				const pending = manual ? facts.enabled : !facts.queued && facts.enabled && facts.automaticResetEnabled;
 				const spent = state.overflow === "pending-spent" || state.overflow === "spent";
 				const overflow: ResetOverflowPhase = pending
 					? (spent ? "pending-spent" : "pending")
 					: (spent ? "spent" : "idle");
-				return { state: { request: NO_REQUEST, overflow }, effect: "none" };
+				return { state: { request: manual ? request : NO_REQUEST, overflow }, effect: "none" };
 			}
 			if (facts.failed) return { state: { request: NO_REQUEST, overflow: state.overflow }, effect: "none" };
 			if (!facts.enabled) {
@@ -147,6 +156,7 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 			// A direct tool request commits after the whole tool batch. The budget cutoff is
 			// a separate hard-reserve safety path; ordinary close-out waits for settlement.
 			if (request.phase === "tool-requested" || facts.hardReserveDue) {
+				if (manual) return { state: { request: { phase: "stop-pending", windowId: facts.windowId }, overflow: "idle" }, effect: "commit-boundary-stop" };
 				return { state: { request: NO_REQUEST, overflow: "idle" }, effect: "commit-boundary" };
 			}
 			return { state: { request, overflow: "idle" }, effect: "none" };
@@ -155,10 +165,21 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 			const facts = event.facts;
 			if (facts.aborted) return { state: initialResetControl(), effect: "none" };
 			const request = requestForWindow(state.request, facts.windowId);
+			if (request.phase === "stop-pending") {
+				if (facts.queued) return { state, effect: "none" };
+				// Only retry construction if the safety boundary never committed. Otherwise
+				// stop without a second wipe, even if a queued turn subsequently failed.
+				if (request.windowId !== facts.windowId) return { state: initialResetControl(), effect: "stop" };
+				return { state: initialResetControl(), effect: facts.failed || !facts.enabled ? "none" : "commit-boundary-stop" };
+			}
+			const manual = request.phase === "close-out" && request.source === "manual";
 			if (state.overflow === "pending" || state.overflow === "pending-spent") {
 				if (facts.queued) {
-					return { state: { ...state, request: facts.failed ? NO_REQUEST : request }, effect: "none" };
+					return { state: { ...state, request: facts.failed && !manual ? NO_REQUEST : request }, effect: "none" };
 				}
+				// An explicit manual wipe is not an automatic recovery/retry. It must still
+				// clear and stop on overflow, including when automatic reset is disabled.
+				if (manual && facts.enabled) return { state: initialResetControl(), effect: "commit-boundary-stop" };
 				const spent = state.overflow === "pending-spent";
 				if (!facts.enabled || !facts.automaticResetEnabled) {
 					return { state: { request: facts.failed ? NO_REQUEST : request, overflow: spent ? "spent" : "idle" }, effect: "none" };
@@ -185,8 +206,9 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 /**
  * Own close-out requests at Pi's public turn and pre-settlement boundaries. Manual and budget
  * close-outs remain armed across note/tool turns and commit at a successful
- * agent_before_settle, so a manual wipe stops the run instead of racing pi's own tool-batch
- * continuation; direct tool requests commit at turn_end and continue in the fresh window.
+ * agent_before_settle. A hard-reserve safety reset can commit earlier, but preserves a
+ * run-scoped manual stop and cancels an otherwise automatic fresh-window request through
+ * the public abort API. Direct tool requests commit at turn_end and continue normally.
  * Overflow recovery remains bounded.
  */
 export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) {
@@ -214,6 +236,22 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 		options.onResetReady?.(ctx, resetDrafts);
 		return { entries: [...entries, ...resetDrafts], continue: continueAfterReset };
 	};
+
+	// Boundary continue:false is not a veto of Pi's tool-batch follow-up. Once the
+	// safety reset is actually committed, cancel that empty follow-up before provider
+	// work. Real queued user input is allowed through and answered before settlement.
+	pi.on("context_with_system", (event, ctx) => {
+		const request = control.request;
+		if (!sessionActive || request.phase !== "stop-pending" || ctx.hasPendingMessages()) return undefined;
+		const marker = currentReset(ctx);
+		if (!marker || marker.data.windowId === request.windowId || !resetBoundaryCommitted(ctx, marker.id, marker.data.windowId)) return undefined;
+		const branch = ctx.sessionManager.getBranch();
+		const markerIndex = branch.findIndex((entry) => entry.id === marker.id);
+		if (branch.slice(markerIndex + 1).some((entry) => entry.type === "message" && entry.message.role === "user")) return undefined;
+		ctx.abort();
+		const system = getCurrentSystemMessage(event.messages);
+		return { messages: system ? [system] : [] };
+	});
 
 	pi.on("turn_end", async (event, ctx) => {
 		if (!sessionActive) return undefined;
@@ -253,6 +291,7 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 			},
 		});
 		control = decision.state;
+		if (decision.effect === "stop") return { entries: event.entries, continue: false };
 		if (decision.effect !== "commit-boundary" && decision.effect !== "commit-boundary-stop" && decision.effect !== "recover-overflow") return undefined;
 		return await resetBoundaryResult(event.entries, ctx, decision.effect !== "commit-boundary-stop");
 	});

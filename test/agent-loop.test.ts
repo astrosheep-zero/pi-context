@@ -438,6 +438,101 @@ test("real AgentSession: manual command spans its tool batch and stops at settle
 	}
 });
 
+test("real AgentSession: manual hard-reserve reset stops clean and mixed-tool turns without fresh provider work", { timeout: 20000 }, async () => {
+	for (const mixed of [false, true]) {
+		let fixture!: Fixture;
+		let newUserAllowed = false;
+		fixture = await openFixture({
+			script: (request) => {
+				if (newUserAllowed) return assistant(fixture, [{ type: "text", text: "new user turn handled" }]);
+				if (request === 1) return assistant(fixture, [{ type: "text", text: "before wipe" }]);
+				assert.equal(request, 2, "no provider work follows the manual safety reset");
+				return assistant(fixture, mixed ? [
+					{ type: "toolCall", id: "pressure-note", name: "notes_write", arguments: { address: "pressure.md", content: "PRESERVED_PRESSURE_NOTE" } },
+					{ type: "toolCall", id: "pressure-wipe", name: "wipe_memory", arguments: {} },
+				] : [{ type: "text", text: "close-out complete" }], mixed ? "toolUse" : "stop", { usage: usage(80_000) });
+			},
+		});
+		try {
+			await fixture.session.prompt("HARD_RESERVE_OLD_SENTINEL");
+			await fixture.session.prompt("/wipe-memory");
+			await fixture.session.waitForIdle();
+			assert.equal(fixture.requests.length, 2);
+			assert.equal(resetMarkers(fixture).length, 1, "the safety wipe is not repeated at settlement");
+			assert.equal(JSON.stringify(fixture.sessionManager.buildSessionProjection().messages).includes("HARD_RESERVE_OLD_SENTINEL"), false);
+			assert.ok(fixture.notices.some((notice) => notice.includes("memory cleared")));
+			if (mixed) {
+				assert.ok(existsSync(join(fixture.notesRoot, "pi", "session", fixture.sessionManager.getSessionId(), "pressure.md")), "the whole tool batch completes before the cut");
+				assert.equal(fixture.streamSignals.at(-1), true, "Pi's unavoidable tool follow-up is cancelled before provider work");
+			}
+			// The stop latch belongs only to this run, not to future user input.
+			newUserAllowed = true;
+			await fixture.session.prompt("NEW_USER_AFTER_MANUAL_STOP");
+			await fixture.session.waitForIdle();
+			assert.equal(fixture.requests.length, 3);
+			assert.equal(fixture.streamSignals.at(-1), false);
+			assert.equal(resetMarkers(fixture).length, 1);
+			assert.ok(JSON.stringify(fixture.sessionManager.getBranch()).includes("new user turn handled"));
+		} finally {
+			fixture.close();
+		}
+	}
+});
+
+test("real AgentSession: manual safety reset answers queued user input once before stopping", { timeout: 20000 }, async () => {
+	let fixture!: Fixture;
+	fixture = await openFixture({
+		hook: (pi, getSession) => pi.on("tool_call", async (event) => {
+			if (event.toolName === "notes_write") await getSession().followUp("PRESSURE_QUEUED_USER_INPUT");
+		}),
+		script: (request, context) => {
+			if (request === 1) return assistant(fixture, [{ type: "text", text: "before wipe" }]);
+			if (request === 2) return assistant(fixture, [{ type: "toolCall", id: "queued-pressure-note", name: "notes_write", arguments: { address: "queued-pressure.md", content: "checkpoint" } }], "toolUse", { usage: usage(80_000) });
+			assert.equal(text(context).includes("QUEUED_SAFETY_OLD_SENTINEL"), false);
+			if (request === 3) {
+				assert.equal(text(context).includes("PRESSURE_QUEUED_USER_INPUT"), false, "Pi's tool follow-up precedes followUp queue delivery");
+				return assistant(fixture, [{ type: "text", text: "wipe complete; waiting for queued input" }]);
+			}
+			assert.equal(request, 4);
+			assert.equal(text(context).split("PRESSURE_QUEUED_USER_INPUT").length - 1, 1);
+			return assistant(fixture, [{ type: "text", text: "queued user input handled" }]);
+		},
+	});
+	try {
+		await fixture.session.prompt("QUEUED_SAFETY_OLD_SENTINEL");
+		await fixture.session.prompt("/wipe-memory");
+		await fixture.session.waitForIdle();
+		assert.equal(fixture.requests.length, 4, "queued input is answered once after Pi's tool follow-up, then the stop lands");
+		assert.equal(resetMarkers(fixture).length, 1);
+		assert.equal(fixture.streamSignals.at(-1), false, "real user input must not be cancelled as an automatic follow-up");
+	} finally {
+		fixture.close();
+	}
+});
+
+test("real AgentSession: manual overflow wipes and stops even with automatic reset disabled", { timeout: 20000 }, async () => {
+	let fixture!: Fixture;
+	fixture = await openFixture({
+		compactionEnabled: false,
+		script: (request) => {
+			if (request === 1) return assistant(fixture, [{ type: "text", text: "before overflow" }]);
+			assert.equal(request, 2, "manual overflow must not trigger a recovery request");
+			return assistant(fixture, [], "error", { errorMessage: "Prompt too long: context exceeds maximum context length" });
+		},
+	});
+	try {
+		await fixture.session.prompt("MANUAL_OVERFLOW_OLD_SENTINEL");
+		await fixture.session.prompt("/wipe-memory");
+		await fixture.session.waitForIdle();
+		assert.equal(fixture.requests.length, 2);
+		assert.equal(resetMarkers(fixture).length, 1);
+		assert.equal(JSON.stringify(fixture.sessionManager.buildSessionProjection().messages).includes("MANUAL_OVERFLOW_OLD_SENTINEL"), false);
+		assert.ok(fixture.notices.some((notice) => notice.includes("memory cleared")));
+	} finally {
+		fixture.close();
+	}
+});
+
 test("real AgentSession: streaming /wipe-memory steers a close-out and stops at settlement", { timeout: 20000 }, async () => {
 	let fixture!: Fixture;
 	let announceStarted!: () => void;

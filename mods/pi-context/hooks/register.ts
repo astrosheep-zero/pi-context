@@ -2,7 +2,7 @@ import type { On, ProcessRunResult, ToolSpec } from "claude-code"
 
 const PREFIX = "mcp__pi-context__"
 const TOOL_NAMES = ["notes_write", "notes_update", "notes_read", "notes_list", "notes_search"] as const
-const HELPER = `${import.meta.dir}/../../../dist/claude/helper.js`
+const HELPER = `${import.meta.dir}/../dist/claude/helper.js`
 const TIMEOUT_MS = 10_000
 const OUTPUT_LIMIT = 1024 * 1024
 
