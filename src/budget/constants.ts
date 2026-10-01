@@ -6,4 +6,4 @@ export const DEFAULT_REMINDER_MARGIN_TOKENS = 24_576;
  * line (reserve + WARNING_RUNWAY_TOKENS); what lies below is overdraft the model
  * never sees — Codex's fallback buffer, relocated above the line.
  */
-export const WARNING_RUNWAY_TOKENS = 12_288;
+export const WARNING_RUNWAY_TOKENS = 16_384;

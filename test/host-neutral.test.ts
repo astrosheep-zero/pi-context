@@ -73,7 +73,7 @@ test("shared history pairs already-decoded events and honors supplied stable add
 
 test("shared budget policy preserves the invisible warning runway and unknown countdown", () => {
 	const { thresholds } = deriveThresholds(16_384, {});
-	assert.deepEqual(thresholds, { reminder: 40_960, reserve: 16_384, warning: 28_672 });
+	assert.deepEqual(thresholds, { reminder: 40_960, reserve: 16_384, warning: 32_768 });
 	assert.equal(remainingBudget(null, thresholds.warning), null);
 	assert.equal(remainingBudget(thresholds.warning + 1, thresholds.warning), 1);
 	assert.equal(remainingBudget(thresholds.reserve, thresholds.warning), 0);

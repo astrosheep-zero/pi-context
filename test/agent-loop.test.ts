@@ -1121,7 +1121,8 @@ test("real AgentSession: injected settings managers own live policy and ignore c
 			highUsage.next = false;
 			return assistant(fixture, [{ type: "toolCall", id: "remaining", name: "get_context_remaining", arguments: {} }], "toolUse", { usage: usage(20_000) });
 		}
-		const input = highUsage.next ? 85_000 : 100;
+		// Leave 20k free: above the low reserve plus the 16k warning runway.
+		const input = highUsage.next ? 80_000 : 100;
 		highUsage.next = false;
 		return assistant(fixture, [{ type: "text", text: "scripted policy response" }], "stop", { usage: usage(input) });
 	};
