@@ -4,12 +4,13 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentTool, AgentToolCallOutcome, AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
 	type ContextUsage,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	type ExtensionContext,
+	type ExtensionToolContext,
 	type RegisteredCommand,
 	SessionManager,
 	SettingsManager,
@@ -24,6 +25,7 @@ import { renderBootBlock } from "../../src/boot/render.js";
 import { agentSlug, modelSlug } from "../../src/pi/notes/adapter.js";
 import { rootWindowId } from "../../src/pi/window.js";
 import { TOOL_OUTPUT_MAX_BYTES } from "../../src/tools/output.js";
+import { structuredBytes, type OperationError, type TextWindow } from "../../src/tools/result.js";
 
 let defaultCwd = "/private/tmp/pi-context-test-cwd";
 let registerTempPath: ((path: string) => void) | undefined;
@@ -238,46 +240,97 @@ export async function call(
 ): Promise<AgentToolResult<unknown>> {
 	const tool = captured.tools.get(name);
 	assert.ok(tool, `registered ${name}`);
-	return tool.execute("call-1", params, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
+	return tool.execute("call-1", params, new AbortController().signal, () => {}, toolContext(ctx));
 }
 
+/**
+ * The context Pi hands a registered tool: the session context plus the nested-call surface
+ * (ExtensionToolContext). The registered notes/history tools never call another tool, so `tools`
+ * is empty and `executeTool` refuses instead of pretending a runtime exists.
+ */
+export function toolContext(ctx: ExtensionContext, callable: readonly AgentTool[] = []): ExtensionToolContext {
+	// The prototype keeps whatever the caller handed in reachable, including session methods on a
+	// real manager, while the nested-call members stay local to this one tool invocation.
+	return Object.assign(Object.create(ctx) as ExtensionContext, {
+		tools: callable,
+		executeTool: async (callerId: string, name: string): Promise<AgentToolCallOutcome> => ({
+			toolCall: { type: "toolCall", id: `${callerId}/1`, name, arguments: {} },
+			result: { content: [{ type: "text", text: `nested tool ${name} is unavailable in this harness` }], details: undefined, isError: true },
+			isError: true,
+		}),
+	});
+}
+
+/** Decoded JSON of a tool that has not moved to structured outcomes: reset and budget tools only. */
 export function resultJson<T>(result: AgentToolResult<unknown>): T {
 	const text = result.content[0];
 	assert.ok(text && text.type === "text", "tool result carries text");
 	return JSON.parse(text.text) as T;
 }
 
-/** Assert the delivered wire text fits the tool-output budget, header included for raw reads. */
+function outcomeOf(result: AgentToolResult<unknown>): Record<string, unknown> {
+	const structured = result.structuredContent;
+	assert.ok(typeof structured === "object" && structured !== null && !Array.isArray(structured), "tool result carries a structured outcome");
+	return structured as Record<string, unknown>;
+}
+
+function isOperationError(value: unknown): value is OperationError {
+	if (typeof value !== "object" || value === null) return false;
+	const candidate = value as { code?: unknown; message?: unknown };
+	return typeof candidate.code === "string" && typeof candidate.message === "string";
+}
+
+function isTextWindow(value: unknown): value is TextWindow {
+	if (typeof value !== "object" || value === null) return false;
+	const candidate = value as Partial<TextWindow>;
+	return typeof candidate.text === "string" && typeof candidate.offset_chars === "number" &&
+		typeof candidate.total_chars === "number" &&
+		(candidate.next_offset_chars === null || typeof candidate.next_offset_chars === "number");
+}
+
+/** Data of a successful outcome, asserting both the structured success and the non-error result. */
+export function resultData<T>(result: AgentToolResult<unknown>): T {
+	const outcome = outcomeOf(result);
+	assert.equal(outcome.ok, true, `expected success, got refusal ${JSON.stringify(outcome.error ?? null)}`);
+	assert.notEqual(result.isError, true, "a successful outcome is never delivered as an error result");
+	return outcome.data as T;
+}
+
+/** The typed refusal of a failed outcome, asserting the error result and the refusal shape. */
+export function resultError(result: AgentToolResult<unknown>): OperationError {
+	const outcome = outcomeOf(result);
+	assert.equal(outcome.ok, false, `expected a refusal, got success ${JSON.stringify(outcome.data ?? null).slice(0, 200)}`);
+	assert.equal(result.isError, true, "a refusal is delivered as an error result");
+	assert.ok(isOperationError(outcome.error), "refusal carries a code and a message");
+	return outcome.error;
+}
+
+/** Identity a read outcome carries next to its window; tests narrow it with an explicit type. */
+export type ReadIdentity = { metadata?: Record<string, unknown>; address?: string; seq?: number; window_id?: string };
+
+/** The structured data of a read outcome: the window plus whatever identity the operation adds. */
+export type ReadOutcome<T extends object = ReadIdentity> = { window: TextWindow } & T;
+
+/** A read as tests consume it: its window fields, plus `content` as a test-only alias for `window.text`. */
+export type ReadWindowResult<T extends object = ReadIdentity> = TextWindow & { content: string } & T;
+
+export function resultRead<T extends object = ReadIdentity>(result: AgentToolResult<unknown>): ReadWindowResult<T> {
+	const data = resultData<ReadOutcome<T>>(result);
+	assert.ok(isTextWindow(data.window), "read outcome carries a text window");
+	const { window } = data;
+	const read = { ...window, ...data, content: window.text };
+	return read;
+}
+
+/** Assert both surfaces of one result fit the wire budget: the model text and the structured payload. */
 export function assertWithinBudget(result: AgentToolResult<unknown>, message: string): void {
 	const text = result.content[0];
 	const bytes = text && text.type === "text" ? Buffer.byteLength(text.text, "utf8") : 0;
-	assert.ok(bytes <= TOOL_OUTPUT_MAX_BYTES, `${message}: ${bytes} bytes over the ${TOOL_OUTPUT_MAX_BYTES}-byte budget`);
-}
-
-/** Decoded raw read response using the shared READ WINDOW grammar. */
-export type ReadWindow = {
-	header: string;
-	content: string;
-	offset_chars: number;
-	total_chars: number;
-	next_offset_chars: number | null;
-	details: Record<string, unknown>;
-};
-
-/** Decode either raw read without including its shared metadata block in the payload. */
-export function resultRead(result: AgentToolResult<unknown>): ReadWindow {
-	const text = result.content[0];
-	assert.ok(text && text.type === "text", "read result carries text");
-	const block = /^(--- READ WINDOW ---\n(?:[a-z_]+: [^\n]*\n)+chars: \[(\d+),(\d+)\) of (\d+)\nnext_offset_chars: (null|\d+)\n)\n/.exec(text.text);
-	assert.ok(block, "raw read carries one READ WINDOW block followed by exactly one blank line");
-	const header = block[1]!;
-	const content = text.text.slice(block[0].length);
-	const offset_chars = Number(block[2]);
-	const end = Number(block[3]);
-	const total_chars = Number(block[4]);
-	const next_offset_chars = block[5] === "null" ? null : Number(block[5]);
-	assert.equal(Array.from(content).length, end - offset_chars, "READ WINDOW range matches the delivered payload");
-	return { header, content, offset_chars, total_chars, next_offset_chars, details: (result.details ?? {}) as Record<string, unknown> };
+	assert.ok(bytes <= TOOL_OUTPUT_MAX_BYTES, `${message}: model text is ${bytes} bytes over the ${TOOL_OUTPUT_MAX_BYTES}-byte budget`);
+	if (result.structuredContent !== undefined) {
+		const structured = structuredBytes(result.structuredContent);
+		assert.ok(structured <= TOOL_OUTPUT_MAX_BYTES, `${message}: structured outcome is ${structured} bytes over the ${TOOL_OUTPUT_MAX_BYTES}-byte budget`);
+	}
 }
 
 export async function runManualCompact(captured: Captured, ctx: ExtensionContext): Promise<CompactionHookResult> {

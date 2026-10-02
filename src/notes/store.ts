@@ -4,28 +4,14 @@ import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promise
 import { dirname, join, resolve } from "node:path";
 import { earliestMatchOffsetChars } from "../text-match.js";
 import { assertAddress, assertGlobPattern, addressFor, globToRegExp } from "./address.js";
+import { isFilesystemError } from "./fs-error.js";
 import { snapshotNotesIdentity, type NotesIdentity } from "./identity.js";
+import { NoteError } from "./errors.js";
 import { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "./constants.js";
 import { isOrigin, isScope, localIso, parseNote, serializeNote, stripLeadingFrontmatter, type NoteMeta, type Origin } from "./frontmatter.js";
 import { namespaceSlugs, noteFileName, physicalPath, scopeDir, SLUG_PATTERN, type Scope } from "./paths.js";
 
 export type { NoteMeta, Origin, Scope };
-
-export type NoteErrorCode = "not_found" | "already_exists" | "ambiguous_edit" | "no_match" | "nothing_to_do" | "too_large" | "invalid_scope" | "invalid_origin" | "invalid_address" | "invalid_pattern" | "invalid_query" | "invalid_offset" | "io_error" | "internal_error";
-
-/** Typed store refusal. Edit locations are exposed in camelCase. */
-export class NoteError extends Error {
-	readonly code: NoteErrorCode;
-	readonly lineNumbers?: number[];
-	readonly editIndex?: number;
-	constructor(code: NoteErrorCode, message: string, extra: { lineNumbers?: number[]; editIndex?: number } = {}) {
-		super(message);
-		this.name = "NoteError";
-		this.code = code;
-		this.lineNumbers = extra.lineNumbers;
-		this.editIndex = extra.editIndex;
-	}
-}
 
 export type NoteRow = { address: string; scope: Scope; path: string; meta: NoteMeta; body: string; sizeBytes: number };
 
@@ -36,7 +22,7 @@ function writeStamp(): number {
 	lastWriteStamp = now > lastWriteStamp ? now : lastWriteStamp + 1;
 	return lastWriteStamp;
 }
-export type NoteMatch = { line: number; text: string; offsetChars: number };
+export type NoteMatch = { line: number; text: string; /** Code-point offset into the note body, not into the serialized file. */ offsetChars: number };
 export type NoteSearchRow = { address: string; scope: Scope; path: string; meta: NoteMeta; matches: NoteMatch[] };
 export type EditOperation = { oldText: string; newText: string };
 export type WriteOptions = { origin?: Origin };
@@ -46,7 +32,8 @@ export type NotesQuery = (
 	| { scope: "session" | "project" | "human"; who?: never }
 	| { scope: "agent" | "model"; who?: string }
 ) & { pattern?: string; wastebasket?: boolean };
-export type NoteReadResult = { meta: NoteMeta; body: string; text: string; resolvedScope: Scope };
+/** A read exposes metadata and the pure body; the serialized frontmatter is never part of the body. */
+export type NoteReadResult = { meta: NoteMeta; body: string; resolvedScope: Scope };
 export type NoteWriteResult = { meta: NoteMeta; outcome: "created" | "overwrote" | "uncrumpled" };
 export type NoteChange =
 	| { kind: "none"; before: ""; after: "" }
@@ -190,17 +177,39 @@ async function homesFor(identity: NotesIdentity, opts: NotesQuery): Promise<Home
 	return await homesForPattern(normalizePattern(opts.pattern, identity), identity) ?? SCOPE_ORDER.map((scope) => ({ scope }));
 }
 
-/** Line numbers (1-based) of every occurrence of `needle` in `body`. */
+/**
+ * Line numbers (1-based) of every occurrence of `needle` in `body`. The scan walks forward
+ * once, counting newlines as it goes, so a body that repeats one anchor thousands of times
+ * costs one pass instead of one reslice per match.
+ */
 function matchLineNumbers(body: string, needle: string): number[] {
 	const lines: number[] = [];
+	let line = 1;
 	let cursor = 0;
+	let scanned = 0;
 	for (;;) {
 		const index = body.indexOf(needle, cursor);
 		if (index === -1) break;
-		lines.push(body.slice(0, index).split("\n").length);
+		for (; scanned < index; scanned++) {
+			if (body.charCodeAt(scanned) === 10) line++;
+		}
+		lines.push(line);
 		cursor = index + Math.max(needle.length, 1);
 	}
 	return lines;
+}
+
+/**
+ * How many match lines a refusal names inline. A body can repeat one anchor thousands of
+ * times, so the message carries a bounded sample plus the exact total; the typed error keeps
+ * the complete list, and the wire bounds what it repeats of it.
+ */
+const MAX_ANCHOR_LINES = 8;
+
+function anchorLines(lines: number[]): string {
+	const named = lines.slice(0, MAX_ANCHOR_LINES);
+	const rest = lines.length - named.length;
+	return `lines ${named.join(", ")}${rest > 0 ? `, and ${rest} more` : ""}`;
 }
 
 /** Every mutation uses a tmp file renamed into place in the same directory. */
@@ -254,18 +263,16 @@ export function createNotesStore(input: NotesIdentity): NotesStore {
 	const identity = snapshotNotesIdentity(input);
 
 	async function write(address: string, content: string, options: WriteOptions = {}): Promise<NoteWriteResult> {
-		const stableAddress = address;
-		const stableContent = content;
 		const stableOptions = { ...options };
-		const destination = assertAddress(stableAddress);
+		const destination = assertAddress(address);
 		assertWritablePath(destination.path);
-		const scope = assertScope(destination.scope);
+		const scope = destination.scope;
 		assertWritableHome(scope, destination.who, identity);
 		const origin = assertOrigin(stableOptions.origin ?? "self");
 		const path = physicalPath(scope, destination.path, identity, destination.who);
 		return withPathQueue(path, async () => {
 			const now = writeStamp();
-			const cleanBody = stripLeadingFrontmatter(stableContent);
+			const cleanBody = stripLeadingFrontmatter(content);
 			const existingRaw = await readFileIfExists(path);
 			const existing = existingRaw === undefined ? undefined : parseNote(existingRaw, now).meta;
 			const outcome = existing === undefined ? "created" : existing.crumpledAt === undefined ? "overwrote" : "uncrumpled";
@@ -290,9 +297,8 @@ export function createNotesStore(input: NotesIdentity): NotesStore {
 	}
 
 	async function read(address: string): Promise<NoteReadResult | undefined> {
-		const stableAddress = address;
-		const destination = assertAddress(stableAddress);
-		const scope = assertScope(destination.scope);
+		const destination = assertAddress(address);
+		const scope = destination.scope;
 		const path = physicalPath(scope, destination.path, identity, destination.who);
 		return withPathQueue(path, async () => {
 			const raw = await readFileIfExists(path);
@@ -300,19 +306,17 @@ export function createNotesStore(input: NotesIdentity): NotesStore {
 			const now = Date.now();
 			const parsed = parseNote(raw, now);
 			const meta = accessedMeta(parsed.meta, scope, now);
-			const text = serializeNote(meta, parsed.body);
-			await atomicWrite(path, text);
-			return { meta, body: parsed.body, text, resolvedScope: scope };
+			await atomicWrite(path, serializeNote(meta, parsed.body));
+			return { meta, body: parsed.body, resolvedScope: scope };
 		});
 	}
 
 	async function update(address: string, edits?: EditOperation[], options: EditOptions = {}): Promise<NoteEditResult> {
-		const stableAddress = address;
 		const operations = edits === undefined ? [] : edits.map((operation) => ({ ...operation }));
 		const stableOptions = { ...options };
-		const destination = assertAddress(stableAddress);
+		const destination = assertAddress(address);
 		assertWritablePath(destination.path);
-		const scope = assertScope(destination.scope);
+		const scope = destination.scope;
 		assertWritableHome(scope, destination.who, identity);
 		if (operations.length === 0 && stableOptions.origin === undefined && stableOptions.crumpled === undefined) {
 			throw new NoteError("nothing_to_do", "nothing to do: provide edits or at least one of origin, crumpled");
@@ -334,7 +338,7 @@ export function createNotesStore(input: NotesIdentity): NotesStore {
 				const lines = matchLineNumbers(next, oldText);
 				if (lines.length === 0) throw new NoteError("no_match", `edit ${index}: oldText does not occur in the note body`, { editIndex: index });
 				if (lines.length > 1 && !stableOptions.replaceAll) {
-					throw new NoteError("ambiguous_edit", `edit ${index}: oldText occurs ${lines.length} times (lines ${lines.join(", ")}); pass replace_all to replace every occurrence`, { lineNumbers: lines, editIndex: index });
+					throw new NoteError("ambiguous_edit", `edit ${index}: oldText occurs ${lines.length} times (${anchorLines(lines)}); pass replace_all to replace every occurrence`, { lineNumbers: lines, editIndex: index });
 				}
 				if (oldText !== newText) applied++;
 				// Positional splicing preserves user replacement text byte-for-byte.
@@ -369,12 +373,10 @@ export function createNotesStore(input: NotesIdentity): NotesStore {
 	 * sorted order so crossed renames cannot deadlock.
 	 */
 	async function rename(fromAddress: string, toAddress: string): Promise<NoteRenameResult> {
-		const stableFrom = fromAddress;
-		const stableTo = toAddress;
-		const from = assertAddress(stableFrom);
-		const to = assertAddress(stableTo);
-		const fromScope = assertScope(from.scope);
-		const toScope = assertScope(to.scope);
+		const from = assertAddress(fromAddress);
+		const to = assertAddress(toAddress);
+		const fromScope = from.scope;
+		const toScope = to.scope;
 		assertWritablePath(to.path);
 		assertWritableHome(fromScope, from.who, identity);
 		assertWritableHome(toScope, to.who, identity);
@@ -470,13 +472,14 @@ export function createNotesStore(input: NotesIdentity): NotesStore {
 		const rows: NoteSearchRow[] = [];
 		for await (const note of scan(stableOptions, status)) {
 			const { address, path, scope, meta, body } = note;
-			const serializedBodyOffset = Array.from(serializeNote(accessedMeta(meta, scope, Date.now()), "")).length;
+			// Offsets address the note body alone: no frontmatter length is predicted, so an
+			// access-counter rewrite cannot move a match out from under the caller.
 			let baseChars = 0;
 			const matches: NoteMatch[] = [];
 			for (const [index, line] of body.split("\n").entries()) {
 				const offset = earliestMatchOffsetChars(line, stableQueries);
 				if (offset >= 0) {
-					matches.push({ line: index + 1, text: line, offsetChars: serializedBodyOffset + baseChars + offset });
+					matches.push({ line: index + 1, text: line, offsetChars: baseChars + offset });
 				}
 				baseChars += Array.from(line).length + 1;
 			}
@@ -491,9 +494,4 @@ export function createNotesStore(input: NotesIdentity): NotesStore {
 	}
 
 	return { write, read, update, rename, list, search, listWithStatus, searchWithStatus };
-}
-
-function isFilesystemError(error: unknown): boolean {
-	const code = errno(error);
-	return typeof code === "string" && /^E[A-Z0-9_]+$/.test(code) && !code.startsWith("ERR_");
 }

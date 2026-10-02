@@ -45,8 +45,8 @@ test("standalone notes API persists camelCase metadata, edits, lists and searche
 	assert.equal((await notes.list({ wastebasket: true })).length, 0);
 	const matches = await notes.search(["needle"]);
 	assert.equal(matches[0]?.matches[0]?.line, 2);
-	const text = (await notes.read("checkpoint"))!.text;
-	assert.equal(Array.from(text).slice(matches[0]!.matches[0]!.offsetChars).join(""), "needle 😀");
+	const body = (await notes.read("checkpoint"))!.body;
+	assert.equal(Array.from(body).slice(matches[0]!.matches[0]!.offsetChars).join(""), "needle 😀", "offsets address the body, so they survive the access-counter rewrite a read performs");
 
 	// An existing hand-written extra field and original ownership survive a new caller.
 	const path = join(home, "pi/session/session-a/checkpoint.md");
@@ -130,14 +130,35 @@ test("list and search share scoped pattern scans and search offsets count Unicod
 	assert.deepEqual(searchedAddresses, listedAddresses, "list and search traverse the same filtered homes and files");
 
 	const sessionMatch = searched.find((row) => row.address === "shared.md")!.matches[0]!;
-	const serialized = (await notes.read("shared.md"))!.text;
-	assert.ok(Array.from(serialized).slice(sessionMatch.offsetChars).join("").startsWith("needle"), "the absolute offset counts the emoji as one code point");
+	const body = (await notes.read("shared.md"))!.body;
+	assert.equal(body, "😀 needle in session");
+	assert.equal(Array.from(body).slice(sessionMatch.offsetChars).join(""), "needle in session", "the body offset counts the emoji as one code point and lands on the match");
+});
+
+test("search offsets address the body and never move when access metadata grows", async (t) => {
+	const { notes } = fixture(t);
+	await notes.write("counted.md", "needle here");
+	const offsetOf = async () => (await notes.search(["needle"])).find((row) => row.address === "counted.md")!.matches[0]!.offsetChars;
+	assert.equal(await offsetOf(), 0, "a match at the first body character has body offset 0");
+	// Walk the access counter across a digit boundary; an offset into the serialized file
+	// would shift by one character here, because the rewrite adds a digit to the frontmatter.
+	for (let read = 0; read < 12; read++) await notes.read("counted.md");
+	assert.equal((await notes.list({ scope: "session" })).find((row) => row.address === "counted.md")!.meta.accessCount, 12);
+	assert.equal(await offsetOf(), 0, "reads that rewrite access metadata do not move the match");
+
+	await notes.write("front.md", `---\nbig: ${"x".repeat(200)}\n---\n\nneedle later`);
+	const frontMatch = (await notes.search(["needle"])).find((row) => row.address === "front.md")!.matches[0]!;
+	const frontBody = (await notes.read("front.md"))!.body;
+	assert.equal(frontBody, "needle later");
+	assert.equal(frontMatch.offsetChars, 0, "frontmatter length is not part of the body offset");
+	assert.equal(Array.from(frontBody).slice(frontMatch.offsetChars).join(""), "needle later");
+	assert.deepEqual(Object.keys((await notes.read("counted.md"))!).sort(), ["body", "meta", "resolvedScope"], "a read exposes metadata and the body, never a serialized rendering");
 });
 
 test("invalid addressing and failed edits leave stored bytes untouched without poisoning the queue", async (t) => {
 	const { home, context, notes } = fixture(t);
 	assert.throws(() => createNotesStore({ ...context, sessionId: "../escape" }));
-	await assert.rejects(() => notes.write("@project/../escape", "bad"));
+	await assert.rejects(() => notes.write("@project/../escape", "bad"), (error: unknown) => error instanceof NoteError && error.code === "invalid_address");
 	await assert.rejects(() => notes.list({ scope: "agent", who: "../escape" }));
 	// The typed API disallows this; JavaScript callers must still receive a refusal.
 	// @ts-expect-error who cannot accompany project scope
@@ -185,4 +206,33 @@ test("rename moves a note with metadata intact across scopes and refuses live ta
 	await assert.rejects(() => notes.rename("occupied.md", "@models/other-model/stolen.md"), (error: unknown) => error instanceof NoteError && error.code === "invalid_scope");
 	await assert.rejects(() => notes.rename("@agents/someone-else/private.md", "mine.md"), (error: unknown) => error instanceof NoteError && error.code === "invalid_scope");
 	await assert.rejects(() => notes.rename("absent.md", "anywhere.md"), (error: unknown) => error instanceof NoteError && error.code === "not_found");
+});
+
+test("ambiguous multiline anchors report each starting line", async (t) => {
+	const { notes } = fixture(t);
+	await notes.write("multiline", "a\nb\na\nb\na\nb");
+	await assert.rejects(() => notes.update("multiline", [{ oldText: "a\nb", newText: "x" }]), (error: unknown) => {
+		assert.ok(error instanceof NoteError);
+		assert.deepEqual(error.lineNumbers, [1, 3, 5]);
+		return true;
+	});
+});
+
+test("a massively ambiguous edit still reports every match line to a library caller", async (t) => {
+	const { notes } = fixture(t);
+	await notes.write("many", `${"beta\n".repeat(2000)}end`);
+	await assert.rejects(
+		() => notes.update("many", [{ oldText: "beta", newText: "B" }]),
+		(error: unknown) => {
+			assert.ok(error instanceof NoteError);
+			assert.equal(error.code, "ambiguous_edit");
+			assert.equal(error.lineNumbers?.length, 2000, "the domain keeps every match line rather than a sample");
+			assert.deepEqual(error.lineNumbers?.slice(0, 3), [1, 2, 3]);
+			assert.equal(error.lineNumbers?.[1999], 2000);
+			assert.match(error.message, /occurs 2000 times \(lines 1, 2, 3, 4, 5, 6, 7, 8, and 1992 more\)/, "the message names the exact total and a bounded sample");
+			assert.ok(Buffer.byteLength(error.message, "utf8") < 300, "the message stays small however many lines matched");
+			return true;
+		},
+	);
+	assert.equal((await notes.read("many"))?.body.startsWith("beta\nbeta"), true, "the refused edit left the body alone");
 });

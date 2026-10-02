@@ -46,8 +46,8 @@ export function registerBudget(
 		return usage !== undefined && usage.tokens !== null && usage.contextWindow - usage.tokens <= thresholdsFor(ctx).reserve;
 	};
 	const invalidateThresholds = () => { cachedPolicy = undefined; };
-	let pendingGuidance: { windowId: string; content: string; remaining: number } | undefined;
-	let pendingWarning: { windowId: string; content: string; remaining: number } | undefined;
+	let pendingGuidance: { windowId: string; content: string } | undefined;
+	let pendingWarning: { windowId: string; content: string } | undefined;
 	let pendingNotices = new Map<string, { sessionId: string; windowId: string }>();
 	const noticeKey = (sessionId: string, windowId: string) => `${sessionId}:${windowId}`;
 	const warningCommittedInWindow = (ctx: ExtensionContext, notice: { sessionId: string; windowId: string }): boolean => {
@@ -133,7 +133,7 @@ export function registerBudget(
 			// The critical close-out starts at reserve + runway, not at the hard reserve.
 			pendingGuidance = undefined;
 			const content = WARNING_CONTENT;
-			pendingWarning = { windowId, content, remaining };
+			pendingWarning = { windowId, content };
 			const warningMessage = {
 				role: "custom" as const,
 				customType: WARNING_TYPE,
@@ -149,7 +149,7 @@ export function registerBudget(
 			// Persist at turn_end, before any reset drafts. A queued sendMessage could
 			// otherwise cross the marker and leak the old window's reminder forward.
 			const left = Math.max(0, remaining - warning);
-			pendingGuidance = { windowId, content: tokenBudgetGuidance(left, PI_TOOL_NAMES.wipe), remaining };
+			pendingGuidance = { windowId, content: tokenBudgetGuidance(left, PI_TOOL_NAMES.wipe) };
 		}
 		return undefined;
 	});

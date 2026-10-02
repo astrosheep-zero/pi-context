@@ -32,11 +32,11 @@ test("all shared domains resolve without any direct or transitive SDK, Pi adapte
 	const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 	const shared = sources(join(root, "src")).filter((file) => !file.startsWith(join(root, "src/pi/")) && file !== join(root, "src/index.ts"));
 	for (const domain of ["notes", "boot", "history", "budget", "tools", "dream"]) assert.ok(shared.some((file) => file.startsWith(join(root, "src", domain) + "/")), `${domain} is included`);
-	assert.deepEqual(dependencyViolations(root, shared, parsed.options, new Set(Object.keys(manifest.dependencies))), []);
-	assert.equal(manifest.dependencies.typebox, "1.3.27", "schemas declare their own runtime dependency");
-	assert.equal(existsSync(join(root, "src/context")), false);
-	assert.equal(existsSync(join(root, "src/protocol.ts")), false);
-	assert.equal(existsSync(join(root, "src/notes/context.ts")), false);
+	assert.deepEqual(dependencyViolations(root, shared, parsed.options, new Set(["typebox"])), []);
+	for (const name of ["@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "typebox"]) {
+		assert.equal(manifest.dependencies?.[name], undefined, `${name} is supplied by the host`);
+		assert.equal(manifest.peerDependencies[name], "*", `${name} follows Pi's host dependency contract`);
+	}
 });
 
 test("dependency guard follows indirect types, re-exports, dynamic imports and import-type edges through resolved aliases", (t) => {

@@ -1,4 +1,4 @@
-import type { On, ProcessRunResult, ToolSpec } from "claude-code"
+import type { On, ProcessRunResult, ToolCallResult, ToolSpec } from "claude-code"
 
 const PREFIX = "mcp__pi-context__"
 const TOOL_NAMES = ["notes_write", "notes_update", "notes_read", "notes_list", "notes_search"] as const
@@ -9,7 +9,16 @@ const OUTPUT_LIMIT = 1024 * 1024
 type Identity = { home: string; sessionId: string; cwd: string; agent: string; model: string }
 type SchemaRow = { name: string; description: string; inputSchema: Record<string, unknown> }
 
-function errorResult(message: string) { return { result: `pi-context: ${message}`, isError: true } }
+function errorResult(message: string): ToolCallResult { return { result: `pi-context: ${message}`, isError: true } }
+/** The helper's tool result: the shared text the model reads, plus whether that outcome refused. */
+function toolResultOf(value: unknown): { text: string; ok: boolean } | undefined {
+	if (typeof value !== "object" || value === null) return undefined
+	const { text, outcome } = value as { text?: unknown; outcome?: unknown }
+	if (typeof text !== "string" || typeof outcome !== "object" || outcome === null) return undefined
+	const ok = (outcome as { ok?: unknown }).ok
+	if (typeof ok !== "boolean") return undefined
+	return { text, ok }
+}
 function decode(result: ProcessRunResult): { ok: true; result: unknown } | { ok: false; error: string } {
   if (result.exitCode !== 0) return { ok: false, error: "helper exited unsuccessfully" }
   if (result.stdout.length > OUTPUT_LIMIT) return { ok: false, error: "helper output exceeded the limit" }
@@ -47,7 +56,10 @@ export function register(on: On) {
     const { tool, tool_use_id: _toolUseId, agentId: _agentId, ...params } = e
     const result = await run($, { op: "tool", tool: tool.slice(PREFIX.length), params, identity }, identity.cwd)
     if (!result.ok) return errorResult(result.error)
-    return { result: JSON.stringify(result.result) }
+    // The outcome already decided success or refusal; Claude requires isError: true on errors and no discriminator on success.
+    const outcome = toolResultOf(result.result)
+    if (!outcome) return errorResult("helper returned an invalid tool result")
+    return outcome.ok ? { result: outcome.text } : { result: outcome.text, isError: true }
   })
   on("prompt.context", async ($, e, next) => {
     const result = await next(e)

@@ -7,6 +7,7 @@ import { createAssistantMessageEventStream, getCurrentSystemMessage, type Assist
 import type { AgentContext } from "@earendil-works/pi-agent-core";
 import {
 	createAgentSession,
+	createCodemodeExtension,
 	DefaultResourceLoader,
 	ModelRuntime,
 	SessionManager,
@@ -46,6 +47,7 @@ async function openFixture(options: {
 	notesRootFile?: boolean;
 	systemPrompt?: string;
 	tools?: string[];
+	codemode?: boolean;
 	cwd?: string;
 	agentDir?: string;
 	notesRoot?: string;
@@ -124,7 +126,7 @@ async function openFixture(options: {
 		noPromptTemplates: true,
 		systemPromptOverride: () => options.systemPrompt ?? "Use the tools as requested.",
 		agentsFilesOverride: () => ({ agentsFiles: [] }),
-		extensionFactories: [options.settingsManager ? createPiContext({ settingsManager }) : piContext, (pi) => {
+		extensionFactories: [...(options.codemode ? [createCodemodeExtension({ models: false })] : []), options.settingsManager ? createPiContext({ settingsManager }) : piContext, (pi) => {
 		options.hook?.(pi, () => session, requests);
 	}],
 	});
@@ -262,6 +264,52 @@ function assertFreshRequest(fixture: Fixture, requestIndex: number, oldSentinel:
 	assert.ok(body.includes(CONTEXT_WINDOW_OPEN_TAG), "the new provider request includes the fresh context-window boot");
 	assert.equal(body.split(CONTINUATION).length - 1, 1, "the fresh window carries exactly one reset message");
 }
+
+test("real Pi codemode receives typed notes/history outcomes, including expected errors", { timeout: 20000 }, async () => {
+	let fixture!: Fixture;
+	fixture = await openFixture({
+		codemode: true,
+		compactionEnabled: false,
+		tools: ["codemode", "notes_write", "notes_read", "notes_list", "history_list", "history_read"],
+		script: (request) => {
+			if (request === 1) return assistant(fixture, [{ type: "toolCall", id: "structured-smoke", name: "codemode", arguments: { code: `
+const written = await tools.notes_write({ address: "smoke.md", content: "A😀界Z" });
+const listed = await tools.notes_list({});
+const read = await tools.notes_read({ address: "smoke.md", offset_chars: 1, limit_chars: 2 });
+const refused = await tools.notes_read({ address: "missing.md" });
+if (!written.ok || !listed.ok || !read.ok || refused.ok) throw new Error("wrong outcome");
+if (read.data.window.text !== "😀界" || read.data.window.next_offset_chars !== 3) throw new Error("wrong window");
+if (refused.error.code !== "not_found") throw new Error("missing typed refusal");
+text({ marker: "TYPED_SMOKE", files: listed.data.files.map(f => f.address), body: read.data.window.text, error: refused.error.code });
+` } }], "toolUse");
+			if (request === 2) return assistant(fixture, [{ type: "toolCall", id: "structured-history-smoke", name: "codemode", arguments: { code: `
+const page = await tools.history_list({ roles: ["tool"] });
+if (!page.ok) throw new Error("history list failed");
+const parent = page.data.items.find(item => item.tool === "codemode");
+if (!parent) throw new Error("missing codemode parent");
+const read = await tools.history_read({ seq: parent.seq });
+if (!read.ok || read.data.execution.name !== "codemode") throw new Error("missing typed execution");
+const calls = read.data.execution.nestedCalls;
+if (!calls || !calls.calls.some(call => call.name === "notes_read" && call.status === "error")) throw new Error("missing nested refusal evidence");
+text({ marker: "HISTORY_SMOKE", calls: calls.calls.length, complete: calls.complete });
+` } }], "toolUse");
+			return assistant(fixture, [{ type: "text", text: "structured smoke complete" }]);
+		},
+	});
+	try {
+		await fixture.session.prompt("Exercise the structured tools through real codemode.");
+		const results = fixture.sessionManager.getBranch().flatMap(entry => entry.type === "message" && entry.message.role === "toolResult" ? [entry.message] : []);
+		assert.equal(results.length, 2, "nested calls are not separate transcript events");
+		assert.ok(results.every(result => !result.isError), JSON.stringify(results));
+		const output = results.map(result => result.content.filter(part => part.type === "text").map(part => part.text).join("\n")).join("\n");
+		assert.match(output, /TYPED_SMOKE/);
+		assert.match(output, /HISTORY_SMOKE/);
+		assert.equal(results[0]!.nestedCalls?.calls.length, 4);
+		assert.equal(results[0]!.nestedCalls?.complete, true);
+	} finally {
+		fixture.close();
+	}
+});
 
 test("real AgentSession: aborted early guidance retries silently with automatic reset disabled", async () => {
 	let fixture!: Fixture;
@@ -1342,7 +1390,7 @@ test("real AgentSession: warning precedes a durable checkpoint, including failed
 			} else if (scenario === "write-error") {
 				assert.equal(resetMarkers(fixture).length, 1);
 				assert.equal(existsSync(noteFile), false, "a failed checkpoint does not create a note");
-				assert.ok(branch.some((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "notes_write" && !entry.message.isError && entry.message.content.some((part) => part.type === "text" && part.text.includes('"code": "invalid_address"'))), "the failed write persists its coded error envelope");
+				assert.ok(branch.some((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "notes_write" && entry.message.isError && entry.message.content.some((part) => part.type === "text" && part.text.startsWith("error: invalid_address: "))), "the failed write persists its coded refusal as an error result");
 			} else {
 				assert.equal(resetMarkers(fixture).length, 1, "normal stop falls back to the same reset even when the warning was ignored");
 				assert.equal(existsSync(noteFile), false);

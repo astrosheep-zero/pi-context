@@ -8,8 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import type { TSchema } from "typebox";
@@ -18,9 +17,8 @@ import { parseNote } from "../src/notes/frontmatter.js";
 import { projectKey } from "../src/notes/paths.js";
 import type { Scope } from "../src/notes/index.js";
 import { listNotes, physicalPath, scopeDir } from "./helpers/notes.js";
-import { CONTEXT_WINDOW_PROTOCOL_OPEN_TAG } from "../src/boot/text.js";
-import { MAX_NOTE_BYTES, MAX_NOTE_PATH_BYTES } from "../src/notes/constants.js";
-import { call, context, explicitBoot, makeExtension, manager, resultJson, resultRead, runHandlers } from "./helpers/extension.js";
+import type { NotesListData, NotesReadData, NotesSearchData, NotesUpdateData, NotesWriteData } from "../src/tools/notes.js";
+import { call, context, explicitBoot, makeExtension, manager, resultData, resultError, resultRead } from "./helpers/extension.js";
 import { installExtensionTestHooks } from "./helpers/extension-test-environment.js";
 
 const testEnvironment = installExtensionTestHooks("pi-context-notes");
@@ -28,16 +26,6 @@ const testEnvironment = installExtensionTestHooks("pi-context-notes");
 function freshRoot(): string {
 	return testEnvironment.newNotesRoot();
 }
-
-function setUpdatedAt(scope: Scope, path: string, ctx: ReturnType<typeof context>, timestamp: number): void {
-	const file = physicalPath(scope, path, ctx);
-	const raw = readFileSync(file, "utf8");
-	writeFileSync(file, raw.replace(/^updatedAt: .*$/m, `updatedAt: ${new Date(timestamp).toISOString()}`));
-}
-
-type Meta = Record<string, unknown>;
-type Listed = { files: Array<{ address: string; project_key?: string; updated_at: string; crumpled_at?: string }> };
-type Searched = { files: Array<{ address: string; project_key?: string; updated_at: string; crumpled_at?: string; matches_total: number; matches: Array<{ line: number; text: string; offset_chars: number; truncated: boolean }> }> };
 
 function assertReceiptIdentity(value: { address: string; project_key?: string }, address: string, scope: Scope, ctx: ReturnType<typeof context>): void {
 	assert.equal(value.address, address);
@@ -55,6 +43,26 @@ test("exactly the five notes tools are registered; the legacy five are gone", ()
 	assert.equal(captured.tools.get("notes_write")?.executionMode, "sequential");
 	assert.equal(captured.tools.get("notes_update")?.executionMode, "sequential");
 	assert.equal(captured.tools.get("notes_read")?.executionMode, undefined);
+});
+
+test("every notes tool declares an outcome schema that accepts its own structured payload", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	await call(captured, "notes_write", { address: "schema.md", content: "needle body" }, ctx);
+	const delivered: Array<[string, unknown]> = [
+		["notes_write", await call(captured, "notes_write", { address: "schema.md", content: "needle body again" }, ctx)],
+		["notes_update", await call(captured, "notes_update", { address: "schema.md", edits: [{ oldText: "again", newText: "once" }] }, ctx)],
+		["notes_read", await call(captured, "notes_read", { address: "schema.md" }, ctx)],
+		["notes_list", await call(captured, "notes_list", {}, ctx)],
+		["notes_search", await call(captured, "notes_search", { query: "needle" }, ctx)],
+		["notes_read", await call(captured, "notes_read", { address: "absent.md" }, ctx)],
+	];
+	for (const [name, result] of delivered) {
+		const schema = captured.tools.get(name)!.outputSchema as TSchema | undefined;
+		assert.ok(schema, `${name} registers an outputSchema`);
+		assert.equal(Check(schema, (result as { structuredContent: unknown }).structuredContent), true, `${name} structured payload matches its declared schema`);
+	}
 });
 
 test("note schemas drop status/stale and expose crumpled plus wastebasket", () => {
@@ -82,9 +90,7 @@ test("write lands a real markdown file with harness frontmatter and a pure body"
 	const ctx = context(session);
 	const sessionId = session.getSessionId();
 
-	const result = resultJson<{ address: string; outcome: string }>(
-		await call(captured, "notes_write", { address: "a/b.md", content: "hello" }, ctx),
-	);
+	const result = resultData<NotesWriteData>(await call(captured, "notes_write", { address: "a/b.md", content: "hello" }, ctx));
 	assert.deepEqual(Object.keys(result).sort(), ["address", "outcome"]);
 	const file = physicalPath("session", "a/b.md", ctx);
 	assert.equal(file, join(root, "pi", "session", sessionId, "a", "b.md"));
@@ -238,32 +244,25 @@ test("edit is body-scoped with named failures and a replace_all escape hatch", a
 	const ctx = context(session);
 
 	await call(captured, "notes_write", { address: "edit.md", content: "alpha\nbeta\nbeta\ngamma" }, ctx);
-	const ambiguous = resultJson<{ error: string; code: string; line_numbers?: number[] }>(
-		await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "beta", newText: "B" }] }, ctx),
-	);
-	assert.match(ambiguous.error, /occurs 2 times/);
+	const ambiguous = resultError(await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "beta", newText: "B" }] }, ctx));
+	assert.match(ambiguous.message, /occurs 2 times/);
 	assert.equal(ambiguous.code, "ambiguous_edit");
-	assert.deepEqual(ambiguous.line_numbers, [2, 3], "the multi-match error carries every match line number");
+	assert.deepEqual(ambiguous.details?.line_numbers, [2, 3], "the multi-match error carries every match line number");
 
-	const missing = resultJson<{ error: string; edit_index?: number }>(
-		await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "absent", newText: "x" }] }, ctx),
-	);
-	assert.equal(missing.edit_index, 0, "a zero-match anchor names the failing edit index");
+	const missing = resultError(await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "absent", newText: "x" }] }, ctx));
+	assert.equal(missing.code, "no_match");
+	assert.equal(missing.details?.edit_index, 0, "a zero-match anchor names the failing edit index");
 
-	const all = resultJson<{ address: string; applied: number; change_kind: string; diff: string; meta: Meta }>(
-		await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "beta", newText: "B" }], replace_all: true }, ctx),
-	);
+	const all = resultData<NotesUpdateData>(await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "beta", newText: "B" }], replace_all: true }, ctx));
 	assert.equal(all.applied, 1);
 	assert.equal(all.address, "edit.md");
 	assertReceiptIdentity(all, "edit.md", "session", ctx);
 	assert.equal(all.change_kind, "body");
-	assert.equal(resultRead(await call(captured, "notes_read", { address: "edit.md" }, ctx)).content.endsWith("alpha\nB\nB\ngamma"), true, "replace_all replaces every occurrence");
+	assert.equal(resultRead(await call(captured, "notes_read", { address: "edit.md" }, ctx)).content, "alpha\nB\nB\ngamma", "replace_all replaces every occurrence");
 
 	// An anchor that occurs only in frontmatter is not matched: edits are body-only.
-	const frontmatterOnly = resultJson<{ edit_index?: number }>(
-		await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "scope", newText: "x" }] }, ctx),
-	);
-	assert.equal(frontmatterOnly.edit_index, 0, "a frontmatter-only anchor is not a body match");
+	const frontmatterOnly = resultError(await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "origin", newText: "x" }] }, ctx));
+	assert.equal(frontmatterOnly.details?.edit_index, 0, "a frontmatter-only anchor is not a body match");
 });
 
 test("nothing-to-do, not-found, atomic batches, and replace_all zero-match are named", async () => {
@@ -272,35 +271,32 @@ test("nothing-to-do, not-found, atomic batches, and replace_all zero-match are n
 	const captured = makeExtension(session);
 	const ctx = context(session);
 
-	const nameOnly = resultJson<{ error: string }>(await call(captured, "notes_update", { address: "edit.md" }, ctx));
-	assert.match(nameOnly.error, /nothing to do/, "neither edits nor setters is a named error");
+	const nameOnly = resultError(await call(captured, "notes_update", { address: "edit.md" }, ctx));
+	assert.match(nameOnly.message, /nothing to do/, "neither edits nor setters is a named error");
 
 	await call(captured, "notes_write", { address: "edit.md", content: "alpha\nbeta" }, ctx);
-	const empty = resultJson<{ error: string }>(await call(captured, "notes_update", { address: "edit.md", edits: [] }, ctx));
-	assert.match(empty.error, /nothing to do/, "an empty edits list with no setters is also nothing to do");
+	const empty = resultError(await call(captured, "notes_update", { address: "edit.md", edits: [] }, ctx));
+	assert.match(empty.message, /nothing to do/, "an empty edits list with no setters is also nothing to do");
 
-	const editMissing = resultJson<{ error: string }>(await call(captured, "notes_update", { address: "missing.md", crumpled: true }, ctx));
-	assert.equal(editMissing.error, "note not found");
-	const readMissing = resultJson<{ error: string; code: string }>(await call(captured, "notes_read", { address: "missing.md" }, ctx));
-	assert.equal(readMissing.error, "note not found");
+	const editMissing = resultError(await call(captured, "notes_update", { address: "missing.md", crumpled: true }, ctx));
+	assert.equal(editMissing.message, "note not found");
+	const readMissing = resultError(await call(captured, "notes_read", { address: "missing.md" }, ctx));
+	assert.equal(readMissing.message, "note not found");
 	assert.equal(readMissing.code, "not_found");
+	assert.equal(readMissing.details, undefined, "a plain refusal carries no edit details");
 
 	const file = physicalPath("session", "edit.md", ctx);
 	const before = readFileSync(file, "utf8");
-	const failed = resultJson<{ error: string; edit_index?: number }>(
-		await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "alpha", newText: "A" }, { oldText: "absent", newText: "x" }] }, ctx),
-	);
-	assert.equal(failed.edit_index, 1, "the failing edit is named");
+	const failed = resultError(await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "alpha", newText: "A" }, { oldText: "absent", newText: "x" }] }, ctx));
+	assert.equal(failed.details?.edit_index, 1, "the failing edit is named");
 	assert.equal(readFileSync(file, "utf8"), before, "a failing batch leaves the file byte-identical, frontmatter included");
 
-	const applied = resultJson<{ applied: number }>(await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "alpha", newText: "A" }, { oldText: "beta", newText: "B" }] }, ctx));
+	const applied = resultData<NotesUpdateData>(await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "alpha", newText: "A" }, { oldText: "beta", newText: "B" }] }, ctx));
 	assert.equal(applied.applied, 2);
-	assert.equal(resultRead(await call(captured, "notes_read", { address: "edit.md" }, ctx)).content.endsWith("A\nB"), true);
+	assert.equal(resultRead(await call(captured, "notes_read", { address: "edit.md" }, ctx)).content, "A\nB");
 
-	const zero = resultJson<{ error: string; edit_index?: number }>(
-		await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "zzz", newText: "y" }], replace_all: true }, ctx),
-	);
-	assert.equal(zero.edit_index, 0, "replace_all with zero matches is the same zero-match error, not a silent no-op");
+	const zero = resultError(await call(captured, "notes_update", { address: "edit.md", edits: [{ oldText: "zzz", newText: "y" }], replace_all: true }, ctx));
+	assert.equal(zero.details?.edit_index, 0, "replace_all with zero matches is the same zero-match error, not a silent no-op");
 });
 
 test("notes_update rename_to moves a note and refuses combinations and live targets", async () => {
@@ -310,45 +306,35 @@ test("notes_update rename_to moves a note and refuses combinations and live targ
 	const ctx = context(session);
 
 	await call(captured, "notes_write", { address: "move-me.md", content: "body" }, ctx);
-	const combined = resultJson<{ error: string }>(
-		await call(captured, "notes_update", { address: "move-me.md", rename_to: "moved.md", edits: [{ oldText: "body", newText: "x" }] }, ctx),
-	);
-	assert.match(combined.error, /rename_to is used alone/, "rename_to rejects being combined with edits");
+	const combined = resultError(await call(captured, "notes_update", { address: "move-me.md", rename_to: "moved.md", edits: [{ oldText: "body", newText: "x" }] }, ctx));
+	assert.match(combined.message, /rename_to is used alone/, "rename_to rejects being combined with edits");
 
 	await call(captured, "notes_write", { address: "occupied.md", content: "live target" }, ctx);
-	const conflict = resultJson<{ error: string }>(await call(captured, "notes_update", { address: "move-me.md", rename_to: "occupied.md" }, ctx));
-	assert.match(conflict.error, /live note/, "a live target refuses the move");
+	const conflict = resultError(await call(captured, "notes_update", { address: "move-me.md", rename_to: "occupied.md" }, ctx));
+	assert.match(conflict.message, /live note/, "a live target refuses the move");
 
-	const renamed = resultJson<{ address: string; rename_from: string; rename_to: string; change_kind: string; replaced_crumpled_target: boolean }>(
-		await call(captured, "notes_update", { address: "move-me.md", rename_to: "moved.md" }, ctx),
-	);
+	const renamed = resultData<NotesUpdateData>(await call(captured, "notes_update", { address: "move-me.md", rename_to: "moved.md" }, ctx));
 	assertReceiptIdentity(renamed, "moved.md", "session", ctx);
 	assert.equal(renamed.rename_from, "move-me.md");
 	assert.equal(renamed.change_kind, "file");
 	assert.equal(renamed.rename_to, "moved.md");
 	assert.equal(renamed.replaced_crumpled_target, false);
 
-	const gone = resultJson<{ error: string }>(await call(captured, "notes_read", { address: "move-me.md" }, ctx));
-	assert.equal(gone.error, "note not found", "the old address is gone");
-	assert.equal(resultRead(await call(captured, "notes_read", { address: "moved.md" }, ctx)).content.endsWith("body"), true);
+	const gone = resultError(await call(captured, "notes_read", { address: "move-me.md" }, ctx));
+	assert.equal(gone.message, "note not found", "the old address is gone");
+	assert.equal(resultRead(await call(captured, "notes_read", { address: "moved.md" }, ctx)).content, "body");
 
 	// Empty filler values are not a combination: a model passing every parameter still gets its crumple.
-	const crumpled = resultJson<{ address: string }>(
-		await call(captured, "notes_update", { address: "moved.md", crumpled: true, edits: [], origin: "self", rename_to: "", replace_all: false }, ctx),
-	);
+	const crumpled = resultData<NotesUpdateData>(await call(captured, "notes_update", { address: "moved.md", crumpled: true, edits: [], origin: "self", rename_to: "", replace_all: false }, ctx));
 	assert.equal(crumpled.address, "moved.md", "an empty rename_to is ignored as if omitted");
-	const basket = resultJson<Listed>(await call(captured, "notes_list", { wastebasket: true }, ctx));
+	const basket = resultData<NotesListData>(await call(captured, "notes_list", { wastebasket: true }, ctx));
 	assert.equal(basket.files.some((file) => file.address === "moved.md"), true, "the note was crumpled");
 
-	const fillerRename = resultJson<{ rename_to: string }>(
-		await call(captured, "notes_update", { address: "moved.md", rename_to: "moved-again.md", edits: [], replace_all: false }, ctx),
-	);
+	const fillerRename = resultData<NotesUpdateData>(await call(captured, "notes_update", { address: "moved.md", rename_to: "moved-again.md", edits: [], replace_all: false }, ctx));
 	assert.equal(fillerRename.rename_to, "moved-again.md", "empty edits and replace_all: false ride along with a rename");
 
-	const realCombo = resultJson<{ error: string }>(
-		await call(captured, "notes_update", { address: "moved-again.md", rename_to: "nope.md", replace_all: true }, ctx),
-	);
-	assert.match(realCombo.error, /rename_to is used alone/, "replace_all: true is a real combination and refuses");
+	const realCombo = resultError(await call(captured, "notes_update", { address: "moved-again.md", rename_to: "nope.md", replace_all: true }, ctx));
+	assert.match(realCombo.message, /rename_to is used alone/, "replace_all: true is a real combination and refuses");
 });
 
 test("write and update receipts distinguish outcomes and no-op edits", async () => {
@@ -356,15 +342,15 @@ test("write and update receipts distinguish outcomes and no-op edits", async () 
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
-	const alias = resultJson<{ address: string; outcome: string }>(await call(captured, "notes_write", { address: "@self/alias", content: "body" }, ctx));
+	const alias = resultData<NotesWriteData>(await call(captured, "notes_write", { address: "@self/alias", content: "body" }, ctx));
 	assertReceiptIdentity(alias, "@agents/anonymous/alias.md", "agent", ctx);
 	assert.equal(alias.outcome, "created");
-	assert.equal(resultJson<{ outcome: string }>(await call(captured, "notes_write", { address: "@agents/anonymous/alias.md", content: "new body" }, ctx)).outcome, "overwrote");
+	assert.equal(resultData<NotesWriteData>(await call(captured, "notes_write", { address: "@agents/anonymous/alias.md", content: "new body" }, ctx)).outcome, "overwrote");
 	await call(captured, "notes_update", { address: "@self/alias", crumpled: true }, ctx);
-	assert.equal(resultJson<{ outcome: string }>(await call(captured, "notes_write", { address: "@self/alias", content: "restored" }, ctx)).outcome, "uncrumpled");
-	const noChange = resultJson<{ applied: number; change_kind: string; diff: string }>(await call(captured, "notes_update", { address: "@self/alias", edits: [{ oldText: "restored", newText: "restored" }], crumpled: false }, ctx));
+	assert.equal(resultData<NotesWriteData>(await call(captured, "notes_write", { address: "@self/alias", content: "restored" }, ctx)).outcome, "uncrumpled");
+	const noChange = resultData<NotesUpdateData>(await call(captured, "notes_update", { address: "@self/alias", edits: [{ oldText: "restored", newText: "restored" }], crumpled: false }, ctx));
 	assert.deepEqual([noChange.applied, noChange.change_kind, noChange.diff], [0, "none", ""]);
-	const mixed = resultJson<{ applied: number; change_kind: string }>(await call(captured, "notes_update", { address: "@self/alias", edits: [{ oldText: "restored", newText: "restored" }, { oldText: "restored", newText: "changed" }] }, ctx));
+	const mixed = resultData<NotesUpdateData>(await call(captured, "notes_update", { address: "@self/alias", edits: [{ oldText: "restored", newText: "restored" }, { oldText: "restored", newText: "changed" }] }, ctx));
 	assert.equal(mixed.applied, 1);
 	assert.equal(mixed.change_kind, "body");
 });
@@ -374,22 +360,22 @@ test("empty results distinguish hidden notes and unavailable homes", async () =>
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
-	const empty = resultJson<{ files: unknown[]; crumpled_excluded: number; homes_unavailable: string[] }>(await call(captured, "notes_list", { pattern: "@human/**" }, ctx));
+	const empty = resultData<NotesListData>(await call(captured, "notes_list", { pattern: "@human/**" }, ctx));
 	assert.deepEqual(empty, { files: [], more: 0, crumpled_excluded: 0, homes_unavailable: [] });
 	await call(captured, "notes_write", { address: "@human/hidden.md", content: "needle" }, ctx);
 	await call(captured, "notes_update", { address: "@human/hidden.md", crumpled: true }, ctx);
-	const hidden = resultJson<{ crumpled_excluded: number }>(await call(captured, "notes_search", { query: "needle", pattern: "@human/**" }, ctx));
+	const hidden = resultData<NotesSearchData>(await call(captured, "notes_search", { query: "needle", pattern: "@human/**" }, ctx));
 	assert.equal(hidden.crumpled_excluded, 1);
 	const broken = scopeDir("project", ctx);
 	mkdirSync(join(broken, ".."), { recursive: true });
 	writeFileSync(broken, "not a directory");
-	const partial = resultJson<{ files: Array<{ address: string }>; homes_unavailable: string[] }>(await call(captured, "notes_list", { pattern: "**" }, ctx));
+	const partial = resultData<NotesListData>(await call(captured, "notes_list", { pattern: "**" }, ctx));
 	assert.deepEqual(partial.homes_unavailable, ["@project"]);
 	assert.deepEqual(partial.files, []);
-	const searched = resultJson<{ homes_unavailable: string[] }>(await call(captured, "notes_search", { query: "needle", pattern: "**" }, ctx));
+	const searched = resultData<NotesSearchData>(await call(captured, "notes_search", { query: "needle", pattern: "**" }, ctx));
 	assert.deepEqual(searched.homes_unavailable, ["@project"]);
 	writeFileSync(join(process.env.PI_NOTES_HOME!, "agents"), "not a directory");
-	const namespace = resultJson<{ homes_unavailable: string[] }>(await call(captured, "notes_list", { pattern: "@agents/*/note.md" }, ctx));
+	const namespace = resultData<NotesListData>(await call(captured, "notes_list", { pattern: "@agents/*/note.md" }, ctx));
 	assert.deepEqual(namespace.homes_unavailable, ["@agents"]);
 });
 
@@ -405,23 +391,26 @@ test("notes receipts report resolved identity across scopes", async () => {
 	] as const;
 
 	for (const note of notes) {
-		const written = resultJson<{ address: string }>(await call(captured, "notes_write", { address: note.address, content: note.body }, ctx));
+		const written = resultData<NotesWriteData>(await call(captured, "notes_write", { address: note.address, content: note.body }, ctx));
 		assertReceiptIdentity(written, note.address, note.scope, ctx);
 
-		const edited = resultJson<{ address: string }>(await call(captured, "notes_update", { address: note.address, edits: [{ oldText: "needle", newText: "match" }] }, ctx));
+		const edited = resultData<NotesUpdateData>(await call(captured, "notes_update", { address: note.address, edits: [{ oldText: "needle", newText: "match" }] }, ctx));
 		assertReceiptIdentity(edited, note.address, note.scope, ctx);
 
 		const rawRead = await call(captured, "notes_read", { address: note.address }, ctx);
 		const read = resultRead(rawRead);
-		assertReceiptIdentity(read.details as { address: string }, note.address, note.scope, ctx);
-		assert.equal(read.header.includes("scope:"), false, "scope is derivable from the address and never echoed");
+		assertReceiptIdentity(resultData<NotesReadData>(rawRead), note.address, note.scope, ctx);
+		assert.equal(read.content, note.body.replace("needle", "match"), "the window carries the body only");
+		assert.equal("scope" in read.metadata!, false, "scope is derivable from the address and never echoed");
+		assert.equal(read.metadata!.project !== undefined, note.scope === "session", "stored project ownership is exposed as metadata");
+		assert.equal(rawRead.content[0]!.type === "text" && rawRead.content[0]!.text.includes("---"), false, "the rendered read carries no frontmatter block");
 	}
 
-	const listed = resultJson<Listed>(await call(captured, "notes_list", { pattern: "**" }, ctx));
+	const listed = resultData<NotesListData>(await call(captured, "notes_list", { pattern: "**" }, ctx));
 	assert.deepEqual(listed.files.map((file) => file.address).sort(), notes.map((note) => note.address).sort(), "notes_list returns each full address");
 	for (const row of listed.files) assertReceiptIdentity(row, row.address, notes.find((note) => note.address === row.address)!.scope, ctx);
 
-	const searched = resultJson<Searched>(await call(captured, "notes_search", { query: "match", pattern: "**" }, ctx));
+	const searched = resultData<NotesSearchData>(await call(captured, "notes_search", { query: "match", pattern: "**" }, ctx));
 	assert.deepEqual(searched.files.map((file) => file.address), notes.map((note) => note.address).sort(), "notes_search returns each full address");
 	for (const row of searched.files) assertReceiptIdentity(row, row.address, notes.find((note) => note.address === row.address)!.scope, ctx);
 });
@@ -436,36 +425,84 @@ test("list and search merge scopes and carry addresses; the path jail rejects es
 	await call(captured, "notes_write", { address: "@project/two.md", content: "needle two" }, ctx);
 	await call(captured, "notes_write", { address: "@human/three.md", content: "needle three" }, ctx);
 
-	const listed = resultJson<Listed>(await call(captured, "notes_list", {}, ctx));
+	const listed = resultData<NotesListData>(await call(captured, "notes_list", {}, ctx));
 	assert.deepEqual([...listed.files].map((file) => file.address).sort(), ["@human/three.md", "@project/two.md", "one.md"], "every merged row carries its full address");
 	for (const row of listed.files) {
 		assert.deepEqual(Object.keys(row).sort(), ["address", "updated_at", ...(row.address.startsWith("@project/") ? ["project_key"] : [])].sort());
 	}
-	const scoped = resultJson<Listed>(await call(captured, "notes_list", { pattern: "@human/**" }, ctx));
+	const scoped = resultData<NotesListData>(await call(captured, "notes_list", { pattern: "@human/**" }, ctx));
 	assert.deepEqual(scoped.files.map((file) => file.address), ["@human/three.md"], "an address-pattern filter narrows the set");
 
-	const searched = resultJson<Searched>(await call(captured, "notes_search", { query: "needle" }, ctx));
+	const searched = resultData<NotesSearchData>(await call(captured, "notes_search", { query: "needle" }, ctx));
 	assert.equal(searched.files.length, 3, "literal search finds matches in every scope");
 	assert.deepEqual([...searched.files].map((file) => file.address).sort(), ["@human/three.md", "@project/two.md", "one.md"]);
 	for (const row of [...listed.files, ...searched.files]) assert.equal("scope" in row, false, "scope is derivable from the address and never echoed");
 	assert.equal(searched.files.every((file) => file.matches_total === 1), true);
 	const hit = searched.files[0]!.matches[0]!;
 	assert.equal(hit.line, 1);
-	assert.ok(hit.offset_chars > 0, "the offset includes serialized frontmatter");
+	assert.equal(hit.offset_chars, 0, "the offset counts into the note body, so it does not include serialized frontmatter");
 	assert.equal(hit.truncated, false);
 	assert.deepEqual(Object.keys(hit).sort(), ["line", "offset_chars", "text", "truncated"]);
+	assert.equal(resultRead(await call(captured, "notes_read", { address: searched.files[0]!.address, offset_chars: hit.offset_chars }, ctx)).content.startsWith("needle"), true, "the search offset starts a read at the match");
 
 	const escaped = ["../evil", "/abs", "a\\b"];
 	for (const tool of ["notes_write", "notes_update", "notes_read"] as const) {
 		for (const path of escaped) {
-			const failure = resultJson<{ error: string; code: string }>(await call(captured, tool, { address: path, content: "x", edits: [{ oldText: "a", newText: "b" }] }, ctx));
-			assert.equal(failure.code, "invalid_address");
+			assert.equal(resultError(await call(captured, tool, { address: path, content: "x", edits: [{ oldText: "a", newText: "b" }] }, ctx)).code, "invalid_address");
 		}
 	}
-	assert.equal(resultJson<{ code: string }>(await call(captured, "notes_search", { query: "" }, ctx)).code, "invalid_query");
-	assert.equal(resultJson<{ code: string }>(await call(captured, "notes_read", { address: "one.md", offset_chars: 99999 }, ctx)).code, "invalid_offset");
-	assert.equal(resultJson<{ code: string }>(await call(captured, "notes_list", { pattern: "bad\\glob" }, ctx)).code, "invalid_pattern");
-	assert.equal(resultJson<{ code: string }>(await call(captured, "notes_search", { query: "needle", pattern: "bad\\glob" }, ctx)).code, "invalid_pattern");
+	assert.equal(resultError(await call(captured, "notes_search", { query: "" }, ctx)).code, "invalid_query");
+	assert.equal(resultError(await call(captured, "notes_read", { address: "one.md", offset_chars: 99999 }, ctx)).code, "invalid_offset");
+	assert.equal(resultError(await call(captured, "notes_list", { pattern: "bad\\glob" }, ctx)).code, "invalid_pattern");
+	assert.equal(resultError(await call(captured, "notes_search", { query: "needle", pattern: "bad\\glob" }, ctx)).code, "invalid_pattern");
+});
+
+test("a read offsets the body in code points, not bytes or frontmatter", async () => {
+	freshRoot();
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	await call(captured, "notes_write", { address: "emoji.md", content: "🐑字\nneedle tail" }, ctx);
+
+	const search = resultData<NotesSearchData>(await call(captured, "notes_search", { query: "needle", pattern: "emoji.md" }, ctx));
+	const match = search.files[0]!.matches[0]!;
+	assert.equal(match.line, 2);
+	assert.equal(match.offset_chars, 3, "the emoji and CJK line above contribute two code points plus the newline, not their bytes");
+	const atMatch = resultRead(await call(captured, "notes_read", { address: "emoji.md", offset_chars: match.offset_chars }, ctx));
+	assert.equal(atMatch.offset_chars, match.offset_chars);
+	assert.equal(atMatch.text.startsWith("needle"), true, "the offset lands on the match even with multi-byte characters above it");
+	assert.equal(atMatch.total_chars, Array.from("🐑字\nneedle tail").length);
+
+	const negative = resultRead(await call(captured, "notes_read", { address: "emoji.md", offset_chars: -4 }, ctx));
+	assert.equal(negative.text, "tail", "a negative offset counts back from the end of the body");
+	assert.equal(negative.next_offset_chars, null, "a tail read has no continuation");
+	assert.equal(negative.limited_by, null);
+	const start = resultRead(await call(captured, "notes_read", { address: "emoji.md", limit_chars: 3 }, ctx));
+	assert.equal(start.text, "🐑字\n");
+	assert.equal(start.next_offset_chars, 3);
+	assert.equal(start.limited_by, "limit", "the requested count is what stopped this window");
+	assert.equal(resultRead(await call(captured, "notes_read", { address: "emoji.md", offset_chars: 14 }, ctx)).text, "", "the exact end is an empty window, not a refusal");
+});
+
+test("a read keeps its body window verbatim under the new presentation", async () => {
+	freshRoot();
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	await call(captured, "notes_write", { address: "present.md", content: "0123456789" }, ctx);
+
+	const limited = await call(captured, "notes_read", { address: "present.md", limit_chars: 4 }, ctx);
+	const text = limited.content[0]!.type === "text" ? limited.content[0]!.text : "";
+	assert.equal(text.includes("READ WINDOW"), false, "the old READ WINDOW block is gone");
+	assert.equal(text.includes("chars: ["), false, "no parsed range block stands between the header and the body");
+	assert.equal(text.endsWith("\n\n[6 more characters. Use offset_chars=4 to continue.]"), true, "a limit-stopped window names the resume cursor");
+	const header = text.slice(0, text.indexOf("\n\n"));
+	assert.match(header, /^present\.md\norigin self \| created \d{4}-/, "identity and metadata lead, body first in the window itself");
+
+	const whole = await call(captured, "notes_read", { address: "present.md" }, ctx);
+	const wholeText = whole.content[0]!.type === "text" ? whole.content[0]!.text : "";
+	assert.equal(wholeText.endsWith("\n\n0123456789"), true, "a complete window carries no continuation footer");
+	assert.equal(wholeText.includes("more characters"), false);
 });
 
 test("@ addresses select one home, reject illegal sigils, and never fall back", async () => {
@@ -479,9 +516,9 @@ test("@ addresses select one home, reject illegal sigils, and never fall back", 
 	assert.ok(existsSync(physicalPath("project", "same.md", ctx)), "@project writes to the current project home");
 	assert.ok(existsSync(physicalPath("human", "same.md", ctx)), "@human writes to the human home");
 	assert.match(resultRead(await call(captured, "notes_read", { address: "same.md" }, ctx)).content, /session$/);
-	assert.equal(resultJson<{ error?: string }>(await call(captured, "notes_read", { address: "@project/missing.md" }, ctx)).error, "note not found");
-	assert.match(resultJson<{ error: string; code: string }>(await call(captured, "notes_read", { address: "@glboal/same.md" }, ctx)).error, /@project\/.*@human\/.*bare names are this session/);
-	assert.equal(resultJson<{ code: string }>(await call(captured, "notes_write", { address: "bad@name.md", content: "no" }, ctx)).code, "invalid_address");
+	assert.equal(resultError(await call(captured, "notes_read", { address: "@project/missing.md" }, ctx)).message, "note not found");
+	assert.match(resultError(await call(captured, "notes_read", { address: "@glboal/same.md" }, ctx)).message, /@project\/.*@human\/.*bare names are this session/);
+	assert.equal(resultError(await call(captured, "notes_write", { address: "bad@name.md", content: "no" }, ctx)).code, "invalid_address");
 	assert.equal(existsSync(join(root, "human", "bad@name.md")), false, "a bad sigil creates nothing anywhere");
 });
 
@@ -492,7 +529,7 @@ test("Pi adapter defaults to anonymous agent identity", async () => {
 	const ctx = context(session);
 	await withAgent(undefined, async () => {
 		await call(captured, "notes_write", { address: "@self/private.md", content: "anonymous agent note" }, ctx);
-		const listed = resultJson<Listed>(await call(captured, "notes_list", {}, ctx));
+		const listed = resultData<NotesListData>(await call(captured, "notes_list", {}, ctx));
 		assert.deepEqual(listed.files.map((row) => row.address), ["@agents/anonymous/private.md"]);
 		assert.equal(existsSync(join(root, "agents", "anonymous", "private.md")), true);
 	});
@@ -507,22 +544,19 @@ test("Pi adapter resolves agent and switched model identity on each notes call a
 		await call(captured, "notes_write", { address: "@self/private.md", content: "agent note" }, ctx);
 		await call(captured, "notes_write", { address: "@model/private.md", content: "first model note" }, ctx);
 		ctx.model = context(session, undefined, undefined, true, testEnvironment.cwd, true, "other/Second.Model").model;
-		assert.equal(resultJson<{ error: string }>(await call(captured, "notes_read", { address: "@model/private.md" }, ctx)).error, "note not found", "switched model does not fall back to previous home");
+		assert.equal(resultError(await call(captured, "notes_read", { address: "@model/private.md" }, ctx)).message, "note not found", "switched model does not fall back to previous home");
 		await call(captured, "notes_write", { address: "@model/private.md", content: "second model note" }, ctx);
-		const listed = resultJson<Listed>(await call(captured, "notes_list", {}, ctx));
+		const listed = resultData<NotesListData>(await call(captured, "notes_list", {}, ctx));
 		assert.deepEqual(listed.files.map((row) => row.address).sort(), ["@agents/test-agent/private.md", "@models/second-model/private.md"]);
 		const boot = await explicitBoot(ctx, "test-window", undefined);
 		assert.ok(boot.includes("@models/second-model/private.md"));
 		assert.equal(boot.includes("@models/first-model/private.md"), false);
 		assert.match(resultRead(await call(captured, "notes_read", { address: "@models/first-model/private.md" }, ctx)).content, /first model note$/);
-		const refused = resultJson<{ error: string }>(await call(captured, "notes_update", { address: "@models/first-model/private.md", crumpled: true }, ctx));
-		assert.match(refused.error, /not your home/);
+		const refused = resultError(await call(captured, "notes_update", { address: "@models/first-model/private.md", crumpled: true }, ctx));
+		assert.match(refused.message, /not your home/);
 		assert.match(readFileSync(join(root, "models/first-model/private.md"), "utf8"), /first model note$/);
 	});
 });
-
-const FRONTMATTER = (body: string) =>
-	`---\norigin: self\ncreatedAt: 2026-01-01T00:00:00.000+00:00\nupdatedAt: 2026-01-01T00:00:00.000+00:00\nlastAccessed: 2026-01-01T00:00:00.000+00:00\naccessCount: 0\n---\n\n${body}`;
 
 async function withAgent(name: string | undefined, run: () => Promise<void>): Promise<void> {
 	const previous = process.env.PI_NOTES_AGENT;

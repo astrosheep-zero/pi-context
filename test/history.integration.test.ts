@@ -3,8 +3,10 @@ import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
 import type { TSchema } from "typebox";
-import { historyFromSession } from "../src/pi/history.js";
-import { TOOL_OUTPUT_MAX_BYTES } from "../src/tools/output.js";
+import { earliestMatchOffsetChars, TOOL_OUTPUT_MAX_BYTES } from "../src/tools/output.js";
+import { historyList, historyRead, historySearch, historyWindows } from "../src/tools/history.js";
+import { historyDocument, projectHistory, type DecodedHistoryItem } from "../src/history/history.js";
+import { selectPage, type HistoryPage } from "../src/history/query.js";
 import {
 	appendText,
 	assertWithinBudget,
@@ -12,13 +14,42 @@ import {
 	context,
 	makeExtension,
 	manager,
-	objectSchema,
-	resultJson,
+	resultData,
+	resultError,
 	resultRead,
 } from "./helpers/extension.js";
 import { installExtensionTestHooks } from "./helpers/extension-test-environment.js";
 
 installExtensionTestHooks("pi-context-history-v2");
+
+type Page = { items: Array<Record<string, unknown>>; older_before: number | null; newer_after: number | null };
+type Appendable = Parameters<SessionManager["appendMessage"]>[0];
+
+/** Append a message the way the host records one, without the harness's per-role sugar. */
+function append(session: SessionManager, message: Record<string, unknown>): string {
+	return session.appendMessage(message as unknown as Appendable);
+}
+
+function toolCall(session: SessionManager, id: string, name: string, args: unknown): string {
+	return append(session, { role: "assistant", content: [{ type: "toolCall", id, name, arguments: args }], stopReason: "toolUse", timestamp: Date.now() });
+}
+
+function toolResult(session: SessionManager, id: string, name: string, text: string, extra: Record<string, unknown> = {}): string {
+	return append(session, { role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text }], isError: false, timestamp: Date.now(), ...extra });
+}
+
+function page(result: Awaited<ReturnType<typeof call>>): Page {
+	return resultData<Page>(result);
+}
+
+function seqs(result: Awaited<ReturnType<typeof call>>): number[] {
+	return page(result).items.map((item) => item.seq as number);
+}
+
+/** What the model reads for one result, so a test can check the text surface directly. */
+function rendered(result: Awaited<ReturnType<typeof call>>): string {
+	return result.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+}
 
 test("history schemas expose seq and anchor paging, while notes use snapshot limits", () => {
 	const captured = makeExtension(manager());
@@ -58,32 +89,73 @@ test("history schemas expose seq and anchor paging, while notes use snapshot lim
 	const notesSchema = captured.tools.get("notes_list")?.parameters as { properties?: Record<string, unknown> };
 	assert.equal(notesSchema.properties?.cursor, undefined);
 	assert.ok(notesSchema.properties?.limit);
-	assert.equal(notesSchema.properties?.max_results, undefined);
 	const notesSearchSchema = captured.tools.get("notes_search")?.parameters as { properties?: Record<string, unknown> };
 	assert.equal(notesSearchSchema.properties?.cursor, undefined);
 	assert.ok(notesSearchSchema.properties?.limit);
-	assert.equal(notesSearchSchema.properties?.max_files, undefined);
 });
 
-test("seq is stable across branch changes and abandoned entries remain unreadable", async () => {
+test("every history operation declares an outcome schema its own payload satisfies", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	appendText(session, "user", "hello");
+	toolCall(session, "call-1", "bash", { command: "pwd" });
+	toolResult(session, "call-1", "bash", "/tmp");
+
+	for (const toolName of ["history_windows", "history_list", "history_search", "history_read"]) {
+		const operation = { history_windows: historyWindows, history_list: historyList, history_search: historySearch, history_read: historyRead }[toolName]!;
+		const result = await call(captured, toolName, toolName === "history_read" ? { seq: 1 } : toolName === "history_search" ? { query: "hello" } : {}, ctx);
+		const structured = result.structuredContent;
+		assert.ok(structured !== undefined, `${toolName} carries a structured outcome`);
+		assert.equal(Check(operation.outputSchema, structured), true, `${toolName} payload satisfies its own outputSchema`);
+		assertWithinBudget(result, `${toolName} page`);
+	}
+	const refusal = await call(captured, "history_read", { seq: 999 }, ctx);
+	assert.equal(Check(historyRead.outputSchema, refusal.structuredContent), true, "a refusal satisfies the same outcome schema");
+});
+
+test("seq is stable across branch changes, abandoned entries stay unreadable, and a paired result seq is refused precisely", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	const firstId = appendText(session, "user", "first");
 	const abandonedId = appendText(session, "assistant", "abandoned reply");
-	const before = resultJson<{ items: Array<{ seq: number; content: string }> }>(await call(captured, "history_list", { roles: ["user", "assistant"] }, ctx));
+	const before = page(await call(captured, "history_list", { roles: ["user", "assistant"] }, ctx));
 	assert.deepEqual(before.items.map((item) => [item.seq, item.content]), [[1, "first"], [2, "abandoned reply"]]);
 
 	session.branch(firstId);
 	const branchId = appendText(session, "user", "new branch");
-	const after = resultJson<{ items: Array<{ seq: number; content: string }> }>(await call(captured, "history_list", { roles: ["user", "assistant"] }, ctx));
+	const after = page(await call(captured, "history_list", { roles: ["user", "assistant"] }, ctx));
 	assert.deepEqual(after.items.map((item) => [item.seq, item.content]), [[1, "first"], [3, "new branch"]]);
 	assert.equal(branchId !== abandonedId, true);
 
-	const unreadable = resultJson<{ error: string }>(await call(captured, "history_read", { seq: 2 }, ctx));
-	assert.match(unreadable.error, /another branch/);
-	const unknown = resultJson<{ error: string }>(await call(captured, "history_read", { seq: 4 }, ctx));
-	assert.match(unknown.error, /run 1\.\.3/);
+	const offBranch = resultError(await call(captured, "history_read", { seq: 2 }, ctx));
+	assert.equal(offBranch.code, "not_on_branch");
+	assert.match(offBranch.message, /another branch/);
+	assert.equal(JSON.stringify(offBranch).includes("abandoned"), false, "the refusal does not leak the abandoned entry's text");
+
+	const unknown = resultError(await call(captured, "history_read", { seq: 4 }, ctx));
+	assert.equal(unknown.code, "unknown_seq");
+	assert.match(unknown.message, /run 1\.\.3/);
+});
+
+test("a result address consumed by a pairing names its call instead of serving a second read", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	toolCall(session, "paired", "edit", { path: "a.md" });
+	toolResult(session, "paired", "edit", "edited");
+	// The assistant message takes seq 1 and its tool call seq 2; the result at seq 3 is absorbed.
+	assert.deepEqual(seqs(await call(captured, "history_list", { roles: ["tool"] }, ctx)), [2], "the pairing is one event at the call's address");
+
+	const consumed = resultError(await call(captured, "history_read", { seq: 3 }, ctx));
+	assert.equal(consumed.code, "not_an_event");
+	assert.match(consumed.message, /already shown inside the call at seq 2/);
+	assert.equal(consumed.details?.read_seq, 2, "the refusal names the address to read instead");
+
+	const callSeq = resultRead<{ seq: number; window_id: string }>(await call(captured, "history_read", { seq: 2 }, ctx));
+	assert.equal(callSeq.seq, 2);
+	assert.equal(callSeq.content, 'edit {"path":"a.md"}\n--- output ---\nedited');
 });
 
 test("anchor paging is chronological, stable under appends, and supports ranges", async () => {
@@ -92,24 +164,21 @@ test("anchor paging is chronological, stable under appends, and supports ranges"
 	const ctx = context(session);
 	for (let index = 1; index <= 5; index++) appendText(session, "user", `message-${index}`);
 
-	const tail = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_list", { limit: 2 }, ctx));
-	assert.deepEqual(tail.items.map((item) => item.seq), [4, 5]);
+	assert.deepEqual(seqs(await call(captured, "history_list", { limit: 2 }, ctx)), [4, 5]);
 	appendText(session, "user", "message-6");
-	const older = resultJson<{ items: Array<{ seq: number }>; older_before: number | null; newer_after: number | null }>(await call(captured, "history_list", { before: 5, limit: 2 }, ctx));
+	const older = page(await call(captured, "history_list", { before: 5, limit: 2 }, ctx));
 	assert.deepEqual(older.items.map((item) => item.seq), [3, 4]);
 	assert.equal(older.older_before, 3);
 	assert.equal(older.newer_after, null);
-	const newer = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_list", { after: 5, limit: 2 }, ctx));
-	assert.deepEqual(newer.items.map((item) => item.seq), [6]);
+	assert.deepEqual(seqs(await call(captured, "history_list", { after: 5, limit: 2 }, ctx)), [6]);
 	for (let index = 7; index <= 10; index++) appendText(session, "user", `message-${index}`);
-	const range = resultJson<{ items: Array<{ seq: number }>; older_before: number | null; newer_after: number | null }>(await call(captured, "history_list", { after: 2, before: 10, limit: 3 }, ctx));
+	const range = page(await call(captured, "history_list", { after: 2, before: 10, limit: 3 }, ctx));
 	assert.deepEqual(range.items.map((item) => item.seq), [3, 4, 5]);
 	assert.equal(range.older_before, null);
 	assert.equal(range.newer_after, 5);
-	const rangeNext = resultJson<{ items: Array<{ seq: number }>; newer_after: number | null }>(await call(captured, "history_list", { after: range.newer_after!, before: 10, limit: 3 }, ctx));
+	const rangeNext = page(await call(captured, "history_list", { after: range.newer_after!, before: 10, limit: 3 }, ctx));
 	assert.deepEqual(rangeNext.items.map((item) => item.seq), [6, 7, 8]);
-	assert.equal(rangeNext.newer_after, 8);
-	const rangeLast = resultJson<{ items: Array<{ seq: number }>; older_before: number | null; newer_after: number | null }>(await call(captured, "history_list", { after: rangeNext.newer_after!, before: 10, limit: 3 }, ctx));
+	const rangeLast = page(await call(captured, "history_list", { after: rangeNext.newer_after!, before: 10, limit: 3 }, ctx));
 	assert.deepEqual(rangeLast.items.map((item) => item.seq), [9]);
 	assert.equal(rangeLast.older_before, null);
 	assert.equal(rangeLast.newer_after, null);
@@ -119,13 +188,26 @@ test("anchor paging is chronological, stable under appends, and supports ranges"
 	assert.equal((captured.tools.get("history_list")?.parameters as { properties?: Record<string, { minimum?: number }> }).properties?.after?.minimum, 1);
 });
 
+test("a one-row page budget admits the newest candidate first", () => {
+	const windowId = "w1";
+	const items: DecodedHistoryItem[] = [1, 2, 3].map((seq) => ({ seq, windowId, role: "user", text: `message-${seq}`, createdAt: undefined }));
+	const projection = projectHistory([{ windowId, items }], 12, new Set([1, 2, 3]));
+	const candidates = projection.windows[0]!.items.map((event) => ({ event }));
+	const newestFirst = (fitsRows: number): number[] => {
+		const outcome = selectPage(projection, { limit: 3 }, candidates, false, (candidate: HistoryPage) => candidate.items.length <= fitsRows, 200);
+		assert.equal(outcome.ok, true);
+		return outcome.ok ? outcome.data.items.map((item) => ("folded" in item ? item.first_seq : item.seq)) : [];
+	};
+	assert.deepEqual(newestFirst(1), [3], "a budget for one row admits the newest candidate, not the oldest");
+	assert.deepEqual(newestFirst(2), [2, 3], "a truncated prefix is the newest rows, delivered in chronological order");
+});
+
 test("conversation view folds tools and injected messages, while explicit roles expand them", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	appendText(session, "user", "please inspect");
-	type AppendableMessage = Parameters<SessionManager["appendMessage"]>[0];
-	const turnId = session.appendMessage({
+	const turnId = append(session, {
 		role: "assistant",
 		content: [
 			{ type: "text", text: "I will inspect" },
@@ -134,13 +216,13 @@ test("conversation view folds tools and injected messages, while explicit roles 
 		],
 		stopReason: "toolUse",
 		timestamp: Date.now(),
-	} as unknown as AppendableMessage);
-	session.appendMessage({ role: "toolResult", toolCallId: "tc-1", toolName: "bash", content: [{ type: "text", text: "ok" }], isError: false, timestamp: Date.now() } as unknown as AppendableMessage);
-	session.appendMessage({ role: "toolResult", toolCallId: "tc-2", toolName: "read", content: [{ type: "text", text: "contents" }], isError: false, timestamp: Date.now() } as unknown as AppendableMessage);
+	});
+	toolResult(session, "tc-1", "bash", "ok");
+	toolResult(session, "tc-2", "read", "contents");
 	session.appendCustomMessageEntry("square", "injected event", false);
-	session.appendMessage({ role: "assistant", content: [], stopReason: "toolUse", timestamp: Date.now() } as unknown as AppendableMessage);
+	append(session, { role: "assistant", content: [], stopReason: "toolUse", timestamp: Date.now() });
 
-	const conversation = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_list", {}, ctx));
+	const conversation = page(await call(captured, "history_list", {}, ctx));
 	const legacyItemKey = ["item", "id"].join("_");
 	assert.equal(conversation.items.some((item) => item.folded === true), true);
 	assert.equal(conversation.items.some((item) => item.role === "developer"), false);
@@ -149,81 +231,169 @@ test("conversation view folds tools and injected messages, while explicit roles 
 	assert.equal(conversation.items.every((item) => legacyItemKey in item === false), true);
 	const folded = conversation.items.find((item) => item.folded === true)!;
 	assert.equal(folded.count, 3, "two tool events and one injected context are folded, not the empty assistant message");
-	assert.equal((folded.tools as Record<string, number>).bash, 1);
-	assert.equal((folded.tools as Record<string, number>).read, 1);
+	assert.deepEqual(folded.tools, { bash: 1, read: 1 });
 	assert.equal("custom_types" in folded, false);
 
-	const empty = resultJson<{ items: unknown[]; older_before: number | null; newer_after: number | null }>(await call(captured, "history_list", { roles: ["context"], before: 2 }, ctx));
+	const empty = page(await call(captured, "history_list", { roles: ["context"], before: 2 }, ctx));
 	assert.deepEqual(empty.items, []);
-	assert.equal(empty.older_before, null);
-	assert.equal(empty.newer_after, null);
-	const hiddenOnly = resultJson<{ items: Array<{ folded?: boolean; first_seq?: number; last_seq?: number; count?: number; tools?: Record<string, number> }> }>(await call(captured, "history_list", { after: 2, before: 6 }, ctx));
+	const hiddenOnly = page(await call(captured, "history_list", { after: 2, before: 6 }, ctx));
 	assert.deepEqual(hiddenOnly.items, [{ folded: true, first_seq: 3, last_seq: 4, count: 2, tools: { bash: 1, read: 1 } }]);
 
-	const expanded = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_list", { roles: ["tool"] }, ctx));
-	assert.deepEqual(expanded.items.map((item) => [item.seq, item.role, item.tool]), [[3, "tool", "bash"], [4, "tool", "read"]]);
-	assert.equal(expanded.items[0]?.content, 'bash {"command":"pwd"}\n--- output ---\nok');
-	assert.equal(expanded.items[1]?.content, 'read {"path":"README.md"}\n--- output ---\ncontents');
-	assert.equal(expanded.items.every((item) => !('call_seq' in item || 'result_seq' in item || 'tool_name' in item)), true);
+	const expanded = page(await call(captured, "history_list", { roles: ["tool"] }, ctx));
+	assert.deepEqual(expanded.items.map((item) => [item.seq, item.role, item.tool, item.tool_status]), [[3, "tool", "bash", "ok"], [4, "tool", "read", "ok"]]);
+	assert.equal(expanded.items[0]!.content, 'bash {"command":"pwd"}\n--- output ---\nok');
+	assert.equal(expanded.items[1]!.content, 'read {"path":"README.md"}\n--- output ---\ncontents');
+	assert.equal(expanded.items.every((item) => !("call_seq" in item || "result_seq" in item || "tool_name" in item)), true);
 
-	const bashOnly = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_search", { query: "bash", roles: ["tool"] }, ctx));
-	assert.deepEqual(bashOnly.items.map((item) => item.seq), [3]);
-
-	const injected = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_list", { roles: ["context"] }, ctx));
+	assert.deepEqual(seqs(await call(captured, "history_search", { query: "bash", roles: ["tool"] }, ctx)), [3]);
+	const injected = page(await call(captured, "history_list", { roles: ["context"] }, ctx));
 	assert.deepEqual(injected.items.map((item) => [item.role, item.content]), [["context", "injected event"]]);
-	assert.equal("custom_type" in injected.items[0]!, false);
 	assert.equal(turnId.length > 0, true);
 });
 
-test("tool events pair calls/results; pending and orphan runs remain readable", async () => {
+test("tool events expose typed execution facts; pending and orphan runs read truthfully", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
-	type Message = Parameters<SessionManager["appendMessage"]>[0];
-	session.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: "paired", name: "edit", arguments: { path: "😀.md", oldText: "before" } }], stopReason: "toolUse", timestamp: Date.now() } as unknown as Message);
-	session.appendMessage({ role: "toolResult", toolCallId: "paired", toolName: "edit", content: [{ type: "text", text: "replacement OK" }], isError: true, timestamp: Date.now() } as Message);
-	session.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: "pending", name: "edit", arguments: { path: "pending.md" } }], stopReason: "toolUse", timestamp: Date.now() } as unknown as Message);
-	session.appendMessage({ role: "toolResult", toolCallId: "orphan", toolName: "edit", content: [{ type: "text", text: "orphan output" }], isError: false, timestamp: Date.now() } as Message);
-	const events = resultJson<{ items: Array<{ seq: number; role: string; tool: string; content: string; tool_error?: boolean; tool_name?: string }> }>(await call(captured, "history_list", { roles: ["tool"] }, ctx));
-	assert.deepEqual(events.items.map(({ seq, role }) => [seq, role]), [[2, "tool"], [5, "tool"], [6, "tool"]]);
+	append(session, { role: "assistant", content: [{ type: "toolCall", id: "paired", name: "edit", arguments: { path: "😀.md", oldText: "before" } }], stopReason: "toolUse", timestamp: Date.now() });
+	toolResult(session, "paired", "edit", "replacement OK", { isError: true });
+	append(session, { role: "assistant", content: [{ type: "toolCall", id: "pending", name: "edit", arguments: { path: "pending.md" } }], stopReason: "toolUse", timestamp: Date.now() });
+	toolResult(session, "orphan", "edit", "orphan output", {
+		nestedCalls: { complete: true, calls: [{ id: "orphan/1", name: "read", arguments: { path: "orphan-nested.md" }, status: "ok" }] },
+	});
+
+	const events = page(await call(captured, "history_list", { roles: ["tool"] }, ctx));
+	// The orphan result ran and succeeded; nothing about its missing call changes that. Only the
+	// pending call, which no result ended, is unfinished.
+	assert.deepEqual(events.items.map((item) => [item.seq, item.tool_status]), [[2, "error"], [5, "unfinished"], [6, "ok"]]);
 	assert.equal(events.items[0]!.content, 'edit {"path":"😀.md","oldText":"before"}\n--- output ---\nreplacement OK');
-	assert.equal(events.items[0]!.tool_error, true);
-	assert.equal(events.items[1]!.content, 'edit {"path":"pending.md"}');
-	assert.equal(events.items[2]!.content, 'edit {}\n--- output ---\norphan output');
-	assert.equal(events.items.every((item) => item.tool === "edit" && item.tool_name === undefined), true);
-	const match = resultJson<{ items: Array<{ seq: number; offset_chars: number; content: string }> }>(await call(captured, "history_search", { query: "replacement ok", roles: ["tool"], max_chars_per_item: 14 }, ctx));
-	assert.deepEqual(match.items.map((item) => item.seq), [2]);
-	assert.equal(match.items[0]!.content, "replacement OK");
-	const fromMatch = resultRead(await call(captured, "history_read", { seq: match.items[0]!.seq, offset_chars: match.items[0]!.offset_chars }, ctx));
-	assert.equal(fromMatch.content, "replacement OK");
-	const alias = resultRead(await call(captured, "history_read", { seq: 3 }, ctx));
-	assert.equal(alias.header.includes("seq: 2\n"), true);
-	assert.equal(alias.content, events.items[0]!.content);
-	const byTool = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_search", { query: "edit", roles: ["tool"] }, ctx));
-	assert.deepEqual(byTool.items.map((item) => item.seq), [2, 5, 6]);
-	const byArgs = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_search", { query: "pending.md", roles: ["tool"] }, ctx));
-	assert.deepEqual(byArgs.items.map((item) => item.seq), [5]);
-	const byOutput = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_search", { query: "orphan output", roles: ["tool"] }, ctx));
-	assert.deepEqual(byOutput.items.map((item) => item.seq), [6]);
+	assert.equal(events.items[1]!.content, 'edit {"path":"pending.md"}', "an unfinished call claims no output");
+	assert.equal(events.items[2]!.content, 'edit (arguments not recorded)\n--- output ---\norphan output\n--- nested calls (complete, 1 recorded) ---\n- read [ok] {"path":"orphan-nested.md"}', "an orphan result invents no arguments, and keeps the nested evidence the host recorded");
+	assert.deepEqual(events.items[2]!.nested_calls, { call_count: 1, complete: true }, "an orphan's nested records are counted on its row like any other run's");
+
+	const errored = resultRead<{ seq: number; execution: { name: string; status: string; arguments: Record<string, unknown> } }>(await call(captured, "history_read", { seq: 2 }, ctx));
+	assert.deepEqual(errored.execution, { name: "edit", status: "error", arguments: { path: "😀.md", oldText: "before" } });
+	assert.equal("output" in errored.execution, false, "the run's output text is the window, not a field of execution");
+
+	const pending = resultRead<{ execution: { status: string } }>(await call(captured, "history_read", { seq: 5 }, ctx));
+	assert.equal(pending.execution.status, "unfinished");
+
+	const orphan = resultRead<{ execution: { nestedCalls: { calls: Array<Record<string, unknown>>; complete: boolean } } }>(await call(captured, "history_read", { seq: 6 }, ctx));
+	assert.deepEqual(orphan.execution.nestedCalls, { calls: [{ id: "orphan/1", name: "read", arguments: { path: "orphan-nested.md" }, status: "ok" }], complete: true }, "an orphan's nested records are readable evidence, not a gap left by the missing call");
+
+	assert.deepEqual(seqs(await call(captured, "history_search", { query: "edit", roles: ["tool"] }, ctx)), [2, 5, 6]);
+	assert.deepEqual(seqs(await call(captured, "history_search", { query: "pending.md", roles: ["tool"] }, ctx)), [5]);
+	assert.deepEqual(seqs(await call(captured, "history_search", { query: "orphan output", roles: ["tool"] }, ctx)), [6]);
+	assert.deepEqual(seqs(await call(captured, "history_search", { query: "orphan-nested.md", roles: ["tool"] }, ctx)), [6], "nested evidence is searchable even when the call it belongs to was never recorded");
+});
+
+test("native nested-call records are searchable, readable, and never gain a result or an address", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	toolCall(session, "codemode", "codemode", { script: "run()" });
+	toolResult(session, "codemode", "codemode", "script finished", {
+		nestedCalls: {
+			complete: false,
+			calls: [
+				{ id: "codemode/1", name: "read", arguments: { path: "nested-needle.md" }, status: "ok", durationMs: 12 },
+				{ id: "codemode/2", name: "bash", status: "error", durationMs: 4, error: "exit 1" },
+				{ id: "codemode/3", name: "spawn", status: "unfinished" },
+			],
+		},
+	});
+
+	const found = page(await call(captured, "history_search", { query: "nested-needle" }, ctx));
+	assert.deepEqual(found.items.map((item) => item.seq), [2], "nested arguments are part of the searchable document");
+	const row = found.items[0]!;
+	assert.deepEqual(row.nested_calls, { call_count: 3, complete: false }, "the list row reports counts and the host's own completeness flag");
+
+	const read = resultRead<{ execution: { name: string; status: string; nestedCalls: { calls: Array<Record<string, unknown>>; complete: boolean; trimmed?: boolean } } }>(await call(captured, "history_read", { seq: 2 }, ctx));
+	const calls = read.execution.nestedCalls.calls;
+	assert.equal(calls.length, 3);
+	assert.deepEqual(calls[0], { id: "codemode/1", name: "read", arguments: { path: "nested-needle.md" }, status: "ok", durationMs: 12 });
+	assert.deepEqual(calls[1], { id: "codemode/2", name: "bash", status: "error", durationMs: 4, error: "exit 1" });
+	assert.deepEqual(calls[2], { id: "codemode/3", name: "spawn", status: "unfinished" });
+	assert.equal(read.execution.nestedCalls.complete, false, "an incomplete host record stays incomplete");
+	assert.equal(read.execution.nestedCalls.trimmed, undefined, "three records are inside the bound, so nothing is withheld");
+	for (const call of calls) {
+		assert.equal("result" in call, false, "a nested record carries no result body; the host stores none");
+		assert.equal("output" in call, false);
+		assert.equal("seq" in call, false, "a nested record carries no history address");
+	}
+	const rendered = read.content;
+	for (const [needle, offset] of [["nested-needle.md", earliestMatchOffsetChars(read.content, ["nested-needle.md"])], ["exit 1", earliestMatchOffsetChars(read.content, ["exit 1"])], ["unfinished", earliestMatchOffsetChars(read.content, ["unfinished"])]] as const) {
+		assert.ok(offset >= 0 && rendered.slice(offset).startsWith(needle), `nested evidence "${needle}" is readable in the document`);
+	}
+});
+
+test("absent nested calls mean unavailable, not a known-empty record", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	toolCall(session, "plain", "read", { path: "a.md" });
+	toolResult(session, "plain", "read", "contents");
+	const listed = page(await call(captured, "history_list", { roles: ["tool"] }, ctx));
+	assert.equal("nested_calls" in listed.items[0]!, false, "no record is reported as empty when none was recorded");
+	const read = resultRead<{ execution: Record<string, unknown> }>(await call(captured, "history_read", { seq: 2 }, ctx));
+	assert.equal("nestedCalls" in read.execution, false);
+	assert.equal(read.content.includes("nested calls"), false);
+});
+
+test("oversized arguments and long nested records are withheld whole and named", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const huge = "x".repeat(TOOL_OUTPUT_MAX_BYTES * 2);
+	toolCall(session, "big", "write", { path: "big.md", content: huge });
+	toolResult(session, "big", "write", "written", {
+		nestedCalls: {
+			complete: true,
+			calls: Array.from({ length: 400 }, (_, index) => ({ id: `big/${index}`, name: "read", arguments: { path: `p${index}.md` }, status: "ok" as const, durationMs: 1 })),
+		},
+	});
+
+	const listed = page(await call(captured, "history_list", { roles: ["tool"] }, ctx));
+	assert.deepEqual(listed.items[0]!.nested_calls, { call_count: 400, complete: true }, "the page row counts every recorded call, not only the records one read can carry");
+	const read = resultRead<{ execution: { argumentsBytes?: number; arguments?: unknown; nestedCalls: { calls: unknown[]; complete: boolean; trimmed?: boolean; omittedCalls?: number } } }>(await call(captured, "history_read", { seq: 2 }, ctx));
+	assert.equal(read.execution.arguments, undefined, "the oversized arguments object is withheld whole");
+	assert.equal(typeof read.execution.argumentsBytes, "number");
+	assert.equal(read.execution.nestedCalls.complete, true, "the host's completeness flag is preserved as recorded");
+	assert.equal(read.execution.nestedCalls.trimmed, true);
+	assert.ok(read.execution.nestedCalls.calls.length < 400, "the read is what gets trimmed");
+	assert.equal(read.execution.nestedCalls.calls.length + (read.execution.nestedCalls.omittedCalls ?? 0), 400, "every record is accounted for");
+	assertWithinBudget(await call(captured, "history_read", { seq: 2 }, ctx), "bounded execution metadata");
+	assertWithinBudget(await call(captured, "history_list", { roles: ["tool"] }, ctx), "bounded list row");
+
+	const searchHit = page(await call(captured, "history_search", { query: "big.md", max_chars_per_item: 40 }, ctx));
+	assert.deepEqual(searchHit.items.map((item) => item.seq), [2], "the document still carries the real arguments, so search still finds them");
 });
 
 test("standalone bash execution retains command, output, and truncation path", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
-	type Message = Parameters<SessionManager["appendMessage"]>[0];
-	session.appendMessage({ role: "bashExecution", command: "echo needle", output: "needle output", truncated: true, fullOutputPath: "/tmp/bash-output.txt", timestamp: Date.now() } as unknown as Message);
-	const found = resultJson<{ items: Array<{ seq: number; window_id: string; role: string; created_at: string | null; tool: string; content: string; truncated: boolean; total_chars: number; output_truncated?: boolean; full_output_path?: string }> }>(await call(captured, "history_list", { roles: ["tool"] }, ctx));
+	append(session, { role: "bashExecution", command: "echo needle", output: "needle output", exitCode: 0, cancelled: false, truncated: true, fullOutputPath: "/tmp/bash-output.txt", timestamp: Date.now() });
+	const found = page(await call(captured, "history_list", { roles: ["tool"] }, ctx));
 	assert.equal(found.items.length, 1);
 	assert.deepEqual(found.items[0], {
-		seq: 1, window_id: found.items[0]!.window_id, role: "tool", created_at: found.items[0]!.created_at,
-		tool: "bash", output_truncated: true, full_output_path: "/tmp/bash-output.txt",
-		truncated: false, total_chars: 59, content: 'bash {"command":"echo needle"}\n--- output ---\nneedle output',
+		seq: 1,
+		window_id: found.items[0]!.window_id,
+		role: "tool",
+		created_at: found.items[0]!.created_at,
+		tool: "bash",
+		tool_status: "ok",
+		output_truncated: true,
+		full_output_path: "/tmp/bash-output.txt",
+		truncated: false,
+		total_chars: 59,
+		content: 'bash {"command":"echo needle"}\n--- output ---\nneedle output',
 	});
-	const query = resultJson<{ items: Array<{ seq: number; offset_chars: number }> }>(await call(captured, "history_search", { roles: ["tool"], query: "NEEDLE OUTPUT" }, ctx));
+	const query = page(await call(captured, "history_search", { roles: ["tool"], query: "NEEDLE OUTPUT" }, ctx));
 	assert.deepEqual(query.items.map((item) => item.seq), [1]);
-	const read = resultRead(await call(captured, "history_read", { seq: 1, offset_chars: query.items[0]!.offset_chars }, ctx));
+	const read = resultRead<{ seq: number }>(await call(captured, "history_read", { seq: 1, offset_chars: query.items[0]!.offset_chars as number }, ctx));
 	assert.equal(read.content, "needle output");
+	assert.equal(read.seq, 1);
 });
 
 test("compaction summary becomes context and is folded in the default list", async () => {
@@ -233,12 +403,12 @@ test("compaction summary becomes context and is folded in the default list", asy
 	appendText(session, "user", "before checkpoint");
 	session.appendCompaction("summary needle", session.getLeafId()!, 100);
 	appendText(session, "assistant", "after checkpoint");
-	const regular = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_list", {}, ctx));
+	const regular = page(await call(captured, "history_list", {}, ctx));
 	assert.deepEqual(regular.items.map((item) => item.folded ? "folded" : item.role), ["user", "folded", "assistant"]);
 	const folded = regular.items[1]!;
 	assert.equal(folded.count, 1);
 	assert.deepEqual(folded.tools, {});
-	const contextItems = resultJson<{ items: Array<{ role: string; content: string }> }>(await call(captured, "history_list", { roles: ["context"] }, ctx));
+	const contextItems = page(await call(captured, "history_list", { roles: ["context"] }, ctx));
 	assert.deepEqual(contextItems.items.map((item) => [item.role, item.content]), [["context", "summary needle"]]);
 });
 
@@ -249,16 +419,20 @@ test("search covers all roles, supports filters and anchor paging", async () => 
 	appendText(session, "user", "visible needle");
 	session.appendCustomMessageEntry("pi-context/boot", "developer needle", false);
 	appendText(session, "assistant", "assistant needle");
-	const all = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_search", { query: "needle" }, ctx));
+	const all = page(await call(captured, "history_search", { query: "needle" }, ctx));
 	assert.deepEqual(all.items.map((item) => item.role), ["user", "context", "assistant"]);
 	assert.ok(all.items.every((item) => typeof item.seq === "number" && typeof item.offset_chars === "number"));
-	const developers = resultJson<{ items: Array<Record<string, unknown>> }>(await call(captured, "history_search", { query: "needle", roles: ["context"] }, ctx));
+	const developers = page(await call(captured, "history_search", { query: "needle", roles: ["context"] }, ctx));
 	assert.deepEqual(developers.items.map((item) => item.role), ["context"]);
 	assert.equal("custom_type" in developers.items[0]!, false);
-	const first = resultJson<{ items: Array<{ seq: number }>; older_before: number | null; newer_after: number | null }>(await call(captured, "history_search", { query: "needle", after: 1, limit: 1 }, ctx));
+	const first = page(await call(captured, "history_search", { query: "needle", after: 1, limit: 1 }, ctx));
 	assert.equal(first.items.length, 1);
-	const next = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_search", { query: "needle", after: first.items[0]!.seq, limit: 2 }, ctx));
+	const next = page(await call(captured, "history_search", { query: "needle", after: first.items[0]!.seq as number, limit: 2 }, ctx));
 	assert.equal(next.items.length, 1);
+	const absent = await call(captured, "history_search", { query: "absent" }, ctx);
+	assert.deepEqual(page(absent).items, []);
+	assert.equal(rendered(absent), "no events match this selection", "an empty page says so instead of rendering nothing");
+	assert.deepEqual(resultError(await call(captured, "history_search", { query: "" }, ctx)).code, "invalid_query");
 });
 
 test("search keeps exclusive bounds and follows newer_after through three pages", async () => {
@@ -266,57 +440,85 @@ test("search keeps exclusive bounds and follows newer_after through three pages"
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	for (let seq = 1; seq <= 10; seq++) appendText(session, "user", `needle ${seq}`);
-	const first = resultJson<{ items: Array<{ seq: number }>; older_before: number | null; newer_after: number | null }>(await call(captured, "history_search", { query: "needle", after: 2, before: 10, limit: 3 }, ctx));
+	const first = page(await call(captured, "history_search", { query: "needle", after: 2, before: 10, limit: 3 }, ctx));
 	assert.deepEqual(first.items.map((item) => item.seq), [3, 4, 5]);
 	assert.equal(first.older_before, null);
 	assert.equal(first.newer_after, 5);
-	const second = resultJson<typeof first>(await call(captured, "history_search", { query: "needle", after: first.newer_after!, before: 10, limit: 3 }, ctx));
+	const second = page(await call(captured, "history_search", { query: "needle", after: first.newer_after!, before: 10, limit: 3 }, ctx));
 	assert.deepEqual(second.items.map((item) => item.seq), [6, 7, 8]);
-	assert.equal(second.newer_after, 8);
-	const third = resultJson<typeof first>(await call(captured, "history_search", { query: "needle", after: second.newer_after!, before: 10, limit: 3 }, ctx));
+	const third = page(await call(captured, "history_search", { query: "needle", after: second.newer_after!, before: 10, limit: 3 }, ctx));
 	assert.deepEqual(third.items.map((item) => item.seq), [9]);
 	assert.equal(third.newer_after, null);
 });
 
-test("search previews start at case-insensitive literal matches and offsets read original Unicode text", async () => {
+test("search previews start at case-insensitive literal matches and offsets read the same Unicode document", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	const prefix = "😀İ".repeat(1000);
 	appendText(session, "user", prefix + "NeEdLe.* trailing");
-	const found = resultJson<{ items: Array<{ seq: number; offset_chars: number; content: string; total_chars: number; truncated: boolean; match_offset_chars?: number }> }>(await call(captured, "history_search", { query: ["absent", "needle.*"], max_chars_per_item: 8 }, ctx));
+	const found = page(await call(captured, "history_search", { query: ["absent", "needle.*"], max_chars_per_item: 8 }, ctx));
 	assert.equal(found.items.length, 1);
 	const hit = found.items[0]!;
 	assert.equal(hit.offset_chars, 2000);
-	assert.equal(hit.match_offset_chars, undefined);
+	assert.equal("match_offset_chars" in hit, false);
 	assert.equal(hit.content, "NeEdLe.*");
 	assert.equal(hit.truncated, true);
 	assert.equal(hit.total_chars, 2017);
-	const read = resultRead(await call(captured, "history_read", { seq: hit.seq, offset_chars: hit.offset_chars, limit_chars: 8 }, ctx));
+	const read = resultRead<{ seq: number }>(await call(captured, "history_read", { seq: hit.seq as number, offset_chars: hit.offset_chars as number, limit_chars: 8 }, ctx));
 	assert.equal(read.content, hit.content);
-	const noMatch = resultJson<{ items: unknown[] }>(await call(captured, "history_search", { query: "needle.+" }, ctx));
-	assert.deepEqual(noMatch.items, []);
+	const listed = page(await call(captured, "history_list", { max_chars_per_item: 8 }, ctx));
+	assert.equal(listed.items.length, 1);
+	assert.equal("offset_chars" in listed.items[0]!, false, "a list preview reports no match offset");
+	const atStart = page(await call(captured, "history_search", { query: "😀", max_chars_per_item: 4 }, ctx));
+	const zero = atStart.items[0]!;
+	assert.equal(zero.offset_chars, 0, "a match at the document start reports an explicit zero offset");
+	assert.equal(zero.content, "😀İ😀İ", "an explicit zero offset still previews from the document start");
+	assert.equal(zero.truncated, true);
+	assert.equal(zero.total_chars, 2017);
+	assert.deepEqual(page(await call(captured, "history_search", { query: "needle.+" }, ctx)).items, []);
 });
 
-test("history_read uses seq and preserves the shared character-window contract", async () => {
+test("history_read paginates one document with an accurate limit and a bounded byte cap", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	const content = "z".repeat(TOOL_OUTPUT_MAX_BYTES * 2);
 	appendText(session, "user", content);
-	const listed = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_list", { max_chars_per_item: 1 }, ctx));
-	const seq = listed.items[0]!.seq;
-	const raw = await call(captured, "history_read", { seq, limit_chars: 50_000 }, ctx);
-	assertWithinBudget(raw, "history_read page");
-	const read = resultRead(raw);
-	assert.ok(read.content.length > 0);
-	assert.equal(read.header.startsWith(`--- READ WINDOW ---\nseq: ${seq}\nwindow_id: `), true);
-	assert.deepEqual(Object.keys(read.details), ["seq", "window_id", "offset_chars", "total_chars", "next_offset_chars"]);
+	const seq = seqs(await call(captured, "history_list", { max_chars_per_item: 1 }, ctx))[0]!;
+
+	// 50k requested chars of 64 KiB of text exceeds the byte cap, so the delivered slice stops short
+	// of the request rather than at it.
+	const full = await call(captured, "history_read", { seq, limit_chars: 50_000 }, ctx);
+	assertWithinBudget(full, "history_read page");
+	const read = resultRead<{ seq: number; window_id: string }>(full);
+	assert.equal(read.seq, seq);
+	assert.ok(read.window_id.length > 0);
 	assert.equal(read.total_chars, content.length);
-	const next = read.next_offset_chars;
-	assert.ok(next !== null);
-	const second = resultRead(await call(captured, "history_read", { seq, offset_chars: next, limit_chars: 50_000 }, ctx));
-	assert.equal(read.content + second.content, content.slice(0, read.content.length + second.content.length));
+	assert.equal(read.content, content.slice(0, read.content.length), "the delivered slice is a verbatim prefix");
+	assert.equal(read.next_offset_chars !== null, true);
+	const text = full.content[0]!;
+	assert.equal(text.type === "text" && text.text.includes("READ WINDOW"), false, "no READ WINDOW block survives");
+	assert.match(text.type === "text" ? text.text : "", /\(32KB limit\)\. Use offset_chars=\d+ to continue\.\]$/, "the byte cap is stated as a continuation suffix");
+
+	const next = resultRead(await call(captured, "history_read", { seq, offset_chars: read.next_offset_chars!, limit_chars: 50_000 }, ctx));
+	assert.equal(read.content + next.content, content.slice(0, read.content.length + next.content.length));
+	assert.equal(read.next_offset_chars, next.offset_chars, "the cursor addresses the first undelivered character");
+
+	const limited = resultRead(await call(captured, "history_read", { seq, limit_chars: 10 }, ctx));
+	assert.equal(limited.limited_by, "limit", "a window inside the budget stops at the requested count");
+	assert.equal(limited.content, "z".repeat(10));
+	const limitedText = (await call(captured, "history_read", { seq, limit_chars: 10 }, ctx)).content[0]!;
+	const limitedSuffix = `\n\n[${content.length - 10} more characters. Use offset_chars=10 to continue.]`;
+	assert.equal(limitedText.type === "text" && limitedText.text.endsWith(limitedSuffix), true, "a count-limited window states what remains and where to resume");
+
+	const tail = resultRead(await call(captured, "history_read", { seq, offset_chars: -10 }, ctx));
+	assert.equal(tail.offset_chars, content.length - 10);
+	assert.equal(tail.content, "z".repeat(10));
+	assert.equal(tail.next_offset_chars, null, "the true end has no continuation");
+	const past = resultError(await call(captured, "history_read", { seq, offset_chars: content.length + 1 }, ctx));
+	assert.equal(past.code, "invalid_offset");
+	assert.equal(past.details?.total_chars, content.length);
 });
 
 test("history windows expose stable ranges and session identity", async () => {
@@ -324,8 +526,50 @@ test("history windows expose stable ranges and session identity", async () => {
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	appendText(session, "user", "before");
-	const windows = resultJson<{ session_id: string; windows: Array<{ window_id: string; first_seq: number | null; last_seq: number | null; item_count: number }> }>(await call(captured, "history_windows", {}, ctx));
+	const windows = resultData<{ session_id: string; windows: Array<{ window_id: string; first_seq: number | null; last_seq: number | null; item_count: number }> }>(await call(captured, "history_windows", {}, ctx));
 	assert.equal(windows.session_id, session.getSessionId());
 	assert.equal(windows.windows.length, 1);
 	assert.deepEqual(windows.windows[0], { window_id: windows.windows[0]!.window_id, created_at: null, first_seq: 1, last_seq: 1, item_count: 1 });
+});
+
+test("historyDocument is one deterministic projection of the facts, with no UI header or continuation suffix", async () => {
+	const windowId = "w1";
+	const items: DecodedHistoryItem[] = [
+		{ seq: 2, windowId, role: "user", text: "hello", createdAt: undefined },
+		{ seq: 5, windowId, role: "tool_call", text: "", toolName: "read", toolCallId: "call", createdAt: undefined, arguments: { path: "one" } },
+		{ seq: 6, windowId, role: "tool", text: "😀 needle", toolName: "read", toolCallId: "call", createdAt: undefined },
+		{ seq: 9, windowId, role: "assistant", text: "done", createdAt: undefined },
+	];
+	const projection = projectHistory([{ windowId, items }], 12, new Set([2, 5, 6, 9]));
+	assert.deepEqual([...projection.pairedResults], [[6, 5]], "the pairing consumes the result address instead of aliasing it");
+	assert.deepEqual(projection.windows[0]!.items.map((event) => event.seq), [2, 5, 9], "projection does not allocate or renumber native addresses");
+	const tool = projection.windows[0]!.items[1]!;
+	assert.equal(historyDocument(tool), 'read {"path":"one"}\n--- output ---\n😀 needle');
+	assert.equal(historyDocument(projection.windows[0]!.items[0]!), "hello");
+	assert.equal(historyDocument(tool).includes("READ WINDOW"), false);
+	assert.equal(historyDocument(tool).includes("offset_chars"), false);
+	assert.equal(historyDocument(tool).includes("seq "), false, "the document carries no UI identity block");
+
+	const search = await historySearch.execute({ query: "NEEDLE" }, projection);
+	assert.equal(search.ok, true);
+	if (search.ok) {
+		const hit = search.data.items[0] as { seq: number; offset_chars?: number };
+		assert.equal(hit.seq, 5);
+		assert.equal(hit.offset_chars, earliestMatchOffsetChars('read {"path":"one"}\n--- output ---\n😀 needle', ["NEEDLE"]));
+	}
+	const consumed = await historyRead.execute({ seq: 6 }, projection);
+	assert.equal(consumed.ok, false);
+	if (!consumed.ok) assert.equal(consumed.error.code, "not_an_event");
+	const offBranch = await historyRead.execute({ seq: 12 }, projection);
+	assert.equal(offBranch.ok, false);
+	if (!offBranch.ok) assert.match(offBranch.error.message, /another branch/);
+	const unknown = await historyRead.execute({ seq: 13 }, projection);
+	assert.equal(unknown.ok, false);
+	if (!unknown.ok) assert.match(unknown.error.message, /unknown seq/);
+	const listed = await historyList.execute({}, projection);
+	assert.equal(listed.ok, true);
+	if (listed.ok) assert.equal(listed.data.items.some((item) => "folded" in item && item.count === 1), true);
+	const windows = await historyWindows.execute({}, projection, "session-x");
+	assert.equal(windows.ok, true);
+	if (windows.ok) assert.equal(windows.data.session_id, "session-x");
 });

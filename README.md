@@ -1,6 +1,6 @@
 # pi-context
 
-Codex-style context windows for [Pi](https://github.com/earendil-works/pi-mono): durable reset windows, session-history tools, and persistent notes — implemented entirely with public extension APIs. No Pi core modification required.
+Codex-style context windows for [Pi](https://github.com/earendil-works/pi): durable reset windows, session-history tools, and persistent notes — implemented entirely with public extension APIs. No Pi core modification required.
 
 ## Install
 
@@ -19,7 +19,7 @@ pi -e npm:@astrosheep/pi-context
 - **`wipe_memory`** — the model can request a fresh context window after completing a tool batch. Manual `/wipe-memory` arms a close-out that always ends in a stop: the hidden warning starts one turn when idle or steers a running turn, the agent closes out its notes, and the reset commits when the run settles. Abort and ordinary errors never count as completion; a manual overflow clears the window and stops without a recovery request. Raw conversation remains in the session and history_* tools, but is excluded from the next provider context.
 - **A boot block at every window head** — static once-per-window content (cache-stable) carrying the window identity, the recent-notes index, and a short protocol that teaches the model how to recover: notes for its own bookkeeping, history tools for everything before the reset. The five note homes are read once into that boot's snapshot; a home that is unavailable is omitted without blocking the window, and the boot says that `notes_list` can retry after recovery.
 - **Budget close-out** — one early reminder at the configured margin, followed (when automatic compaction is enabled) by a hidden warning above Pi's hard reserve. That warning allows a multi-turn close-out and, unlike manual `/wipe-memory` (which stops), continues in the fresh window. The hard reserve remains a separate safety reset.
-- **`get_context_remaining`** — the live context-budget countdown to the warning line (`reserve + 12,288`); the warning runway below that line is hidden, and unknown usage returns null.
+- **`get_context_remaining`** — the live context-budget countdown to the warning line (`reserve + 16,384`); the warning runway below that line is hidden, and unknown usage returns null.
 - **Nine history/notes tools** — Codex's History/Notes actions flattened into Pi's single tool namespace; notes are real markdown files under `~/.agents/notes` (`human/`, `project/`, `agents/`, `models/`, `pi/session/`):
 
 | Codex action | Pi tool |
@@ -35,7 +35,11 @@ pi -e npm:@astrosheep/pi-context
 | `notes.list` | `notes_list` |
 | `notes.search` | `notes_search` |
 
-The tool descriptions the model sees are the behavioral documentation: history is a seq-numbered stream of `user`, `assistant`, `tool` (call and result combined), and `context` (summaries and injected messages) events. `history_list` shows the newest conversation page by default, folding tool/context events; pass `roles` to expand exactly the selected types. Its `older_before`/`newer_after` response fields are ready to pass back as `before`/`after` while retaining the other filters and anchor. `history_search` finds case-insensitive literal text (including tool names, arguments, and output), previews from the earliest match, and returns `seq` plus `offset_chars` for `history_read`. The `content` field is an event preview; `history_read` returns the complete event text, and a previous result seq still resolves to its combined tool event. Notes listings are recent-first snapshots with a `more` count when the wire budget or limit leaves rows out; use `pattern` to narrow the address range. Note results use `address` as the sole home identity; both searches use case-insensitive literal substrings with multiple queries combined by OR; pass a search result's address (`address` or `seq`) and `offset_chars` to the corresponding read tool; both `notes_read` and `history_read` are character windows prefixed with the same `READ WINDOW` block, whose cursors reconstruct the source exactly when only the content after each block is concatenated; anything a response does not deliver is named by an explicit field.
+Notes/history tools use Pi 1.0's structured results: `{ ok: true, data }` on success or `{ ok: false, error: { code, message, details? } }` on failure. Codemode receives this object directly; ordinary model calls receive concise text rendered from the same bounded result. There is no string-return compatibility mode. See [Tool results](docs/tool-results.md).
+
+History is a seq-numbered stream of `user`, `assistant`, `tool` (call and result combined), and `context` (summaries and injected messages) events. `history_list` shows the newest conversation page by default, folding tool/context events; pass `roles` to expand selected types. `older_before`/`newer_after` are ready to pass back as `before`/`after` while retaining the filters and opposite anchor. `history_search` finds case-insensitive literal text in the event document, including recorded tool names, arguments, output and nested-call metadata. Its `seq` and `offset_chars` feed `history_read`. Only public event seqs are readable; a paired result does not introduce an alias address. Nested calls belong to their parent execution, have no independent seq, and never claim to contain unrecorded child outputs.
+
+Notes listings are recent-first snapshots with a `more` count when the output budget or limit leaves rows out; use `pattern` to narrow the range. Both searches accept one literal or several literals combined by OR. Notes reads separate metadata from the body; note search/read positions count Unicode code points in the **body only**, never in serialized frontmatter. History search/read positions count code points in the same deterministic event document. Both read tools return `data.window`; concatenate its `text` using `next_offset_chars` to continue. Text rendering places an actionable continuation notice after the payload only when more remains. The notice is not part of `window.text` or its character positions.
 
 - **Runtime toggle** — `/pi-context off` disables new automatic resets; `/pi-context on` re-enables them; bare `/pi-context` reports the current state. A durable reset marker remains in force when off, so disabling the extension does not resurrect history from an already-reset window.
 
@@ -58,7 +62,7 @@ The reminder threshold is Pi's compaction reserve plus a margin, configured unde
 }
 ```
 
-`reminder = reserveTokens + reminderMarginTokens`; with the defaults the early guidance fires 24,576 tokens above Pi's hard reserve. When automatic compaction is enabled, the shared close-out warning starts at `reserveTokens + 12,288`; the hard reserve is the final safety boundary.
+`reminder = reserveTokens + reminderMarginTokens`; with the defaults the early guidance fires 24,576 tokens above Pi's hard reserve. When automatic compaction is enabled, the shared close-out warning starts at `reserveTokens + 16,384`; the hard reserve is the final safety boundary.
 
 The dreamer model is configured under the same key. `--dreamer <model pattern>` on the `dream` CLI wins; otherwise a non-empty `pi-context.dreamer` string from settings applies; otherwise the automatic model is used. An invalid value (empty or not a string) is ignored with one warning.
 
@@ -97,7 +101,7 @@ await notes.write("@project/decisions.md", "Use a shared notes library.", { orig
 await notes.update("@project/decisions.md", [
   { oldText: "shared", newText: "host-independent" },
 ]);
-const note = await notes.read("@project/decisions.md"); // full text/body/metadata, or undefined
+const note = await notes.read("@project/decisions.md"); // body and metadata, or undefined
 const files = await notes.list({ pattern: "@project/**" });
 const matches = await notes.search(["library"]);
 ```
@@ -109,11 +113,11 @@ const matches = await notes.search(["library"]);
 `createNotesStore(identity)` snapshots the five required identity fields; changing the supplied object afterward does not retarget the store. It resolves `home` once, validates identity components, and creates no files until an operation needs to write. Create a new store to change identity. Multiple stores can use independent roots and identities without changing process environment.
 
 - `write(address, content, { origin? }?)` returns `Promise<{ meta, outcome }>` (`created`, `overwritten` or `uncrumpled`). Default origin is `self`; overwriting preserves creation time, existing project ownership, and unknown metadata, and always produces an uncrumpled note (it clears any `crumpledAt`).
-- `read(address)` returns `Promise<{ meta, body, text, resolvedScope } | undefined>`. **Reads update** `lastAccessed` and `accessCount` on disk; `text` includes frontmatter.
+- `read(address)` returns `Promise<{ meta, body, resolvedScope } | undefined>`. **Reads update** `lastAccessed` and `accessCount` on disk. The body is separate from metadata; the serialized frontmatter is not part of the read API.
 - `update(address, edits?, { origin?, crumpled?, replaceAll? }?)` returns `Promise<{ meta, applied, resolvedScope, change }>`. Edits affect the body; metadata-only changes need no edits, but must supply `origin` or `crumpled`. `crumpled: true` records `crumpledAt` (keeping the original time if already set); `crumpled: false` removes it; omitted leaves it unchanged. Crumpling and smoothing never change `updatedAt`, which tracks body or origin changes only. Each replacement uses the evolving body in array order; the complete batch is written atomically only after every edit succeeds. `change` is a typed `{ kind, before, after }`: `kind` is `body`, `metadata`, or `file` to identify the diff inputs, or `none` with empty strings when neither body, origin, nor `crumpledAt` changed. It is not a rendered diff.
 - `rename(fromAddress, toAddress)` returns `Promise<{ meta, replacedCrumpledTarget }>`. The note moves with every metadata key preserved (`updatedAt` is bumped); a live note at the target refuses with `already_exists`, a crumpled target is replaced, and renaming onto the same resolved path is `nothing_to_do`.
 - `list({ pattern?, scope?, who?, wastebasket? }?)` returns `Promise<NoteRow[]>`, sorted by update time descending with address tie-breaking. Rows contain address, scope, virtual path, metadata, body, and body byte size. `scope` narrows the five-home view; `who` names a concrete agent/model home. By default crumpled notes are excluded; `wastebasket: true` returns only crumpled notes instead.
-- `search(queries: string[], { pattern?, scope?, who?, wastebasket? }?)` returns `Promise<NoteSearchRow[]>`, sorted by address, with the same crumpled-note rule as `list`. Matching is case-insensitive literal OR over body lines; matches contain one-based `line`, `text`, and `offsetChars` into the serialized read text. Neither listing nor search increments access metadata.
+- `search(queries: string[], { pattern?, scope?, who?, wastebasket? }?)` returns `Promise<NoteSearchRow[]>`, sorted by address, with the same crumpled-note rule as `list`. Matching is case-insensitive literal OR over body lines; matches contain one-based `line`, `text`, and `offsetChars` into the body, excluding frontmatter. Neither listing nor search increments access metadata.
 
 `list` and `search` share the `NotesQuery` type. A merged query uses `{ pattern?, wastebasket? }`; a single-home query adds `scope`. Only `scope: "agent" | "model"` accepts `who`. TypeScript rejects combinations such as `{ scope: "project", who: "root" }`, and JavaScript callers receive a runtime refusal.
 
@@ -132,7 +136,7 @@ src/
   boot/                  # five-home snapshot and pure rendering with tool bindings
   history/               # decoded query projection, pairing, paging and folding
   budget/                # pure thresholds, countdown policy and reminder text
-  tools/                 # TypeBox schemas, business handlers and bounded text
+  tools/                 # operation schemas, typed outcomes and bounded presentation
   dream/                 # jail, deletion policy, locks, gates, audit, reports, doctor
   settings.ts            # SDK-independent settings keys and per-key parsing
   pi/                    # native integration, not part of /notes
@@ -147,7 +151,7 @@ src/
 
 The public runtime exports are `createNotesStore`, `NoteError`, `projectKey(cwd)`, and `slugify(value)`, alongside the API's TypeScript types. The factory and `projectKey` remain synchronous; `projectKey` provides the existing repository/worktree identity algorithm, while `slugify` normalizes an agent/model name. The six primary store methods return promises and use asynchronous filesystem operations. Path/glob helpers, serialization, validation internals and constants are implementation details, not exported through `/notes`.
 
-The Pi adapter supplies the root and live session/project/agent/model identity on each call. Tools and boot use the same storage implementation. Shared tool schemas use the direct runtime `typebox` dependency; their handlers accept explicit identities or decoded history projections. Pi owns registration, execution-context extraction and native edit diff rendering. Boot snapshot acquisition receives identity, a captured timestamp and an optional home loader; rendering receives explicit logical tool names. Native session traversal, stable seq allocation, branch selection and inference projection stay in Pi. Shared history is a query view, never a way to reconstruct inference messages. There are no compatibility shims or generic host runtime. Internal source paths are not the supported library API.
+The Pi adapter supplies the root and live session/project/agent/model identity on each call. Tools and boot use the same storage implementation. Shared tool schemas use `typebox`, declared as a peer supplied by Pi and as a dev dependency for standalone development; their handlers accept explicit identities or decoded history projections. Pi owns registration, execution-context extraction and native edit diff rendering. Boot snapshot acquisition receives identity, a captured timestamp and an optional home loader; rendering receives explicit logical tool names. Native session traversal, stable seq allocation, branch selection and inference projection stay in Pi. Shared history is a query view, never a way to reconstruct inference messages. There are no compatibility shims or generic host runtime. Internal source paths are not the supported library API.
 
 ## SDK integration
 

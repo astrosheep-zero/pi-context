@@ -1,4 +1,5 @@
 import type { NotesIdentity } from "../notes/identity.js";
+import { isFilesystemError } from "../notes/fs-error.js";
 import { createNotesStore, type NoteRow, type NotesQuery, type Scope } from "../notes/index.js";
 
 const NOTES_HOMES = [
@@ -36,8 +37,7 @@ export async function loadNotesSnapshot(identity: NotesIdentity, openedAt: numbe
 		try {
 			homes.set(home.scope, await load(home.scope));
 		} catch (error) {
-			const code = typeof error === "object" && error !== null ? (error as NodeJS.ErrnoException).code : undefined;
-			if (typeof code !== "string" || !/^E[A-Z0-9_]+$/.test(code) || code.startsWith("ERR_")) throw error;
+			if (!isFilesystemError(error)) throw error;
 			homes.set(home.scope, []);
 			unavailable.push(home);
 		}

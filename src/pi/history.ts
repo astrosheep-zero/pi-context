@@ -1,11 +1,21 @@
+/**
+ * Native history decoder. This lane owns nothing but the host boundary: it allocates the stable
+ * file-order seq, selects the active branch, and decodes session entries into typed facts. Pairing,
+ * bounding, and the readable projection belong to the shared domain in ../history/history.ts.
+ *
+ * The address contract is deliberate and unchanged in spirit: a seq is allocated from entry kind and
+ * role alone, never from visible content, so appending or branching never renumbers an existing
+ * address. What changed is that a result folded into a pairing no longer doubles as a second
+ * readable address for its call.
+ */
 import type { ToolCall } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { SessionReader } from "./session-reader.js";
 import { isWindowMarker, rootWindowId } from "./window.js";
-import { contentText, projectHistory, type HistoryItem, type HistoryProjection, type DecodedHistoryWindow } from "../history/history.js";
+import { contentText, projectHistory, type DecodedHistoryItem, type DecodedHistoryWindow, type HistoryProjection, type NestedCallRecord, type ToolCallStatus } from "../history/history.js";
 
-function mapRole(role: AgentMessage["role"]): HistoryItem["role"] | undefined {
+function mapRole(role: AgentMessage["role"]): DecodedHistoryItem["role"] | undefined {
 	if (role === "user" || role === "assistant") return role;
 	if (role === "toolResult" || role === "bashExecution") return "tool";
 	if (role === "custom") return "developer";
@@ -41,30 +51,49 @@ function messageContent(message: AgentMessage): string {
 	}
 }
 
-function toolInfo(message: AgentMessage): Pick<HistoryItem, "toolName" | "toolArgs" | "outputTruncated" | "fullOutputPath" | "toolError" | "toolCallId"> {
-	if (message.role === "bashExecution") {
-		// A truncated bash run is only half the record without the on-disk path: surface both.
-		return { toolName: "bash", toolArgs: JSON.stringify({ command: message.command }), outputTruncated: message.truncated || undefined, fullOutputPath: message.truncated ? message.fullOutputPath : undefined };
-	}
-	if (message.role !== "toolResult") return {};
-	return { toolName: message.toolName, toolCallId: message.toolCallId, toolError: message.isError === true ? true : undefined };
+/**
+ * Pass the host's nested-call record through as recorded. It is evidence about calls this run made,
+ * not a second transcript: the host stores no nested results, and this lane invents none.
+ */
+function nestedCallsOf(message: AgentMessage): { calls: NestedCallRecord[]; complete: boolean } | undefined {
+	if (message.role !== "toolResult" || message.nestedCalls === undefined) return undefined;
+	return { calls: message.nestedCalls.calls, complete: message.nestedCalls.complete };
 }
 
-function toolCallItems(windowId: string, entry: { id: string; timestamp?: string }, message: AgentMessage, entrySeq: number): HistoryItem[] {
+function toolInfo(message: AgentMessage): Pick<DecodedHistoryItem, "toolName" | "arguments" | "outputTruncated" | "fullOutputPath" | "toolError" | "toolCallId" | "nestedCalls" | "recordedStatus"> {
+	if (message.role === "bashExecution") {
+		// A standalone bash run records its own outcome, so its status is read here rather than
+		// inferred from a result message that will never arrive: a cancelled or nonzero run is an
+		// error, and a run with no recorded exit code stays unknown instead of being called ok.
+		const status: ToolCallStatus = message.cancelled === true ? "error" : typeof message.exitCode === "number" ? (message.exitCode === 0 ? "ok" : "error") : "unfinished";
+		// A truncated run is only half the record without the on-disk path: surface both.
+		return { toolName: "bash", arguments: { command: message.command }, recordedStatus: status, outputTruncated: message.truncated || undefined, fullOutputPath: message.truncated ? message.fullOutputPath : undefined };
+	}
+	if (message.role !== "toolResult") return {};
+	const nestedCalls = nestedCallsOf(message);
+	return {
+		toolName: message.toolName,
+		toolCallId: message.toolCallId,
+		toolError: message.isError === true ? true : undefined,
+		...(nestedCalls ? { nestedCalls } : {}),
+	};
+}
+
+function toolCallItems(windowId: string, entry: { id: string; timestamp?: string }, message: AgentMessage, entrySeq: number): DecodedHistoryItem[] {
 	if (message.role !== "assistant" || !Array.isArray(message.content)) return [];
-	const items: HistoryItem[] = [];
+	const items: DecodedHistoryItem[] = [];
 	let callIndex = 0;
 	for (const part of message.content) {
 		if (!isToolCall(part)) continue;
-		const callSeq = entrySeq + callIndex + 1;
 		items.push({
-			seq: callSeq,
+			seq: entrySeq + callIndex + 1,
 			windowId,
 			role: "tool_call",
-			content: JSON.stringify(part.arguments) ?? "{}",
+			text: "",
 			createdAt: entry.timestamp,
 			toolName: part.name,
 			toolCallId: part.id,
+			arguments: part.arguments,
 		});
 		callIndex += 1;
 	}
@@ -99,7 +128,7 @@ export function historyFromSession(ctx: SessionReader): HistoryProjection {
 		branchSeqs.add(entrySeq);
 
 		if (entry.type === "compaction" || entry.type === "branch_summary") {
-			window.items.push({ seq: entrySeq, windowId: window.windowId, role: "system", content: entry.summary, createdAt: entry.timestamp });
+			window.items.push({ seq: entrySeq, windowId: window.windowId, role: "system", text: entry.summary, createdAt: entry.timestamp });
 			continue;
 		}
 		if (entry.type === "message") {
@@ -109,7 +138,7 @@ export function historyFromSession(ctx: SessionReader): HistoryProjection {
 				seq: entrySeq,
 				windowId: window.windowId,
 				role,
-				content: messageContent(entry.message),
+				text: messageContent(entry.message),
 				createdAt: entry.timestamp,
 				...toolInfo(entry.message),
 			});
@@ -123,7 +152,7 @@ export function historyFromSession(ctx: SessionReader): HistoryProjection {
 				seq: entrySeq,
 				windowId: window.windowId,
 				role: "developer",
-				content: contentText(entry.content),
+				text: contentText(entry.content),
 				createdAt: entry.timestamp,
 			});
 		}

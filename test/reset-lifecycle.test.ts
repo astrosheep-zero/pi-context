@@ -17,6 +17,7 @@ import { SessionManager as Manager } from "@earendil-works/pi-coding-agent";
 import piContext from "../src/pi/extension.js";
 import { BOOT_TYPE, CONTINUATION_TYPE, GUIDANCE_TYPE, RESET_MARKER_TYPE } from "../src/pi/entries.js";
 import { MANUAL_WIPE_TYPE } from "../src/pi/entries.js";
+import { toolContext } from "./helpers/extension.js";
 import { WARNING_CONTENT } from "../src/pi/reset/text.js";
 import {
 	initialResetControl,
@@ -93,7 +94,8 @@ function harness() {
 	const callTool = async (name: string): Promise<AgentToolResult<unknown>> => {
 		const tool = tools.get(name);
 		assert.ok(tool, `${name} is registered`);
-		return tool.execute("call", {}, new AbortController().signal, () => {}, ctx) as Promise<AgentToolResult<unknown>>;
+		// Pi 1.0 hands a tool the session context plus the nested-call surface; toolContext builds it.
+		return tool.execute("call", {}, new AbortController().signal, () => {}, toolContext(ctx));
 	};
 	return { sessionManager, handlers, sent, notices, emit, runCommand, callTool };
 }

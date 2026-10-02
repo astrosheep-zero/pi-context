@@ -1,3 +1,4 @@
+/** Budget primitives. Notes/history use result.ts; reset/budget tools retain output(). */
 export { earliestMatchOffsetChars } from "../text-match.js";
 
 export const TOOL_OUTPUT_MAX_BYTES = 32 * 1024;
@@ -9,49 +10,12 @@ function json(value: unknown): string {
 	return JSON.stringify(value, null, 2);
 }
 
-/** True when `value` serializes within the same wire budget `output()` enforces. */
-export function withinBudget(value: unknown, budget = TOOL_OUTPUT_MAX_BYTES): boolean {
-	return Buffer.byteLength(json(value), "utf8") <= budget;
-}
-
 /** True when `text` fits the wire budget verbatim, for raw payloads with no JSON encoding. */
 export function withinTextBudget(text: string, budget = TOOL_OUTPUT_MAX_BYTES): boolean {
 	return Buffer.byteLength(text, "utf8") <= budget;
 }
 
-/** Marker standing in for characters elided from the middle of an oversized single unit. */
-export function truncationMarker(removedChars: number): string {
-	return `…[truncated ${removedChars} chars]…`;
-}
-
-export function middleTruncate(text: string, fits: (content: string) => boolean): string {
-	if (fits(text)) return text;
-	const chars = Array.from(text);
-	const build = (kept: number) => {
-		const head = Math.ceil(kept / 2);
-		return chars.slice(0, head).join("") + truncationMarker(chars.length - kept) + chars.slice(chars.length - (kept - head)).join("");
-	};
-	// The serialized size is non-decreasing in `kept` (each kept character adds at least one
-	// byte while the marker loses at most one digit), so a binary search finds the largest
-	// keep count that still fits.
-	let low = 0;
-	let high = chars.length;
-	while (low < high) {
-		const mid = Math.ceil((low + high) / 2);
-		if (fits(build(mid))) low = mid;
-		else high = mid - 1;
-	}
-	return build(low);
-}
-
-/**
- * Longest contiguous prefix of `text` (counted in code points) accepted by `fits`.
- *
- * This is the truncation used by every cursor-bearing payload: the delivered text is
- * always a plain prefix of the original, so a cursor computed from its code-point length
- * addresses exactly the first undelivered character. No marker character is ever appended;
- * the companion `truncated`/`total_chars` fields name what was left out.
- */
+/** Longest fitting code-point prefix, without inserted markers. Callers report omissions. */
 export function prefixFit(text: string, fits: (content: string) => boolean): string {
 	if (fits(text)) return text;
 	const chars = Array.from(text);
@@ -64,60 +28,7 @@ export function prefixFit(text: string, fits: (content: string) => boolean): str
 		if (fits(chars.slice(0, mid).join(""))) low = mid;
 		else high = mid - 1;
 	}
-	// A candidate's serialized size can dip by a byte or two at the very end (a numeric cursor
-	// becoming null), so the predicate is not perfectly monotone at the tail. Back off until the
-	// returned prefix provably fits; in the monotone case this loop never runs.
-	while (low > 0 && !fits(chars.slice(0, low).join(""))) low -= 1;
 	return chars.slice(0, low).join("");
-}
-
-/**
- * Fields every character-window read returns; each tool adds its own identity and metadata.
- * `offset_chars` is always the resolved absolute offset, and `next_offset_chars` is exactly
- * that offset plus the delivered code-point count, null only at the text's true end.
- */
-export type CharacterWindow = {
-	offset_chars: number;
-	content: string;
-	total_chars: number;
-	next_offset_chars: number | null;
-};
-
-/**
- * Read one character window of `text`: the longest contiguous prefix of
- * `chars[resolved, resolved + limit)` that fits the wire budget.
- *
- * `offsetChars` is a code-point offset. A negative value counts back from the end and
- * resolves to `max(0, total_chars + offsetChars)`, so `-N` reaches the tail and any
- * `N >= total_chars` reads from the start; the resolved absolute offset is always echoed.
- * Following `next_offset_chars` reconstructs `text` by plain concatenation, because the
- * payload is always a plain prefix with no marker. `render` builds the exact response for
- * a candidate window, and `measure` decides whether that response fits the wire budget (JSON
- * serialization by default; raw-text renders pass a verbatim byte measure), so the budget is
- * always measured on the bytes that go on the wire.
- */
-export function readCharacterWindow<T>(text: string, offsetChars: number | undefined, limitChars: number | undefined, render: (window: CharacterWindow) => T, measure: (rendered: T) => boolean = withinBudget): T {
-	const chars = Array.from(text);
-	const requested = offsetChars ?? 0;
-	const resolved = requested < 0 ? Math.max(0, chars.length + requested) : Math.max(0, requested);
-	const windowChars = chars.slice(resolved, resolved + Math.min(limitChars ?? DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS));
-	const build = (content: string): CharacterWindow => {
-		const next = resolved + Array.from(content).length;
-		return { offset_chars: resolved, content, total_chars: chars.length, next_offset_chars: next < chars.length ? next : null };
-	};
-	const content = prefixFit(windowChars.join(""), (candidate) => measure(render(build(candidate))));
-	return render(build(content));
-}
-
-/**
- * Fixed metadata block preceding any raw character-window payload. Callers supply their
- * source identity fields in wire order; range and continuation semantics are shared.
- */
-export function readWindowBlock(identity: ReadonlyArray<readonly [string, string]>, window: CharacterWindow): string {
-	const end = window.offset_chars + Array.from(window.content).length;
-	const next = window.next_offset_chars === null ? "null" : String(window.next_offset_chars);
-	const fields = identity.map(([name, value]) => `${name}: ${value}`).join("\n");
-	return `--- READ WINDOW ---\n${fields}\nchars: [${window.offset_chars},${end}) of ${window.total_chars}\nnext_offset_chars: ${next}\n`;
 }
 
 /**
@@ -127,12 +38,4 @@ export function readWindowBlock(identity: ReadonlyArray<readonly [string, string
  */
 export function output(value: unknown, details?: unknown, terminate = false) {
 	return { content: [{ type: "text" as const, text: json(value) }], details, terminate };
-}
-
-/**
- * Encode a prose payload as raw text: metadata prefix, a blank line, then the payload
- * verbatim. `details` carries the slim metadata object and never duplicates the payload.
- */
-export function outputRaw(header: string, content: string, details: unknown, terminate = false) {
-	return { content: [{ type: "text" as const, text: `${header}\n${content}` }], details, terminate };
 }

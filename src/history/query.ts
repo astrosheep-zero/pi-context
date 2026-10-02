@@ -1,143 +1,141 @@
-import { middleTruncate, prefixFit, withinBudget, HISTORY_PREVIEW_CHARS } from "../tools/output.js";
-import { allItems, visibleItem, type HistoryEvent, type HistoryFilter, type HistoryProjection } from "./history.js";
+/** Stable-anchor paging and folding. The operation supplies the full-response budget check. */
+import { Type, type Static } from "typebox";
+import { failure, success, type Outcome } from "../tools/result.js";
+import { prefixFit } from "../tools/output.js";
+import { allItems, visibleItem, HistoryFoldedRowSchema, HistoryPageItemSchema, MAX_FOLD_TOOL_NAMES, MAX_FOLD_TOOL_NAME_CHARS, type HistoryEvent, type HistoryFilter, type HistoryFoldedRow, type HistoryPageItem, type HistoryProjection } from "./history.js";
 
-type VisibleItem = ReturnType<typeof visibleItem>;
-type FoldedRow = { folded: true; first_seq: number; last_seq: number; count: number; tools: Record<string, number> };
-type RenderedItem = VisibleItem | FoldedRow;
-type Candidate = { item: HistoryEvent; matchOffset?: number; preview?: VisibleItem };
+type PageRow = HistoryPageItem | HistoryFoldedRow;
+type Candidate = { event: HistoryEvent; matchOffset?: number; preview?: HistoryPageItem };
 type AnchorParams = { before?: number; after?: number; limit?: number; max_chars_per_item?: number };
-type PageResponse = { items: RenderedItem[]; older_before: number | null; newer_after: number | null };
 
-/** Shrink a single page item to fit the fully rendered response. */
-function truncateHistoryItem<T extends { content: string; truncated: boolean; tool?: string }>(item: T, fits: (candidate: T) => boolean): T {
+export const HistoryPageSchema = Type.Object({
+	items: Type.Array(Type.Union([HistoryPageItemSchema, HistoryFoldedRowSchema])),
+	older_before: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()], { description: "Pass as before to page older." }),
+	newer_after: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()], { description: "Pass as after to page newer." }),
+}, { additionalProperties: false });
+/** One whole page payload, before it becomes an outcome. */
+export type HistoryPage = Static<typeof HistoryPageSchema>;
+
+/** Shorten preview text first; omit an oversized tool name rather than invent a partial name. */
+function truncateHistoryItem(item: HistoryPageItem, fits: (candidate: HistoryPageItem) => boolean): HistoryPageItem {
 	if (fits(item)) return item;
-	const shrinkContent = (base: T): T => ({
+	const shrinkContent = (base: HistoryPageItem): HistoryPageItem => ({
 		...base,
 		truncated: true,
-		content: prefixFit(base.content, (candidate) => fits({ ...base, truncated: true, content: candidate } as T)),
+		content: prefixFit(base.content, (candidate) => fits({ ...base, truncated: true, content: candidate })),
 	});
 	const withContent = shrinkContent(item);
 	if (fits(withContent)) return withContent;
 	if (item.tool === undefined) return withContent;
-	const withName = { ...item, tool: middleTruncate(item.tool, (candidate) => fits({ ...item, tool: candidate } as T)) } as T;
-	if (fits(withName)) return withName;
-	return shrinkContent(withName);
+	const { tool: _dropped, ...withoutName } = item;
+	const named = { ...withoutName, tool_name_omitted: true };
+	if (fits(named)) return named;
+	return shrinkContent(named);
 }
 
-function isFoldableEvent(item: HistoryEvent): boolean {
-	return item.role === "tool" || item.role === "context";
+function isFoldableEvent(event: HistoryEvent): boolean {
+	return event.role === "tool" || event.role === "context";
 }
 
 export function isConversationView(params: HistoryFilter): boolean {
 	return !params.roles;
 }
 
-function foldedRuns(items: HistoryEvent[]): FoldedRow[] {
-	if (items.length === 0) return [];
-	const sorted = [...items].sort((a, b) => a.seq - b.seq);
-	const tools: Record<string, number> = {};
-	for (const item of sorted) {
-		if (item.role === "tool") {
-			const name = item.tool ?? "unknown";
-			tools[name] = (tools[name] ?? 0) + 1;
-		}
+/** Folded counts stay exact even when some distinct tool names must be omitted. */
+function foldedRuns(events: HistoryEvent[]): HistoryFoldedRow[] {
+	if (events.length === 0) return [];
+	const sorted = [...events].sort((a, b) => a.seq - b.seq);
+	const counts = new Map<string, number>();
+	for (const event of sorted) {
+		if (event.role !== "tool") continue;
+		const name = event.execution?.name ?? "unknown";
+		counts.set(name, (counts.get(name) ?? 0) + 1);
 	}
-	return [{ folded: true, first_seq: sorted[0]!.seq, last_seq: sorted.at(-1)!.seq, count: sorted.length, tools }];
+	const entries = [...counts].filter(([name]) => name.length <= MAX_FOLD_TOOL_NAME_CHARS).slice(0, MAX_FOLD_TOOL_NAMES);
+	// fromEntries preserves __proto__ as an ordinary key without mutating the prototype.
+	const tools = Object.fromEntries(entries);
+	const omitted = counts.size - entries.length;
+	return [{ folded: true, first_seq: sorted[0]!.seq, last_seq: sorted.at(-1)!.seq, count: sorted.length, tools, ...(omitted > 0 ? { omitted_tools: omitted } : {}) }];
 }
 
 function pageAnchors(vis: HistoryEvent[], selected: HistoryEvent[], before: number | undefined, after: number | undefined): { older_before: number | null; newer_after: number | null } {
 	if (selected.length === 0) return { older_before: null, newer_after: null };
 	const lower = after ?? 0;
 	const upper = before ?? Number.POSITIVE_INFINITY;
-	const seqs = selected.map((item) => item.seq);
-	const first = Math.min(...seqs);
-	const last = Math.max(...seqs);
+	// Selected events are in seq order.
+	const first = selected[0]!.seq;
+	const last = selected.at(-1)!.seq;
 	return {
-		older_before: vis.some((item) => item.seq > lower && item.seq < first && item.seq < upper) ? first : null,
-		newer_after: vis.some((item) => item.seq > last && item.seq < upper && item.seq > lower) ? last : null,
+		older_before: vis.some((event) => event.seq > lower && event.seq < first && event.seq < upper) ? first : null,
+		newer_after: vis.some((event) => event.seq > last && event.seq < upper && event.seq > lower) ? last : null,
 	};
 }
 
-function foldRows(projection: HistoryProjection, params: HistoryFilter & AnchorParams, selected: HistoryEvent[], anchors: { older_before: number | null; newer_after: number | null }): FoldedRow[] {
-	if (selected.length === 0) {
-		// Even a range with no conversation can contain tool/context events.
-		const lower = params.after ?? 0;
-		const upper = params.before ?? Number.POSITIVE_INFINITY;
-		const hidden = allItems(projection).filter((item) => (typeof params.window_id !== "string" || params.window_id === item.windowId) && item.seq > lower && item.seq < upper && isFoldableEvent(item));
-		return foldedRuns(hidden);
-	}
+function foldRows(projection: HistoryProjection, params: HistoryFilter & AnchorParams, selected: HistoryEvent[], anchors: { older_before: number | null; newer_after: number | null }): HistoryFoldedRow[] {
 	const lower = params.after ?? 0;
 	const upper = params.before ?? Number.POSITIVE_INFINITY;
-	const windowItems = allItems(projection)
-		.filter((item) => (typeof params.window_id !== "string" || item.windowId === params.window_id) && item.seq > lower && item.seq < upper)
-		.sort((a, b) => a.seq - b.seq);
-	const folded: FoldedRow[] = [];
-	const firstSeq = Math.min(...selected.map((item) => item.seq));
-	const lastSeq = Math.max(...selected.map((item) => item.seq));
-	if (anchors.older_before === null) folded.push(...foldedRuns(windowItems.filter((item) => item.seq < firstSeq && isFoldableEvent(item))));
-	const orderedSelected = [...selected].sort((a, b) => a.seq - b.seq);
-	for (let i = 0; i + 1 < orderedSelected.length; i++) {
-		const left = orderedSelected[i]!.seq;
-		const right = orderedSelected[i + 1]!.seq;
-		folded.push(...foldedRuns(windowItems.filter((item) => item.seq > left && item.seq < right && isFoldableEvent(item))));
+	if (selected.length === 0) {
+		// Even a range with no conversation can contain tool/context events.
+		const hidden = allItems(projection).filter((event) => (typeof params.window_id !== "string" || params.window_id === event.windowId) && event.seq > lower && event.seq < upper && isFoldableEvent(event));
+		return foldedRuns(hidden);
 	}
-	if (anchors.newer_after === null) folded.push(...foldedRuns(windowItems.filter((item) => item.seq > lastSeq && isFoldableEvent(item))));
+	const windowEvents = allItems(projection)
+		.filter((event) => (typeof params.window_id !== "string" || params.window_id === event.windowId) && event.seq > lower && event.seq < upper)
+		.sort((a, b) => a.seq - b.seq);
+	const folded: HistoryFoldedRow[] = [];
+	const firstSeq = selected[0]!.seq;
+	const lastSeq = selected.at(-1)!.seq;
+	if (anchors.older_before === null) folded.push(...foldedRuns(windowEvents.filter((event) => event.seq < firstSeq && isFoldableEvent(event))));
+	// pageData already ordered selected by seq.
+	for (let i = 0; i + 1 < selected.length; i++) {
+		const left = selected[i]!.seq;
+		const right = selected[i + 1]!.seq;
+		folded.push(...foldedRuns(windowEvents.filter((event) => event.seq > left && event.seq < right && isFoldableEvent(event))));
+	}
+	if (anchors.newer_after === null) folded.push(...foldedRuns(windowEvents.filter((event) => event.seq > lastSeq && isFoldableEvent(event))));
 	return folded;
 }
 
-function candidatePreview(candidate: Candidate, maxChars: number): VisibleItem {
-	const base = visibleItem(candidate.item, maxChars);
-	if (candidate.matchOffset === undefined) return base;
-	const chars = Array.from(candidate.item.content);
-	const start = candidate.matchOffset;
-	return { ...base, truncated: start > 0 || start + maxChars < chars.length, content: chars.slice(start, start + maxChars).join("") };
-}
-
-function renderedPage(projection: HistoryProjection, params: HistoryFilter & AnchorParams, vis: HistoryEvent[], selected: Candidate[], maxChars: number, folds: boolean): PageResponse {
-	const selectedItems = selected.map((candidate) => candidate.item).sort((a, b) => a.seq - b.seq);
-	const anchors = pageAnchors(vis, selectedItems, params.before, params.after);
-	const orderedSelected = [...selected].sort((a, b) => a.item.seq - b.item.seq);
-	const visible = orderedSelected.map((candidate) => {
-		const base = candidate.preview ?? candidatePreview(candidate, maxChars);
-		return candidate.matchOffset === undefined ? base : { ...base, offset_chars: candidate.matchOffset };
-	});
-	let rows: RenderedItem[] = visible;
+function pageData(projection: HistoryProjection, params: HistoryFilter & AnchorParams, vis: HistoryEvent[], selected: Candidate[], maxChars: number, folds: boolean): HistoryPage {
+	const orderedSelected = [...selected].sort((a, b) => a.event.seq - b.event.seq);
+	const selectedEvents = orderedSelected.map((candidate) => candidate.event);
+	const anchors = pageAnchors(vis, selectedEvents, params.before, params.after);
+	const visible = orderedSelected.map((candidate) => candidate.preview ?? visibleItem(candidate.event, maxChars, candidate.matchOffset));
+	let rows: PageRow[] = visible;
 	if (folds) {
-		const folded = foldRows(projection, params, selectedItems, anchors);
+		const folded = foldRows(projection, params, selectedEvents, anchors);
 		rows = [...visible, ...folded].sort((a, b) => ("folded" in a ? a.first_seq : a.seq) - ("folded" in b ? b.first_seq : b.seq));
 	}
 	return { items: rows, ...anchors };
 }
 
 function orderedCandidates(vis: Candidate[], before: number | undefined, after: number | undefined, limit: number): Candidate[] {
-	const ascending = [...vis].sort((a, b) => a.item.seq - b.item.seq);
-	if (before !== undefined && after !== undefined) return ascending.filter((candidate) => candidate.item.seq > after && candidate.item.seq < before).slice(0, limit);
-	if (after !== undefined) return ascending.filter((candidate) => candidate.item.seq > after).slice(0, limit);
-	if (before !== undefined) return ascending.filter((candidate) => candidate.item.seq < before).reverse().slice(0, limit);
+	const ascending = [...vis].sort((a, b) => a.event.seq - b.event.seq);
+	if (before !== undefined && after !== undefined) return ascending.filter((candidate) => candidate.event.seq > after && candidate.event.seq < before).slice(0, limit);
+	if (after !== undefined) return ascending.filter((candidate) => candidate.event.seq > after).slice(0, limit);
+	if (before !== undefined) return ascending.filter((candidate) => candidate.event.seq < before).reverse().slice(0, limit);
 	return ascending.slice(-limit).reverse();
 }
 
-export function selectPage(projection: HistoryProjection, params: HistoryFilter & AnchorParams, vis: Candidate[], folds: boolean): PageResponse {
+/** Grow the page in query order; shorten the first preview only when no full row fits. */
+export function selectPage(projection: HistoryProjection, params: HistoryFilter & AnchorParams, vis: Candidate[], folds: boolean, fits: (page: HistoryPage) => boolean, maxChars: number): Outcome<HistoryPage> {
 	const before = params.before;
 	const after = params.after;
-	const maxChars = params.max_chars_per_item ?? HISTORY_PREVIEW_CHARS;
 	const limit = params.limit ?? 20;
 	const candidates = orderedCandidates(vis, before, after, limit);
-	const allVisible = vis.map((candidate) => candidate.item).sort((a, b) => a.seq - b.seq);
+	const allVisible = vis.map((candidate) => candidate.event).sort((a, b) => a.seq - b.seq);
 	const kept: Candidate[] = [];
 	for (const candidate of candidates) {
-		const proposed = [...kept, candidate];
-		const response = renderedPage(projection, params, allVisible, proposed, maxChars, folds);
-		if (withinBudget(response)) {
+		if (fits(pageData(projection, params, allVisible, [...kept, candidate], maxChars, folds))) {
 			kept.push(candidate);
 			continue;
 		}
-		if (kept.length === 0) {
-			const base = candidatePreview(candidate, maxChars);
-			const shrunk = truncateHistoryItem(base, (preview) => withinBudget(renderedPage(projection, params, allVisible, [{ ...candidate, preview }], maxChars, folds)));
-			kept.push({ ...candidate, preview: shrunk });
-		}
+		if (kept.length === 0) kept.push({ ...candidate, preview: truncateHistoryItem(visibleItem(candidate.event, maxChars, candidate.matchOffset), (preview) => fits(pageData(projection, params, allVisible, [{ ...candidate, preview }], maxChars, folds))) });
 		break;
 	}
-	return renderedPage(projection, params, allVisible, kept, maxChars, folds);
+	const page = pageData(projection, params, allVisible, kept, maxChars, folds);
+	if (!fits(page)) {
+		return failure("page_too_large", `${page.items.length} history rows and their fold summary do not fit one response even at their smallest; narrow the range with before/after or read one seq`, { rows: page.items.length });
+	}
+	return success(page);
 }

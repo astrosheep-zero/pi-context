@@ -21,6 +21,7 @@ import {
 	makeExtension,
 	manager,
 	noticesOf,
+	resultData,
 	resultJson,
 	resultRead,
 	runContextHook,
@@ -65,11 +66,11 @@ test("custom reset marker removes old provider context while history remains sea
 	assert.equal(windows.length, 2);
 	const oldWindow = windows[0]?.windowId;
 	assert.ok(oldWindow);
-	const oldSeq = windows[0]?.items.find((item) => item.content.includes("OLD-UNIQUE-TRANSCRIPT"))?.seq;
+	const oldSeq = windows[0]?.items.find((item) => item.text.includes("OLD-UNIQUE-TRANSCRIPT"))?.seq;
 	assert.ok(oldSeq);
 	const read = resultRead(await call(captured, "history_read", { seq: oldSeq }, ctx));
 	assert.match(read.content, /OLD-UNIQUE-TRANSCRIPT/);
-	const found = resultJson<{ items: Array<{ seq: number }> }>(await call(captured, "history_search", { query: "needle" }, ctx));
+	const found = resultData<{ items: Array<{ seq: number }> }>(await call(captured, "history_search", { query: "needle" }, ctx));
 	assert.equal(found.items.length, 1);
 	assert.equal(found.items[0]?.seq, oldSeq);
 });
@@ -236,7 +237,7 @@ test("off preserves an existing marker window and still cancels native compactio
 	assert.deepEqual(before, { cancel: true });
 	const projected = await runContextWithSystemHook(captured, ctx, sessionManager.buildSessionContext().messages);
 	assert.equal(JSON.stringify(projected?.messages ?? []).includes("old context must stay hidden"), false);
-	const windows = resultJson<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_windows", {}, ctx));
+	const windows = resultData<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_windows", {}, ctx));
 	assert.equal(windows.windows.at(-1)?.window_id, windowId);
 });
 

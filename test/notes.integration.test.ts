@@ -1,16 +1,19 @@
 import { notesIdentityFromPi } from "../src/pi/notes/adapter.js";
 import { PI_TOOL_NAMES } from "../src/pi/tool-names.js";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { loadNotesSnapshot } from "../src/boot/snapshot.js";
 import { renderBootBlock } from "../src/boot/render.js";
 import { localIso } from "../src/notes/frontmatter.js";
 import type { NoteRow, Scope } from "../src/notes/index.js";
 import { listNotes, physicalPath, scopeDir } from "./helpers/notes.js";
-import { TOOL_OUTPUT_MAX_BYTES } from "../src/tools/output.js";
+import { MAX_READ_WINDOW_CHARS, TOOL_OUTPUT_MAX_BYTES } from "../src/tools/output.js";
+import { MAX_METADATA_ENTRY_BYTES, notesUpdate } from "../src/tools/notes.js";
+import type { NotesListData, NotesReadData, NotesSearchData, NotesUpdateData } from "../src/tools/notes.js";
 import {
 	assertWithinBudget,
 	call,
@@ -18,13 +21,19 @@ import {
 	explicitBoot,
 	makeExtension,
 	manager,
-	resultJson,
+	resultData,
+	resultError,
 	resultRead,
-	runHandlers,
 } from "./helpers/extension.js";
 import { installExtensionTestHooks } from "./helpers/extension-test-environment.js";
 
 const testEnvironment = installExtensionTestHooks("pi-context-integration");
+
+/** The model-facing text of one tool result. */
+function textOf(result: AgentToolResult<unknown>): string {
+	const first = result.content[0];
+	return first && first.type === "text" ? first.text : "";
+}
 
 test("notes_list and notes_search are recent-first snapshots with narrowing hints", async () => {
 	const session = manager();
@@ -41,16 +50,16 @@ test("notes_list and notes_search are recent-first snapshots with narrowing hint
 	put("new.md", base + 3);
 	put("@project/design.md", base + 2);
 
-	const listed = resultJson<{ files: Array<{ address: string; updated_at: string }>; more: number }>(await call(captured, "notes_list", { limit: 2 }, ctx));
+	const listed = resultData<NotesListData>(await call(captured, "notes_list", { limit: 2 }, ctx));
 	assert.deepEqual(listed.files.map((file) => file.address), ["new.md", "@project/design.md"]);
 	assert.equal(listed.more, 1);
 	assert.deepEqual(Object.keys(listed).sort(), ["crumpled_excluded", "files", "homes_unavailable", "more"]);
 
-	const searched = resultJson<{ files: Array<{ address: string; updated_at: string }>; more: number }>(await call(captured, "notes_search", { query: "needle", limit: 2 }, ctx));
+	const searched = resultData<NotesSearchData>(await call(captured, "notes_search", { query: "needle", limit: 2 }, ctx));
 	assert.deepEqual(searched.files.map((file) => file.address), ["new.md", "@project/design.md"]);
 	assert.equal(searched.more, 1);
 
-	const narrowed = resultJson<{ files: Array<{ address: string }>; more: number }>(await call(captured, "notes_list", { pattern: "@project/**" }, ctx));
+	const narrowed = resultData<NotesListData>(await call(captured, "notes_list", { pattern: "@project/**" }, ctx));
 	assert.deepEqual(narrowed.files.map((file) => file.address), ["@project/design.md"]);
 	assert.equal(narrowed.more, 0);
 });
@@ -60,17 +69,19 @@ test("notes_list reports omitted files when the wire budget truncates the snapsh
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	const timestamp = 1_700_000_000_000;
-	for (let index = 0; index < 400; index++) {
-		const address = `bulk/note-${String(index).padStart(3, "0")}.md`;
+	const total = 1500;
+	for (let index = 0; index < total; index++) {
+		const address = `bulk/note-${String(index).padStart(4, "0")}.md`;
 		const path = physicalPath("session", address, ctx);
 		mkdirSync(dirname(path), { recursive: true });
 		writeFileSync(path, `---\nscope: session\norigin: self\ncreatedAt: ${localIso(timestamp)}\nupdatedAt: ${localIso(timestamp + index)}\nlastAccessed: ${localIso(timestamp)}\naccessCount: 0\n---\n\nbody`);
 	}
-	const result = resultJson<{ files: Array<{ address: string }>; more: number }>(await call(captured, "notes_list", {}, ctx));
-	assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= TOOL_OUTPUT_MAX_BYTES);
-	assert.ok(result.files.length > 0 && result.files.length < 400);
-	assert.equal(result.more, 400 - result.files.length);
-	assert.equal(result.files[0]?.address, "bulk/note-399.md", "the snapshot retains the newest rows first");
+	const result = await call(captured, "notes_list", {}, ctx);
+	assertWithinBudget(result, "oversized listing");
+	const listed = resultData<NotesListData>(result);
+	assert.ok(listed.files.length > 0 && listed.files.length < total, "the snapshot is cut short instead of overflowing either surface");
+	assert.equal(listed.more, total - listed.files.length, "omitted rows are named, not silently dropped");
+	assert.equal(listed.files[0]?.address, `bulk/note-${String(total - 1).padStart(4, "0")}.md`, "the snapshot retains the newest rows first");
 });
 
 test("notes_list is most-recently-updated first across merged scopes", async () => {
@@ -88,7 +99,7 @@ test("notes_list is most-recently-updated first across merged scopes", async () 
 	put("project", "c.md", base + 5);
 	put("human", "e.md", base + 20);
 	const files = async (params: Record<string, unknown>) =>
-		resultJson<{ files: Array<{ address: string }> }>(await call(captured, "notes_list", params, ctx)).files;
+		resultData<NotesListData>(await call(captured, "notes_list", params, ctx)).files;
 	assert.deepEqual((await files({})).map((file) => file.address), ["@human/e.md", "a.md", "b.md", "@project/c.md"], "updated_at descending with address ascending as the tiebreak");
 	// A same-path pair in two scopes keeps both rows; equal timestamps tie-break by scope name.
 	put("human", "a.md", base + 10);
@@ -109,24 +120,24 @@ test("notes are real files that persist across sessions and round-trip Unicode",
 	const restoredCtx = context(restored);
 	const rawRead = await call(restoredCaptured, "notes_read", { address: "@human/checkpoint/进度.md", offset_chars: -4 }, restoredCtx);
 	const read = resultRead(rawRead);
-	assert.equal(read.details.address, "@human/checkpoint/进度.md");
+	assert.equal(read.address, "@human/checkpoint/进度.md");
 	assert.equal(read.content, "Café", "a negative offset reads the body tail in one call");
-	const searched = resultJson<{ files: Array<{ address: string; updated_at: unknown; matches: Array<{ line: number }> }> }>(
+	const searched = resultData<NotesSearchData>(
 		await call(restoredCaptured, "notes_search", { pattern: "@human/**", query: "Café" }, restoredCtx),
 	);
 	assert.equal(searched.files[0]?.matches[0]?.line, 2);
-	const listedFiles = resultJson<{ files: Array<{ address: string; updated_at: unknown }> }>(
+	const listedFiles = resultData<NotesListData>(
 		await call(restoredCaptured, "notes_list", { pattern: "@human/checkpoint/**" }, restoredCtx),
 	);
 	assert.equal(listedFiles.files.length, 1, "glob ** crosses into the checkpoint directory");
 	assert.equal(listedFiles.files[0]?.address, "@human/checkpoint/进度.md");
 	// A single-segment * never crosses `/`, so a nested-only store matches nothing at the root.
-	const rootOnly = resultJson<{ files: Array<{ address: string }> }>(
+	const rootOnly = resultData<NotesListData>(
 		await call(restoredCaptured, "notes_list", { pattern: "@human/*" }, restoredCtx)
 	);
 	assert.equal(rootOnly.files.length, 0, "glob * stays within one segment");
 	assert.equal(searched.files[0]?.updated_at, listedFiles.files[0]?.updated_at);
-	assert.equal(resultJson<{ code: string }>(await call(captured, "notes_write", { address: "../escape", content: "x" }, ctx)).code, "invalid_address");
+	assert.equal(resultError(await call(captured, "notes_write", { address: "../escape", content: "x" }, ctx)).code, "invalid_address");
 });
 
 test("crumple lifecycle: metadata-only edits close and smooth a note without touching updatedAt", async () => {
@@ -138,7 +149,7 @@ test("crumple lifecycle: metadata-only edits close and smooth a note without tou
 	const updatedBefore = (await listNotes(ctx, { scope: "session" }))[0]!.meta.updatedAt;
 
 	// metadata-only: content unchanged, applied 0, and the recorded time is the original one
-	const markOnly = resultJson<{ address: string; applied: number; diff: string }>(await call(captured, "notes_update", { address: "journal.md", crumpled: true }, ctx));
+	const markOnly = resultData<NotesUpdateData>(await call(captured, "notes_update", { address: "journal.md", crumpled: true }, ctx));
 	assert.equal(markOnly.applied, 0);
 	assert.match(markOnly.diff, /^\+\s*\d+\s+crumpledAt: \d{4}-\d{2}-\d{2}T/m);
 	assert.deepEqual(await listNotes(ctx, { scope: "session" }), [], "a crumpled note leaves the live list");
@@ -160,8 +171,8 @@ test("crumple lifecycle: metadata-only edits close and smooth a note without tou
 	assert.equal((await listNotes(ctx, { scope: "session" }))[0]?.meta.crumpledAt, undefined, "writing always produces an uncrumpled note");
 
 	// metadata-only on a missing path is the typed not-found arm
-	const missing = resultJson<{ error?: string }>(await call(captured, "notes_update", { address: "missing.md", crumpled: true }, ctx));
-	assert.equal(missing.error, "note not found");
+	const missing = resultError(await call(captured, "notes_update", { address: "missing.md", crumpled: true }, ctx));
+	assert.equal(missing.message, "note not found");
 });
 
 test("the filesystem notes loader treats an absent home as empty but surfaces a real directory read failure", async () => {
@@ -312,7 +323,7 @@ test("the boot block gives awake agents the notes-home file layout", async () =>
 	assert.match(rendered, /bare <vpath>[\s\S]*@project\/<vpath>[\s\S]*@human\/<vpath>/);
 });
 
-test("an over-budget note is delivered as a prefix and resumed by next_offset_chars", async () => {
+test("an over-budget note is delivered as a bounded prefix and resumed by next_offset_chars", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
@@ -323,13 +334,25 @@ test("an over-budget note is delivered as a prefix and resumed by next_offset_ch
 	assertWithinBudget(rawFirst, "single oversized note");
 	const first = resultRead(rawFirst);
 	assert.ok(first.content.length > 0, "the page is not empty");
-	assert.equal(first.content.includes("…"), false, "the payload is a plain prefix with no marker");
-	assert.ok(first.content.startsWith("---\n"), "the frontmatter is delivered first");
-	assert.equal(first.header, `--- READ WINDOW ---\naddress: huge.md\nchars: [0,${first.next_offset_chars}) of ${first.total_chars}\nnext_offset_chars: ${first.next_offset_chars}\n`, "the raw block names the resolved address, range, and resume cursor");
-	assert.deepEqual(Object.keys(first.details).sort(), ["address", "next_offset_chars", "offset_chars", "total_chars"], "notes_read details carries resolved identity and cursor metadata");
-	assert.equal("content" in first.details, false, "details never duplicates the payload");
+	assert.equal(first.content.includes("…"), false, "the window text is a plain prefix with no marker");
+	assert.ok(first.content.startsWith("H"), "the body is delivered first, with no frontmatter in the way");
 	assert.equal(first.offset_chars, 0, "the default window starts at the resolved offset 0");
-	// Following the cursor reconstructs frontmatter + body by plain concatenation.
+	assert.equal(first.total_chars, Array.from(text).length, "the window counts the body, not the serialized file");
+	assert.equal(first.limited_by, "limit", "the requested window ended this page, not the byte budget");
+	assert.equal(first.content.length, 12000, "the default window is the full requested count");
+	assert.deepEqual(Object.keys(resultData<NotesReadData>(rawFirst)).sort(), ["address", "metadata", "window"], "the structured read separates identity, metadata, and the window");
+	assert.equal(resultData<NotesReadData>(rawFirst).metadata.access_count, 1, "the read bumped the access counter that the frontmatter no longer sits inside the window");
+	assert.equal(textOf(rawFirst).endsWith(`\n\n[${first.total_chars - first.content.length} more characters. Use offset_chars=${first.next_offset_chars} to continue.]`), true, "the footer names the resume cursor in the new read style");
+
+	// Asking for the largest legal window still cannot exceed the byte budget, and says so.
+	const rawWide = await call(captured, "notes_read", { address: "huge.md", limit_chars: MAX_READ_WINDOW_CHARS }, ctx);
+	assertWithinBudget(rawWide, "widest requested window");
+	const wide = resultRead(rawWide);
+	assert.equal(wide.limited_by, "bytes", "the byte budget stopped this window");
+	assert.ok(Array.from(wide.content).length < MAX_READ_WINDOW_CHARS, "the widest request is cut short");
+	assert.match(textOf(rawWide), /\(32KB limit\)\. Use offset_chars=\d+ to continue\.\]$/, "a byte-stopped window names the budget that stopped it");
+
+	// Following the cursor reconstructs the body by plain concatenation.
 	const parts = [first.content];
 	let offset: number | null = first.next_offset_chars;
 	while (offset !== null) {
@@ -340,10 +363,11 @@ test("an over-budget note is delivered as a prefix and resumed by next_offset_ch
 		parts.push(chunk.content);
 		offset = chunk.next_offset_chars;
 	}
-	assert.ok(parts.join("").endsWith(text), "the cursors reconstruct the body exactly");
+	assert.equal(parts.join(""), text, "the cursors reconstruct the body exactly");
 
-	// A success carries structured details; an error stays a JSON envelope with no details.
+	// Both surfaces stay inside the budget, and a refusal carries no window at all.
 	const missingResult = await call(captured, "notes_read", { address: "no-such.md" }, ctx);
+	assertWithinBudget(missingResult, "refused read");
 	const root = process.env.PI_NOTES_HOME!;
 	for (const result of [
 		await call(captured, "notes_write", { address: "@project/receipt", content: "body" }, ctx),
@@ -353,13 +377,14 @@ test("an over-budget note is delivered as a prefix and resumed by next_offset_ch
 		await call(captured, "notes_read", { address: "@project/receipt" }, ctx),
 	]) {
 		assert.equal(JSON.stringify(result).includes(root), false, "notes receipts never expose the absolute home");
+		assertWithinBudget(result, "ordinary notes receipt");
 	}
 	assert.equal(JSON.stringify(missingResult).includes(root), false, "failure receipts never expose the absolute home");
-	const missing = resultJson<Record<string, unknown>>(missingResult);
-	assert.deepEqual(Object.keys(missing).sort(), ["code", "error"], "the read error uses the shared failure envelope");
-	assert.equal(missing.error, "note not found");
+	const missing = resultError(missingResult);
+	assert.deepEqual(Object.keys(missing).sort(), ["code", "message"], "the refusal carries a precise code and message");
+	assert.equal(missing.message, "note not found");
 	assert.equal(missing.code, "not_found");
-	assert.equal(missingResult.details, undefined, "a JSON error carries no details metadata");
+	assert.equal(missingResult.details, undefined, "a refusal carries no details metadata");
 });
 
 test("an over-budget note search match is a named prefix with an honest line address", async () => {
@@ -371,10 +396,8 @@ test("an over-budget note search match is a named prefix with an honest line add
 	await call(captured, "notes_write", { address: "a.md", content: "needle small" }, ctx);
 	await call(captured, "notes_write", { address: "search.md", content: hugeLine }, ctx);
 	const pages: Array<{ address: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }> }> = [];
-	const found = resultJson<{ files: Array<{ address: string; matches_total: number; matches: Array<{ line: number; text: string; truncated: boolean; offset_chars: number }> }>; more: number }>(
-		await call(captured, "notes_search", { query: "needle", limit: 10 }, ctx),
-	);
-	assert.ok(Buffer.byteLength(JSON.stringify(found), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "match result stays within budget");
+	const found = resultData<NotesSearchData>(await call(captured, "notes_search", { query: "needle", limit: 10 }, ctx));
+	assert.ok(Buffer.byteLength(JSON.stringify(found), "utf8") <= TOOL_OUTPUT_MAX_BYTES, "the structured match result stays within budget");
 	pages.push(...found.files);
 	assert.equal(found.more, 1, "the oversized result names the omitted matching file");
 	assert.deepEqual(pages.map((file) => file.address), ["search.md"], "the snapshot keeps the most recently updated match");
@@ -386,6 +409,7 @@ test("an over-budget note search match is a named prefix with an honest line add
 	assert.ok(hugeLine.startsWith(match.text), "the match text is a plain prefix of the line");
 	assert.equal(match.text.includes("…"), false, "no marker is appended to the match text");
 	assert.equal(match.line, 1, "the informational line number survives");
+	assert.equal(match.offset_chars, 500, "the offset addresses the body directly, so the query's real position survives");
 	const atMatch = resultRead(await call(captured, "notes_read", { address: "search.md", offset_chars: match.offset_chars }, ctx));
 	assert.ok(atMatch.content.startsWith("needle"), "the search offset starts a read at the matched substring");
 	// The body is reconstructible by following notes_read's cursor from the start of the file.
@@ -407,13 +431,13 @@ test("notes_search ignores case, treats queries literally, and preserves origina
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	await call(captured, "notes_write", { address: "case-match.md", content: "😀İ NeEdLe.* tail" }, ctx);
-	const found = resultJson<{ files: Array<{ address: string; matches: Array<{ offset_chars: number }> }> }>(await call(captured, "notes_search", { query: ["missing", "needle.*"], pattern: "case-match.md" }, ctx));
+	const found = resultData<NotesSearchData>(await call(captured, "notes_search", { query: ["missing", "needle.*"], pattern: "case-match.md" }, ctx));
 	assert.equal(found.files.length, 1);
 	assert.equal(found.files[0]!.matches.length, 1);
 	const hit = found.files[0]!;
 	const read = resultRead(await call(captured, "notes_read", { address: hit.address, offset_chars: hit.matches[0]!.offset_chars }, ctx));
 	assert.equal(read.content, "NeEdLe.* tail");
-	const absent = resultJson<{ files: unknown[] }>(await call(captured, "notes_search", { query: "needle.+", pattern: "case-match.md" }, ctx));
+	const absent = resultData<NotesSearchData>(await call(captured, "notes_search", { query: "needle.+", pattern: "case-match.md" }, ctx));
 	assert.deepEqual(absent.files, []);
 });
 
@@ -423,9 +447,131 @@ test("notes_search scopes by glob pattern; a non-matching pattern is an empty pa
 	const ctx = context(session);
 	await call(captured, "notes_write", { address: "deep/nested/a.md", content: "needle here" }, ctx);
 	await call(captured, "notes_write", { address: "top.md", content: "needle there" }, ctx);
-	const scoped = resultJson<{ files: Array<{ address: string }> }>(await call(captured, "notes_search", { query: "needle", pattern: "deep/**" }, ctx));
+	const scoped = resultData<NotesSearchData>(await call(captured, "notes_search", { query: "needle", pattern: "deep/**" }, ctx));
 	assert.deepEqual(scoped.files.map((file) => file.address), ["deep/nested/a.md"], "a glob scopes the search to the subtree");
-	const none = resultJson<{ files: unknown[]; error?: string }>(await call(captured, "notes_search", { query: "needle", pattern: "absent/**" }, ctx));
-	assert.equal(none.error, undefined, "a non-matching pattern is not an error");
-	assert.deepEqual(none.files, [], "a non-matching pattern is an empty page");
+	const none = resultData<NotesSearchData>(await call(captured, "notes_search", { query: "needle", pattern: "absent/**" }, ctx));
+	assert.deepEqual(none.files, [], "a non-matching pattern is an empty page, not a refusal");
+});
+
+test("an over-budget mutation diff is shortened on both surfaces, and the edit still lands whole", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const line = `${"a".repeat(300)}\n`;
+	await call(captured, "notes_write", { address: "bulk-edit.md", content: line.repeat(1500) }, ctx);
+
+	const raw = await call(captured, "notes_update", { address: "bulk-edit.md", edits: [{ oldText: "a".repeat(300), newText: "b".repeat(300) }], replace_all: true }, ctx);
+	assertWithinBudget(raw, "oversized diff receipt");
+	const update = resultData<NotesUpdateData>(raw);
+	assert.equal(update.change_kind, "body");
+	assert.equal(update.applied, 1);
+	assert.equal(update.diff_truncated, true, "the receipt names that its own diff was shortened");
+	assert.ok(update.diff.length > 0, "a shortened diff is still delivered, not emptied");
+	assert.match(textOf(raw), /update itself was applied/, "a shortened receipt never claims the note is unchanged");
+	assert.equal(textOf(raw).includes(`+${"b".repeat(300)}`), false, "the delivered diff prefix stops inside the first change");
+
+	const body = resultRead(await call(captured, "notes_read", { address: "bulk-edit.md", limit_chars: 300 }, ctx)).content;
+	assert.equal(body, "b".repeat(300), "every one of the 1500 replacements was applied, not just the ones that fit the receipt");
+});
+
+test("oversized note metadata is counted out of a read instead of quietly dropped", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const path = physicalPath("session", "fat-meta.md", ctx);
+	mkdirSync(dirname(path), { recursive: true });
+	const stamp = localIso(Date.now());
+	writeFileSync(path, `---\norigin: external\ncreatedAt: ${stamp}\nupdatedAt: ${stamp}\nlastAccessed: ${stamp}\naccessCount: 4\nsmall: kept\nfat: "${"x".repeat(8000)}"\n---\n\nbody text`);
+
+	const raw = await call(captured, "notes_read", { address: "fat-meta.md" }, ctx);
+	assertWithinBudget(raw, "read with oversized metadata");
+	const read = resultRead(raw);
+	const metadata = resultData<NotesReadData>(raw).metadata;
+	assert.equal(read.content, "body text", "metadata size never enters the body window");
+	assert.equal(metadata.origin, "external");
+	assert.equal(metadata.access_count, 5, "the read reports the access it just recorded");
+	assert.equal(metadata.extra.small, "kept", "a small unrecognized key is delivered");
+	assert.equal(metadata.extra.fat, undefined, "an oversized value is not delivered in part");
+	assert.deepEqual(metadata.omitted_extra, { keys: 1, bytes: JSON.stringify("fat").length + 1 + JSON.stringify("x".repeat(8000)).length }, "the withheld entry is summarized, never listed, and its key bytes are counted");
+	assert.match(textOf(raw), /too large to show/, "the model-facing text says metadata was withheld");
+	assert.equal(read.total_chars, 9, "the window counts the body only, whatever the front weighs");
+});
+
+test("a giant frontmatter key is counted out of a read instead of riding along in the envelope", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const path = physicalPath("session", "fat-key.md", ctx);
+	mkdirSync(dirname(path), { recursive: true });
+	const stamp = localIso(Date.now());
+	const giantKey = `k${"x".repeat(40_000)}`;
+	writeFileSync(path, `---\norigin: self\ncreatedAt: ${stamp}\nupdatedAt: ${stamp}\nlastAccessed: ${stamp}\naccessCount: 0\n${giantKey}: "v"\nsmall: kept\n---\n\n`);
+
+	const raw = await call(captured, "notes_read", { address: "fat-key.md" }, ctx);
+	assertWithinBudget(raw, "read beside a giant frontmatter key");
+	const read = resultRead(raw);
+	const metadata = resultData<NotesReadData>(raw).metadata;
+	assert.equal(read.content, "", "an empty body stays empty: nothing was borrowed to pay for the key");
+	assert.equal(read.total_chars, 0);
+	assert.equal(metadata.extra.small, "kept", "a small key beside a giant one is still delivered");
+	assert.equal(Object.prototype.hasOwnProperty.call(metadata.extra, giantKey), false, "the giant key is never partially delivered");
+	assert.deepEqual(metadata.omitted_extra, { keys: 1, bytes: JSON.stringify(giantKey).length + 1 + JSON.stringify("v").length }, "the accounting covers the key and the value, not the value alone");
+	assert.equal(metadata.omitted_extra!.bytes > MAX_METADATA_ENTRY_BYTES, true, "one oversized entry is counted in full, key included");
+});
+
+test("an unexpected notes defect propagates with its own identity while real filesystem refusals stay structured", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const identity = notesIdentityFromPi(ctx);
+	await call(captured, "notes_write", { address: "propagate.md", content: "before" }, ctx);
+
+	// The injected renderer is this layer's own collaborator: a defect there is a defect in the
+	// program, and it must reach the operator as the same Error, not as a fabricated refusal.
+	// Its message deliberately opens with "query " — the wording a refusal classification once
+	// matched on, which turned any such defect into a wrong invalid_query.
+	const sentinel = new TypeError("query renderer invariant broken");
+	await assert.rejects(
+		() => notesUpdate.execute({ address: "propagate.md", edits: [{ oldText: "before", newText: "after" }] }, identity, () => { throw sentinel; }),
+		(error: unknown) => error === sentinel,
+		"an unexpected failure escapes with the identical Error, message and stack",
+	);
+	assert.equal(resultRead(await call(captured, "notes_read", { address: "propagate.md" }, ctx)).content, "after", "the edit was applied before the receipt failed; the throw claims no rollback");
+
+	const assertion = Object.assign(new Error("assertion failed"), { code: "ERR_ASSERTION" });
+	await assert.rejects(
+		() => notesUpdate.execute({ address: "propagate.md", edits: [{ oldText: "after", newText: "later" }] }, identity, () => { throw assertion; }),
+		(error: unknown) => (error as NodeJS.ErrnoException).code === "ERR_ASSERTION",
+		"a Node ERR_ code is a programmer failure, never an io_error",
+	);
+
+	// A genuine filesystem refusal is still an expected outcome, and still says nothing about paths.
+	rmSync(scopeDir("session", ctx), { recursive: true, force: true });
+	writeFileSync(scopeDir("session", ctx), "not a directory");
+	const refusal = resultError(await call(captured, "notes_write", { address: "blocked.md", content: "x" }, ctx));
+	assert.equal(refusal.code, "io_error");
+	assert.equal(refusal.message, "notes operation failed");
+});
+
+test("a body that repeats one anchor thousands of times refuses with bounded, counted facts", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	const repeats = 5000;
+	await call(captured, "notes_write", { address: "many.md", content: `${"beta\n".repeat(repeats)}end` }, ctx);
+
+	const raw = await call(captured, "notes_update", { address: "many.md", edits: [{ oldText: "beta", newText: "B" }] }, ctx);
+	assertWithinBudget(raw, "refusal with thousands of match lines");
+	const refusal = resultError(raw);
+	assert.equal(refusal.code, "ambiguous_edit");
+	assert.match(refusal.message, /occurs 5000 times \(lines 1, 2, 3, 4, 5, 6, 7, 8, and 4992 more\)/, "the message names a bounded sample and the exact total");
+	assert.match(refusal.message, /names 20 of 5000 match lines/, "the receipt says its own line list is partial");
+	assert.deepEqual(refusal.details?.line_numbers, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+	assert.equal(refusal.details?.line_numbers_total, repeats, "the full count travels with the sample, so nothing is silently dropped");
+	assert.equal(refusal.details?.edit_index, 0);
+	assert.equal(resultRead(await call(captured, "notes_read", { address: "many.md", limit_chars: 15 }, ctx)).content, "beta\n".repeat(3), "the refused edit changed nothing");
+
+	const replaced = resultData<NotesUpdateData>(await call(captured, "notes_update", { address: "many.md", edits: [{ oldText: "beta", newText: "B" }], replace_all: true }, ctx));
+	assertWithinBudget(await call(captured, "notes_read", { address: "many.md" }, ctx), "read after replace_all");
+	assert.equal(replaced.applied, 1);
 });
