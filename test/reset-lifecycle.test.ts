@@ -438,6 +438,9 @@ test("reset-control: fallback is normal-stop only; hard reserve remains safety",
 	assert.deepEqual(fallback.state, initialResetControl());
 
 	const automatic = reduceResetControl(initialResetControl(), { type: "close_out", windowId, source: "automatic" }).state;
+	const normalStop = reduceResetControl(automatic, { type: "before_settle", facts: beforeSettleFacts() });
+	assert.equal(normalStop.effect, "none", "ignoring a budget warning and answering normally must not wipe memory");
+	assert.deepEqual(normalStop.state, initialResetControl());
 	const disabledAuto = reduceResetControl(automatic, { type: "before_settle", facts: beforeSettleFacts({ automaticResetEnabled: false }) });
 	assert.equal(disabledAuto.effect, "none");
 	assert.deepEqual(disabledAuto.state, initialResetControl());

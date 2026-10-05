@@ -186,14 +186,11 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 				}
 				return { state: { request: NO_REQUEST, overflow: "spent" }, effect: spent ? "none" : "recover-overflow" };
 			}
-			if (facts.failed || !facts.enabled || request.phase !== "close-out") {
+			if (facts.failed || !facts.enabled || !manual) {
 				return { state: { ...state, request: NO_REQUEST }, effect: "none" };
 			}
 			if (facts.queued) return { state: { ...state, request }, effect: "none" };
-			if (request.source === "automatic" && !facts.automaticResetEnabled) {
-				return { state: { ...state, request: NO_REQUEST }, effect: "none" };
-			}
-			return { state: { request: NO_REQUEST, overflow: "idle" }, effect: request.source === "manual" ? "commit-boundary-stop" : "commit-boundary" };
+			return { state: { request: NO_REQUEST, overflow: "idle" }, effect: "commit-boundary-stop" };
 		}
 		case "settled":
 			return { state: initialResetControl(), effect: "none" };
@@ -205,8 +202,9 @@ export function reduceResetControl(state: ResetControlState, event: ResetControl
 
 /**
  * Own close-out requests at Pi's public turn and pre-settlement boundaries. Manual and budget
- * close-outs remain armed across note/tool turns and commit at a successful
- * agent_before_settle. A hard-reserve safety reset can commit earlier, but preserves a
+ * close-outs remain armed across note/tool turns. Only manual close-outs commit at a
+ * successful agent_before_settle; budget warnings alone never authorize a reset.
+ * A hard-reserve safety reset can commit earlier, but preserves a
  * run-scoped manual stop and cancels an otherwise automatic fresh-window request through
  * the public abort API. Direct tool requests commit at turn_end and continue normally.
  * Overflow recovery remains bounded.
