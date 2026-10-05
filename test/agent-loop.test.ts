@@ -362,8 +362,9 @@ test("real AgentSession: an aborted final warning stays silent until a successfu
 		await fixture.session.prompt("Retry successfully.");
 		await fixture.session.waitForIdle();
 		assert.equal(warnings().length, 1, "the successful retry commits one hidden warning");
-		assert.equal(resetMarkers(fixture).length, 1, "normal close-out resets after the committed warning");
-		assert.equal(notices(), 1, "the committed warning notifies once, including after reset");
+		assert.equal(resetMarkers(fixture).length, 0, "committing the warning does not authorize a reset at normal stop");
+		assert.equal(fixture.requests.length, 4, "the retry settles without a fresh-window continuation");
+		assert.equal(notices(), 1, "the committed warning notifies once");
 		assert.equal(fixture.notices.some((notice) => notice.includes("Context running low")), false, "early guidance remains UI-silent");
 	} finally {
 		fixture.close();
@@ -1343,12 +1344,10 @@ test("real AgentSession: persisted budget warning re-arms after a later abort/er
 
 			await fixture.session.prompt("REARM_AFTER_FAILED_TURN");
 			await fixture.session.waitForIdle();
-			assert.equal(resetMarkers(fixture).length, 1, "the next low-budget normal stop re-arms and commits one reset");
+			assert.equal(resetMarkers(fixture).length, 0, "a later normal stop still does not authorize a budget reset");
 			assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === WARNING_TYPE).length, 1, "re-arming does not duplicate the durable warning");
-			const checkpoint = fixture.sessionManager.getBranch().find((entry) => entry.type === "compaction");
-			assert.ok(checkpoint?.type === "compaction");
-			assert.equal(checkpoint.firstKeptEntryId, checkpoint.id, "the retry closes with one retain-none checkpoint");
-			assertFreshRequest(fixture, fixture.requests.length - 1, "REARM_AFTER_FAILED_TURN");
+			assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "compaction").length, 0);
+			assert.ok(text(fixture.requests.at(-1)).includes(`REARM_${mode}_INITIAL`), "the original task survives settlement");
 		} finally {
 			releaseWarningTurn();
 			fixture.close();
@@ -1392,9 +1391,15 @@ test("real AgentSession: warning precedes a durable checkpoint, including failed
 				assert.equal(existsSync(noteFile), false, "a failed checkpoint does not create a note");
 				assert.ok(branch.some((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "notes_write" && entry.message.isError && entry.message.content.some((part) => part.type === "text" && part.text.startsWith("error: invalid_address: "))), "the failed write persists its coded refusal as an error result");
 			} else {
-				assert.equal(resetMarkers(fixture).length, 1, "normal stop falls back to the same reset even when the warning was ignored");
+				assert.equal(resetMarkers(fixture).length, 0, "an ignored warning must not erase the task at normal stop");
+				assert.equal(fixture.requests.length, 3, "settlement must not manufacture a fresh-window request");
+				assert.equal(branch.filter((entry) => entry.type === "compaction").length, 0);
 				assert.equal(existsSync(noteFile), false);
-				assertFreshRequest(fixture, fixture.requests.length - 1, `WARNING_${scenario.toUpperCase()}_SENTINEL`);
+				await fixture.session.prompt("Continue the same task.");
+				await fixture.session.waitForIdle();
+				assert.equal(resetMarkers(fixture).length, 0);
+				assert.ok(text(fixture.requests.at(-1)).includes(`WARNING_${scenario.toUpperCase()}_SENTINEL`));
+				assert.equal(text(fixture.requests.at(-1)).split(WARNING_PROMPT).length - 1, 1, "the persisted warning remains visible without duplicate injection");
 			}
 		} finally {
 			fixture.close();
