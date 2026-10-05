@@ -7,7 +7,7 @@ export const MAX_READ_WINDOW_CHARS = 50000;
 export const HISTORY_PREVIEW_CHARS = 1200;
 
 function json(value: unknown): string {
-	return JSON.stringify(value, null, 2);
+	return JSON.stringify(value);
 }
 
 /** True when `text` fits the wire budget verbatim, for raw payloads with no JSON encoding. */

@@ -13,7 +13,7 @@ const ORIGIN = Type.Optional(Type.Union([...ORIGIN_VALUES], {
 }));
 const CRUMPLED_PARAMETER = Type.Optional(Type.Boolean({ description: "true crumples the note: it leaves the boot index, list, and search, stays readable by address, and appears with wastebasket: true. false smooths it back." }));
 const WASTEBASKET_PARAMETER = Type.Optional(Type.Boolean({ description: "true lists only crumpled notes instead of live ones." }));
-const ADDRESS_DESCRIPTION = "Address forms are bare `<vpath>` for this session, `@project/<vpath>` for this project, `@human/<vpath>` for the human's cross-project notes, `@self/<vpath>` for your own, and `@model/<vpath>` for the current model's. `@self` and `@model` mean whoever is running now. Any other `@` prefix, or `@` inside a vpath, is refused. There is no fallback across prefixes. Paths reject `..`, absolute paths, and backslashes. `@` addresses belong to the notes namespace, not the filesystem: never pass them to general read/write/edit/bash tools.";
+const ADDRESS_DESCRIPTION = "Address forms per the boot protocol. `@` addresses are notes, not files: feed one to read/write/edit/bash and a real directory named `@project` is born. Don't.";
 const WINDOW_DESCRIPTION = "The response carries the longest fitting prefix of that window as text, plus the same window as structured fields; when characters remain, the closing line names the offset_chars to pass back to continue.";
 
 /** The one receipt field a caller cannot derive from the address itself. */

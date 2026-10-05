@@ -66,7 +66,7 @@ export function registerBudget(
 		for (const [key, notice] of pendingNotices) {
 			if (warningCommittedInWindow(ctx, notice)) {
 				pendingNotices.delete(key);
-				ctx.ui.notify("pi-context: Context almost full; close out the current memory window.", "warning");
+				ctx.ui.notify("pi-context: context almost full; close out the current memory window.", "warning");
 			} else if (settled) {
 				// An uncommitted draft must not be matched to a later manual warning.
 				pendingNotices.delete(key);
@@ -171,6 +171,8 @@ export function registerBudget(
 		automaticResetEnabled,
 		hardReserveDue,
 		consumeTurnEnd,
+		/** The same close-out countdown the model sees, for user-facing status; null when usage is unknown. */
+		statusFor: (ctx: ExtensionContext): { remaining: number | null } => ({ remaining: remainingBudget(remainingTokens(ctx), thresholdsFor(ctx).warning) }),
 		clear: () => { clearStaged(); pendingNotices.clear(); },
 	};
 }

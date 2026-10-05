@@ -123,7 +123,8 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 				cmdCtx.ui.notify("Usage: /pi-context [on|off]", "error");
 				return;
 			}
-			cmdCtx.ui.notify(`pi-context: ${enabled ? "on" : "off"} · ${buildLabel} · Pi ${VERSION}`, "info");
+			const remaining = budget.statusFor(cmdCtx).remaining;
+			cmdCtx.ui.notify(`pi-context: ${enabled ? "on" : "off"} · ${buildLabel} · Pi ${VERSION} · window ${currentWindowId(cmdCtx)}${remaining === null ? "" : ` · ${remaining.toLocaleString("en-US")} tokens before close-out`}`, "info");
 		},
 	});
 

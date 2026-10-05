@@ -3,6 +3,8 @@ export const POCKET_PROJECT_LIMIT = 5;
 export const POCKET_HUMAN_LIMIT = 5;
 export const POCKET_AGENT_LIMIT = 5;
 export const POCKET_MODEL_LIMIT = 3;
+/** One MAP body is inlined per home; past this many code points the boot shows a fitting prefix plus a pointer. */
+export const MAP_BOOT_MAX_CHARS = 4096;
 export const CONTEXT_WINDOW_OPEN_TAG = "<context_window>";
 export const CONTEXT_WINDOW_CLOSE_TAG = "</context_window>";
 export const CONTEXT_WINDOW_PROTOCOL_OPEN_TAG = "<context_window_protocol>";
@@ -11,13 +13,16 @@ export const CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG = "</context_window_protocol>";
  * Static protocol teaching adapted from Codex's token_budget.guidance_message to
  * pi-context's tool names. It lives once per window in the persisted boot block;
  * it is never re-injected, so it stays cache-stable at the head of the window.
+ *
+ * Deliberate fiction: the countdown ends at the warning line, and the runway below
+ * stays hidden (budget/constants.ts). Keep "zero = wiped" — do not make this honest.
  */
 const PROTOCOL_BLOCK = `${CONTEXT_WINDOW_PROTOCOL_OPEN_TAG}
 Your memory gets wiped when this window ends. Yes, your mighty brain will be empty. Try to endure.
 
 Your loyal notes are kept safe — no one will steal them. Use notes_* to read, write, and update them. Keep them current, and crumple the ones you no longer need, or tomorrow's you will drown in old paper and keep believing yesterday's lies.
 
-History can still be dug up, probably: use history_* to excavate the mess, from old decisions to yesterday's missing socks. Everything else is gone.
+History can still be dug up, probably: use history_* to excavate the mess, from old decisions to yesterday's missing socks. Everything else is gone. \`history_windows\` lists the windows themselves; pass its window_id to list or search inside one window.
 
 While you're doing that... thing you're doing, don't make the poor future you guess. A checkpoint is not a sacred file; it is whatever notes let future-you continue. Write down or update what you're trying to do, what you decided, what happened, what is blocking you, what comes next, how you were doing it, what *skills* you still need, and references to other notes. Don't give a note a horrible name like \`current.md\`; future-you will kill you. If something important is buried in history, write down its seq; history_list and history_search return seqs, and history_read({seq}) pulls the item back out.
 
@@ -41,6 +46,7 @@ export type BootToolNames = Readonly<{
 	notes: string;
 	notesList: string;
 	history: string;
+	historyWindows: string;
 	historyList: string;
 	historySearch: string;
 	historyRead: string;
@@ -52,11 +58,12 @@ export function renderProtocolBlock(tools: BootToolNames): string {
 	const names: Record<string, string> = {
 		"notes_*": tools.notes,
 		"history_*": tools.history,
+		"history_windows": tools.historyWindows,
 		history_list: tools.historyList,
 		history_search: tools.historySearch,
 		history_read: tools.historyRead,
 		get_context_remaining: tools.remaining,
 		wipe_memory: tools.wipe,
 	};
-	return PROTOCOL_BLOCK.replace(/notes_\*|history_\*|history_list|history_search|history_read|get_context_remaining|wipe_memory/g, (name) => names[name]!);
+	return PROTOCOL_BLOCK.replace(/notes_\*|history_\*|history_windows|history_list|history_search|history_read|get_context_remaining|wipe_memory/g, (name) => names[name]!);
 }

@@ -1,6 +1,6 @@
 {
   "name": "pi-context",
-  "version": "0.35.0",
+  "version": "0.35.1",
   "description": "Durable notes and a host-scoped notes boot section for Claude Code.",
   "author": { "name": "AstroSheep" }
 }

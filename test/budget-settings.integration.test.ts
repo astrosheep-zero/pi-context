@@ -61,7 +61,7 @@ test("early guidance stays silent and the committed final warning notifies once"
 	await commitTurnEndBoundary(captured, sm, final);
 	await runHandlers(captured, "turn_start", {}, final);
 	await runHandlers(captured, "agent_settled", {}, final);
-	assert.equal(noticesOf(final).filter((notice) => notice.message === "pi-context: Context almost full; close out the current memory window.").length, 1, "only the committed final warning notifies, exactly once");
+	assert.equal(noticesOf(final).filter((notice) => notice.message === "pi-context: context almost full; close out the current memory window.").length, 1, "only the committed final warning notifies, exactly once");
 });
 
 test("the visible countdown ends at the warning line, clamps at zero, and preserves unknown usage", async () => {

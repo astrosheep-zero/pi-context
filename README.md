@@ -1,5 +1,7 @@
 # pi-context
 
+Your agent's memory gets wiped when the context fills. pi-context makes that survivable: the agent keeps durable notes, checkpoints before a wipe, and reads its own history afterward. For you it's mostly invisible — an occasional notification, `/wipe-memory` to force a fresh window, `/pi-context` to toggle.
+
 Codex-style context windows for [Pi](https://github.com/earendil-works/pi): durable reset windows, session-history tools, and persistent notes — implemented entirely with public extension APIs. No Pi core modification required.
 
 ## Install

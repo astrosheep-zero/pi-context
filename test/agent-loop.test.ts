@@ -182,7 +182,7 @@ async function openFixture(options: {
 					assert.ok(sessionManager.getBranch().some((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE && (entry.data as { windowId?: string })?.windowId === windowId), "notification follows the reset marker commit");
 					assert.ok(sessionManager.getBranch().some((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && (entry.details as { windowId?: string })?.windowId === windowId), "notification follows the reset boot commit");
 				}
-				if (type === "warning" && /^pi-context: Context (?:almost full|running low)/.test(message)) budgetNotices++;
+				if (type === "warning" && /^pi-context: context (?:almost full|running low)/.test(message)) budgetNotices++;
 				notices.push(message);
 			},
 		} as ExtensionUIContext,
@@ -750,8 +750,8 @@ test("real AgentSession: a reset survives all notes-home read failures with an i
 		const boot = fixture.sessionManager.getBranch().find((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && entry.details && typeof entry.details === "object" && (entry.details as { windowId?: unknown }).windowId === windowId);
 		assert.ok(boot && boot.type === "custom_message");
 		const bootText = typeof boot.content === "string" ? boot.content : JSON.stringify(boot.content);
-		assert.ok(bootText.includes("## The human | @human\n： this drawer wouldn't open — ask notes_list to try again"));
-		assert.equal(bootText.match(/this drawer wouldn't open/g)?.length, 5, "each failed section gets one recovery line");
+		assert.ok(bootText.includes("## The human | @human\nThis drawer wouldn't open — ask notes_list to try again."));
+		assert.equal(bootText.match(/This drawer wouldn't open/g)?.length, 5, "each failed section gets one recovery line");
 		assert.ok(bootText.includes("<context_window_protocol>"));
 	} finally {
 		fixture.close();

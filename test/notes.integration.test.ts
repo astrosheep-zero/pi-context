@@ -258,7 +258,7 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 	assert.equal(expandedText.includes("You find"), false, "the old pocket heading is gone");
 
 	const empty = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), () => []);
-	assert.match(renderBootBlock({ ...renderData, notes: empty }), /# Your notes\n\n： None yet\. A blank slate is a fine place to start — just don't finish there\./);
+	assert.match(renderBootBlock({ ...renderData, notes: empty }), /# Your notes\n\nNone yet\. A blank slate is a fine place to start — just don't finish there\./);
 	const crumpledNote = note("session", "crumpled.md", "crumpled.md", "SHOULD_NOT_SHOW");
 	const mapAndUnicode = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), (scope) => scope === "session" ? [
 		note("session", "MAP.md", "MAP.md", "SESSION_MAP_BODY"),
@@ -285,7 +285,7 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 		currentWindowId: "pcw:test:next",
 		notes: oneFailed,
 	});
-	assert.ok(oneFailedText.includes("PROJECT_MAP_BODY") && oneFailedText.includes("## The human | @human\n： this drawer wouldn't open — ask notes_list to try again"), "healthy homes and a per-section recovery notice survive one failure");
+	assert.ok(oneFailedText.includes("PROJECT_MAP_BODY") && oneFailedText.includes("## The human | @human\nThis drawer wouldn't open — ask notes_list to try again."), "healthy homes and a per-section recovery notice survive one failure");
 	assert.equal(oneFailedText.includes("HUMAN_POCKET_BODY"), false, "the failed home's index is omitted");
 
 	const allFailed = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), (scope) => {

@@ -67,7 +67,7 @@ export function register(on: On) {
     if (!identity) return result
     const boot = await run($, { op: "boot", identity, tools: {
       notes: `${PREFIX}notes_*`, notesList: `${PREFIX}notes_list`,
-      history: "history_* (unavailable in Claude)", historyList: "history_list (unavailable in Claude)",
+      history: "history_* (unavailable in Claude)", historyWindows: "history_windows (unavailable in Claude)", historyList: "history_list (unavailable in Claude)",
       historySearch: "history_search (unavailable in Claude)", historyRead: "history_read (unavailable in Claude)",
       remaining: "get_context_remaining (unavailable in Claude)", wipe: "wipe_memory (unavailable in Claude)",
     } }, identity.cwd)

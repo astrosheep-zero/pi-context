@@ -1,5 +1,5 @@
 import type { NotesHome, NotesSnapshot } from "./snapshot.js";
-import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, POCKET_AGENT_LIMIT, POCKET_HUMAN_LIMIT, POCKET_MODEL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, renderProtocolBlock, type BootToolNames } from "./text.js";
+import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, MAP_BOOT_MAX_CHARS, POCKET_AGENT_LIMIT, POCKET_HUMAN_LIMIT, POCKET_MODEL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, renderProtocolBlock, type BootToolNames } from "./text.js";
 
 /** Codex-style <context_window> identity block: the resolved agent and model names plus first/current/previous window ids. */
 function identityBlock(agentName: string, modelName: string, firstWindowId: string, currentWindowId: string, previousWindowId?: string): string {
@@ -37,7 +37,7 @@ function notesIndex(snapshot: NotesSnapshot, agentName: string, modelName: strin
 	const sections: string[] = [];
 	for (const home of homes) {
 		if (snapshot.unavailable.some((failed) => failed.scope === home.scope)) {
-			sections.push(`## ${home.label}\n： this drawer wouldn't open — ask ${tools.notesList} to try again`);
+			sections.push(`## ${home.label}\nThis drawer wouldn't open — ask ${tools.notesList} to try again.`);
 			continue;
 		}
 		const rows = rowsFor(snapshot, home.scope);
@@ -45,7 +45,7 @@ function notesIndex(snapshot: NotesSnapshot, agentName: string, modelName: strin
 		const recent = rows.filter((row) => row.meta.crumpledAt === undefined && row.path !== "MAP.md").slice(0, home.limit);
 		if (!map?.body && recent.length === 0) continue;
 		const contents = [`## ${home.label}`];
-		if (map?.body) contents.push(`●  MAP.md\n${map.body}`);
+		if (map?.body) contents.push(`●  MAP.md\n${mapBodyForBoot(map.address, map.body)}`);
 		if (recent.length > 0) {
 			contents.push(`●  Recent notes\n${recent.map((row) =>
 				`- ${row.address} | ${Array.from(row.body).length} chars | ${relativeTime(row.meta.updatedAt, snapshot.openedAt)}`
@@ -55,7 +55,14 @@ function notesIndex(snapshot: NotesSnapshot, agentName: string, modelName: strin
 	}
 	return `# Your notes\n\n${sections.length > 0
 		? sections.join("\n\n")
-		: "： None yet. A blank slate is a fine place to start — just don't finish there."}`;
+		: "None yet. A blank slate is a fine place to start — just don't finish there."}`;
+}
+
+/** One unbounded MAP body fits the boot only up to the cap; the cut names where the rest lives. */
+function mapBodyForBoot(address: string, body: string): string {
+	const chars = Array.from(body);
+	if (chars.length <= MAP_BOOT_MAX_CHARS) return body;
+	return `${chars.slice(0, MAP_BOOT_MAX_CHARS).join("")}\n[MAP cut at ${MAP_BOOT_MAX_CHARS} chars — slim it down; full body at ${address}]`;
 }
 
 /**
