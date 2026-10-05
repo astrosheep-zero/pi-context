@@ -1,8 +1,5 @@
-export const POCKET_SESSION_LIMIT = 5;
-export const POCKET_PROJECT_LIMIT = 5;
-export const POCKET_HUMAN_LIMIT = 5;
-export const POCKET_AGENT_LIMIT = 5;
-export const POCKET_MODEL_LIMIT = 3;
+/** Each shelf shows this many of its own freshest pages beneath the map. */
+export const SHELF_FRESH_LIMIT = 3;
 /** One MAP body is inlined per home; past this many code points the boot shows a fitting prefix plus a pointer. */
 export const MAP_BOOT_MAX_CHARS = 4096;
 export const CONTEXT_WINDOW_OPEN_TAG = "<context_window>";

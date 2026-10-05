@@ -208,11 +208,11 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 		},
 	});
 	const rows = new Map<Scope, NoteRow[]>([
-		["session", [note("session", "MAP.md", "MAP.md", "SESSION_MAP_BODY"), note("session", "session.md", "session.md", "SESSION_POCKET_BODY")]],
+		["session", [note("session", "MAP.md", "MAP.md", "SESSION_MAP_BODY"), note("session", "session.md", "session.md", "# Session note\n\nSESSION_POCKET_BODY")]],
 		["project", [note("project", "MAP.md", "@project/MAP.md", "PROJECT_MAP_BODY")]],
-		["human", [note("human", "MAP.md", "@human/MAP.md", "HUMAN_MAP_BODY"), note("human", "human.md", "@human/human.md", "HUMAN_POCKET_BODY")]],
+		["human", [note("human", "MAP.md", "@human/MAP.md", "HUMAN_MAP_BODY"), note("human", "human.md", "@human/human.md", "# Human note\n\nHUMAN_POCKET_BODY")]],
 		["agent", [note("agent", "MAP.md", "@agents/root/MAP.md", "AGENT_MAP_BODY")]],
-		["model", [note("model", "model.md", "@models/default/model.md", "MODEL_POCKET_BODY")]],
+		["model", [note("model", "model.md", "@models/default/model.md", "# Model note\n\nMODEL_POCKET_BODY")]],
 	]);
 	const calls = new Map<Scope, number>();
 	const snapshot = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), (scope) => {
@@ -232,15 +232,17 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 	const rendered = renderBootBlock(renderData);
 	assert.equal(renderBootBlock(renderData), rendered, "rendering the same boot data twice is deterministic");
 	assert.ok(rendered.includes("HUMAN_MAP_BODY") && rendered.includes("PROJECT_MAP_BODY") && rendered.includes("AGENT_MAP_BODY") && rendered.includes("SESSION_MAP_BODY"), "all home maps, including session, are pinned");
-	assert.ok(rendered.includes("session.md") && rendered.includes("@human/human.md"), "recent rows come from the same snapshot");
-	assert.equal(rendered.includes("SESSION_POCKET_BODY"), false, "recent bodies stay excluded");
-	assert.equal(rendered.includes("- MAP.md"), false, "a pinned session map does not take a recent seat");
-	assert.match(rendered, /- session\.md \| 19 chars \| (?:just now|\d+s ago)/);
-	assert.equal(rendered.includes("UTF-8 bytes"), false, "recent rows omit implementation-oriented byte counts");
-	assert.ok(rendered.indexOf("<context_window_protocol>") < rendered.indexOf("# Your notes"), "the protocol explains the notes before presenting them");
-	const headings = ["## The human | @human", "## You | @self → @agents/root", "## Your model | @model → @models/default", "## This project | @project", "## This session"];
-	for (let i = 1; i < headings.length; i++) assert.ok(rendered.indexOf(headings[i - 1]!) < rendered.indexOf(headings[i]!), "homes proceed from durable to current session");
-	assert.ok(rendered.indexOf("HUMAN_MAP_BODY") < rendered.indexOf("- @human/human.md"), "each map stays next to its own recent notes");
+	assert.ok(rendered.includes("session.md") && rendered.includes("@human/human.md"), "the fresh page carries rows from every home");
+	assert.equal(rendered.includes("SESSION_POCKET_BODY"), false, "fresh-page bodies stay excluded");
+	assert.equal(rendered.includes("- MAP.md"), false, "a pinned session map does not take a feed seat");
+	assert.match(rendered, / {2}Session note\n {2}session\.md · (?:just now|\d+s ago)/, "a feed entry is the note's own title over its locator");
+	assert.equal(rendered.includes("UTF-8 bytes"), false, "fresh rows omit implementation-oriented byte counts");
+	assert.ok(rendered.indexOf("<context_window_protocol>") < rendered.indexOf("YOUR NOTES"), "the protocol explains the notes before presenting them");
+	assert.match(rendered, /THIS PROJECT · @project\n─+/, "shelves carry underlined headers");
+	assert.ok(rendered.includes("New pages"), "shelves label their fresh pages");
+	assert.ok(rendered.indexOf("THIS SESSION") < rendered.indexOf("New pages"), "the first shelf opens the index");
+	const headings = ["THIS SESSION · bare paths", "THIS PROJECT · @project", "YOU · @self → @agents/root", "THE HUMAN · @human"];
+	for (let i = 1; i < headings.length; i++) assert.ok(rendered.indexOf(headings[i - 1]!) < rendered.indexOf(headings[i]!), "shelves proceed from current hands to durable");
 
 	const expanded = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), (scope) => {
 		if (scope === "project" || scope === "human" || scope === "agent" || scope === "model") {
@@ -249,16 +251,15 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 		return rows.get(scope) ?? [];
 	});
 	const expandedText = renderBootBlock({ ...renderData, notes: expanded });
-	for (const prefix of ["@project", "@human", "@agents/root"]) {
-		for (let i = 0; i < 5; i++) assert.ok(expandedText.includes(`- ${prefix}/note-${i}.md | `), `${prefix} includes note ${i}`);
-		assert.equal(expandedText.includes(`- ${prefix}/note-5.md | `), false, `${prefix} is capped at five`);
-	}
-	for (let i = 0; i < 3; i++) assert.ok(expandedText.includes(`- @models/default/note-${i}.md | `), `@model includes note ${i}`);
-	assert.equal(expandedText.includes("- @models/default/note-3.md | "), false, "@model is capped at three");
+	const freshRows = expandedText.match(/^ {2}\S[^\n]* · (?:just now|\d+s ago)$/gm) ?? [];
+	assert.equal(freshRows.length, 13, "each shelf keeps three of its own pages; the session shelf keeps its one");
+	assert.ok(expandedText.includes("@project/note-2.md"), "the project shelf's third page");
+	assert.equal(expandedText.includes("@project/note-3.md"), false, "the project shelf's fourth page stays shelved");
+	assert.ok(expandedText.includes("@models/default/note-2.md"), "the model shelf also gets three");
 	assert.equal(expandedText.includes("You find"), false, "the old pocket heading is gone");
 
 	const empty = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), () => []);
-	assert.match(renderBootBlock({ ...renderData, notes: empty }), /# Your notes\n\nNone yet\. A blank slate is a fine place to start — just don't finish there\./);
+	assert.match(renderBootBlock({ ...renderData, notes: empty }), /YOUR NOTES\n──────────\n\nNone yet\. A blank slate is a fine place to start — just don't finish there\./);
 	const crumpledNote = note("session", "crumpled.md", "crumpled.md", "SHOULD_NOT_SHOW");
 	const mapAndUnicode = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), (scope) => scope === "session" ? [
 		note("session", "MAP.md", "MAP.md", "SESSION_MAP_BODY"),
@@ -266,10 +267,11 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 		{ ...crumpledNote, meta: { ...crumpledNote.meta, crumpledAt: localIso(updated) } },
 	] : []);
 	const mapAndUnicodeText = renderBootBlock({ ...renderData, notes: mapAndUnicode });
-	assert.match(mapAndUnicodeText, /SESSION_MAP_BODY[\s\S]*- unicode\.md \| 2 chars \| (?:just now|\d+s ago)/);
+	assert.match(mapAndUnicodeText, / {2}🐑字\n {2}unicode\.md · (?:just now|\d+s ago)/, "a headingless note is announced by its first line");
+	assert.ok(mapAndUnicodeText.includes("THIS SESSION · bare paths\n─────────────────────────\n\nMAP — MAP.md\n\n  SESSION_MAP_BODY\n\nNew pages\n\n  🐑字\n  unicode.md · just now"), "the session shelf keeps its typography");
 	assert.equal(mapAndUnicodeText.includes("crumpled.md"), false);
-	assert.equal(mapAndUnicodeText.includes("- MAP.md"), false);
-	assert.equal(mapAndUnicodeText.includes("## The human"), false, "empty sections are omitted");
+	assert.equal(/MAP\.md ·/.test(mapAndUnicodeText), false, "maps never take feed seats");
+	assert.equal(mapAndUnicodeText.includes("THE HUMAN"), false, "empty shelves are omitted");
 
 	const readFailure = (code: string): NodeJS.ErrnoException => Object.assign(new Error("scripted read failure"), { code });
 	const oneFailed = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), (scope) => {
@@ -285,8 +287,9 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 		currentWindowId: "pcw:test:next",
 		notes: oneFailed,
 	});
-	assert.ok(oneFailedText.includes("PROJECT_MAP_BODY") && oneFailedText.includes("## The human | @human\nThis drawer wouldn't open — ask notes_list to try again."), "healthy homes and a per-section recovery notice survive one failure");
+	assert.ok(oneFailedText.includes("PROJECT_MAP_BODY") && oneFailedText.includes("THE HUMAN · @human\n──────────────────\n\n  This drawer wouldn't open — ask notes_list to try again."), "healthy homes and a per-section recovery notice survive one failure");
 	assert.equal(oneFailedText.includes("HUMAN_POCKET_BODY"), false, "the failed home's index is omitted");
+	assert.equal(oneFailedText.includes("Human note"), false, "the failed home takes no feed seats");
 
 	const allFailed = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), (scope) => {
 		throw readFailure(scope === "session" ? "EACCES" : "EIO");

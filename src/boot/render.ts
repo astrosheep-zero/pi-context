@@ -1,5 +1,5 @@
 import type { NotesHome, NotesSnapshot } from "./snapshot.js";
-import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, MAP_BOOT_MAX_CHARS, POCKET_AGENT_LIMIT, POCKET_HUMAN_LIMIT, POCKET_MODEL_LIMIT, POCKET_PROJECT_LIMIT, POCKET_SESSION_LIMIT, renderProtocolBlock, type BootToolNames } from "./text.js";
+import { CONTEXT_WINDOW_OPEN_TAG, CONTEXT_WINDOW_CLOSE_TAG, MAP_BOOT_MAX_CHARS, SHELF_FRESH_LIMIT, renderProtocolBlock, type BootToolNames } from "./text.js";
 
 /** Codex-style <context_window> identity block: the resolved agent and model names plus first/current/previous window ids. */
 function identityBlock(agentName: string, modelName: string, firstWindowId: string, currentWindowId: string, previousWindowId?: string): string {
@@ -25,37 +25,64 @@ function rowsFor(snapshot: NotesSnapshot, scope: NotesHome["scope"]) {
 	return snapshot.homes.get(scope) ?? [];
 }
 
-/** One closed boot snapshot, grouped by who or what the notes belong to. */
+/** A feed entry is announced in the note's own words: its first heading, else its first line, cut short. */
+const FEED_TITLE_MAX_CHARS = 40;
+
+function feedTitle(body: string): string | undefined {
+	const lines = body.split("\n");
+	const heading = lines.find((line) => /^#+\s+\S/.test(line));
+	const raw = (heading ? heading.replace(/^#+\s+/, "") : lines.find((line) => line.trim().length > 0) ?? "").trim();
+	if (raw.length === 0) return undefined;
+	const chars = Array.from(raw);
+	return chars.length > FEED_TITLE_MAX_CHARS ? `${chars.slice(0, FEED_TITLE_MAX_CHARS).join("")}…` : chars.join("");
+}
+
+/** Two spaces of indent say "shelved content" without any furniture. */
+function indent(text: string): string {
+	return text.split("\n").map((line) => (line.length > 0 ? `  ${line}` : line)).join("\n");
+}
+
+/** An underlined header is the classical plain-text document heading: no renderer required. */
+function section(label: string, body: string): string {
+	return `${label}\n${"─".repeat(Array.from(label).length)}\n\n${body}`;
+}
+
+/** One closed boot snapshot: five tabbed shelves, current hands first, durable last; each shelf keeps its map and its own freshest pages. */
 function notesIndex(snapshot: NotesSnapshot, agentName: string, modelName: string, tools: BootToolNames): string {
-	const homes: ReadonlyArray<{ scope: NotesHome["scope"]; label: string; limit: number }> = [
-		{ scope: "human", label: "The human | @human", limit: POCKET_HUMAN_LIMIT },
-		{ scope: "agent", label: `You | @self → @agents/${agentName}`, limit: POCKET_AGENT_LIMIT },
-		{ scope: "model", label: `Your model | @model → @models/${modelName}`, limit: POCKET_MODEL_LIMIT },
-		{ scope: "project", label: "This project | @project", limit: POCKET_PROJECT_LIMIT },
-		{ scope: "session", label: "This session", limit: POCKET_SESSION_LIMIT },
+	const homes: ReadonlyArray<{ scope: NotesHome["scope"]; label: string }> = [
+		{ scope: "session", label: "THIS SESSION · bare paths" },
+		{ scope: "project", label: "THIS PROJECT · @project" },
+		{ scope: "agent", label: `YOU · @self → @agents/${agentName}` },
+		{ scope: "model", label: `YOUR MODEL · @model → @models/${modelName}` },
+		{ scope: "human", label: "THE HUMAN · @human" },
 	];
-	const sections: string[] = [];
+
+	const shelves: string[] = [];
 	for (const home of homes) {
 		if (snapshot.unavailable.some((failed) => failed.scope === home.scope)) {
-			sections.push(`## ${home.label}\nThis drawer wouldn't open — ask ${tools.notesList} to try again.`);
+			shelves.push(section(home.label, indent(`This drawer wouldn't open — ask ${tools.notesList} to try again.`)));
 			continue;
 		}
-		const rows = rowsFor(snapshot, home.scope);
-		const map = rows.find((row) => row.path === "MAP.md" && row.meta.crumpledAt === undefined);
-		const recent = rows.filter((row) => row.meta.crumpledAt === undefined && row.path !== "MAP.md").slice(0, home.limit);
-		if (!map?.body && recent.length === 0) continue;
-		const contents = [`## ${home.label}`];
-		if (map?.body) contents.push(`●  MAP.md\n${mapBodyForBoot(map.address, map.body)}`);
-		if (recent.length > 0) {
-			contents.push(`●  Recent notes\n${recent.map((row) =>
-				`- ${row.address} | ${Array.from(row.body).length} chars | ${relativeTime(row.meta.updatedAt, snapshot.openedAt)}`
-			).join("\n")}`);
-		}
-		sections.push(contents.join("\n\n"));
+		const rows = rowsFor(snapshot, home.scope).filter((row) => row.meta.crumpledAt === undefined);
+		const map = rows.find((row) => row.path === "MAP.md");
+		const fresh = rows
+			.filter((row) => row.path !== "MAP.md")
+			.slice(0, SHELF_FRESH_LIMIT)
+			.map((row) => {
+				const locator = `${row.address} · ${relativeTime(row.meta.updatedAt, snapshot.openedAt)}`;
+				const title = feedTitle(row.body);
+				return title === undefined ? `  ${locator}` : `  ${title}\n  ${locator}`;
+			});
+		if (!map?.body && fresh.length === 0) continue;
+		const parts: string[] = [];
+		if (map?.body) parts.push(`MAP — ${map.address}\n\n${indent(mapBodyForBoot(map.address, map.body))}`);
+		if (fresh.length > 0) parts.push(`New pages\n\n${fresh.join("\n\n")}`);
+		shelves.push(section(home.label, parts.join("\n\n")));
 	}
-	return `# Your notes\n\n${sections.length > 0
-		? sections.join("\n\n")
-		: "None yet. A blank slate is a fine place to start — just don't finish there."}`;
+
+	return shelves.length > 0
+		? ["YOUR NOTES\n──────────", ...shelves].join("\n\n\n")
+		: "YOUR NOTES\n──────────\n\nNone yet. A blank slate is a fine place to start — just don't finish there.";
 }
 
 /** One unbounded MAP body fits the boot only up to the cap; the cut names where the rest lives. */
