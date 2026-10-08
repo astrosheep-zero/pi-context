@@ -237,7 +237,7 @@ function renderWriteData(data: NotesWriteData): string {
 
 export const notesWrite = {
 	name: "notes_write", label: "Notes write",
-	description: `Create or rewrite a note, and name it for what it holds and when to reach for it: a fresh window sees only the name in the index and decides whether to open by it. Write it for a reader who arrives knowing nothing, and keep it true when the content drifts. ${ADDRESS_DESCRIPTION} A rewrite replaces the body whole while preserving createdAt and every other frontmatter key. Writing always produces an uncrumpled note. The receipt reports the resolved address, project key when applicable, and actual create/overwrite/uncrumple outcome.`,
+	description: `Create or rewrite a note, and name it for what it holds and when to reach for it: a fresh window sees only the name in the index and decides whether to open by it. Write it so the next window can pick it up: what it's for, what was decided, what's still open. Whatever git and history can hand back on their own, leave out. Keep it true when the content drifts. ${ADDRESS_DESCRIPTION} A rewrite replaces the body whole while preserving createdAt and every other frontmatter key. Writing always produces an uncrumpled note. The receipt reports the resolved address, project key when applicable, and actual create/overwrite/uncrumple outcome.`,
 	parameters: notesWriteParameters, outputSchema: outcomeSchema(NotesWriteDataSchema), executionMode: "sequential",
 	async execute(params: Static<typeof notesWriteParameters>, identity: NotesIdentity): Promise<Outcome<NotesWriteData>> {
 		try {
