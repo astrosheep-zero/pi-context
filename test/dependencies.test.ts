@@ -88,10 +88,12 @@ test("the intentional root exports only the Pi extension and its settings-bound 
 });
 
 
-test("configured built extension and moved dream CLI are executable current entries", async () => {
+test("configured extension source and moved dream CLI are executable current entries", async () => {
 	const root = repository();
 	const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-	const built = await import(pathToFileURL(resolve(root, manifest.pi.extensions[0])).href);
+	const entrySource = resolve(root, manifest.pi.extensions[0]);
+	assert.ok(existsSync(entrySource), "the manifest entry exists as TypeScript source (Pi loads it directly; plain Node cannot)");
+	const built = await import(pathToFileURL(resolve(root, "dist/src/index.js")).href);
 	const tools: ToolDefinition[] = [];
 	const commands: string[] = [];
 	built.default({

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { resetBoundaryCommitted } from "./reset/committed.js";
 import { getCurrentSystemMessage, Type } from "@earendil-works/pi-ai";
 import { VERSION, defineTool, type ExtensionAPI, type ExtensionContext, type SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -10,12 +11,17 @@ import { BOOT_TYPE, MANUAL_WIPE_TYPE } from "./entries.js";
 import { WARNING_CONTENT } from "./reset/text.js";
 import { ensureBoot, type IncompleteNotesNotifier } from "./boot.js";
 
-declare const __PI_CONTEXT_BUILD__: { version: string; sourceHash: string };
+function readPackageVersion(): string {
+	for (const up of ["../../package.json", "../../../package.json"]) {
+		try {
+			const parsed = JSON.parse(readFileSync(new URL(up, import.meta.url), "utf8")) as { version?: string };
+			if (parsed.version) return parsed.version;
+		} catch { /* try the next candidate */ }
+	}
+	return "dev";
+}
 
-// The bundle captures its identity; direct source loads must not claim a built hash.
-const buildLabel = typeof __PI_CONTEXT_BUILD__ === "undefined"
-	? "unbundled source (build unknown)"
-	: `${__PI_CONTEXT_BUILD__.version} · build ${__PI_CONTEXT_BUILD__.sourceHash.slice(0, 12)}`;
+const buildLabel = `v${readPackageVersion()}`;
 
 function branchHasWindowMarker(ctx: ExtensionContext, fromId?: string): boolean {
 	return ctx.sessionManager.getBranch(fromId).some((entry) => isWindowMarker(entry));
