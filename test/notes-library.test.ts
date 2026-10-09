@@ -105,8 +105,8 @@ test("stores snapshot explicit identity and do not leak homes across instances",
 	await other.write("@self/private", "second");
 	assert.equal((await notes.read("@self/private"))?.body, "first");
 	assert.equal((await other.read("@self/private"))?.body, "second");
-	assert.equal((await notes.list())[0]?.address, "@agents/root/private.md");
-	assert.equal((await other.list())[0]?.address, "@agents/other-agent/private.md");
+	assert.equal((await notes.list())[0]?.address, "@self/private.md");
+	assert.equal((await other.list())[0]?.address, "@self/private.md");
 
 	mkdirSync(join(home, "agents/visitor"), { recursive: true });
 	writeFileSync(join(home, "agents/visitor/hello.md"), "visiting");

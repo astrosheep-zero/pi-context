@@ -45,7 +45,17 @@ test("exactly the five notes tools are registered; the legacy five are gone", ()
 	assert.equal(captured.tools.get("notes_read")?.executionMode, undefined);
 });
 
-test("every notes tool declares an outcome schema that accepts its own structured payload", async () => {
+test("notes and history tools are grouped under their own namespaces", () => {
+	const captured = makeExtension(manager());
+	for (const name of ["notes_write", "notes_update", "notes_read", "notes_list", "notes_search"]) {
+		assert.equal(captured.tools.get(name)?.namespace?.name, "notes", `${name} is in notes`);
+	}
+	for (const name of ["history_windows", "history_list", "history_read", "history_search"]) {
+		assert.equal(captured.tools.get(name)?.namespace?.name, "history", `${name} is in history`);
+	}
+});
+
+test("every notes tool declares a result schema that accepts its own structured payload", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
@@ -343,7 +353,7 @@ test("write and update receipts distinguish outcomes and no-op edits", async () 
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	const alias = resultData<NotesWriteData>(await call(captured, "notes_write", { address: "@self/alias", content: "body" }, ctx));
-	assertReceiptIdentity(alias, "@agents/anonymous/alias.md", "agent", ctx);
+	assertReceiptIdentity(alias, "@self/alias.md", "agent", ctx);
 	assert.equal(alias.outcome, "created");
 	assert.equal(resultData<NotesWriteData>(await call(captured, "notes_write", { address: "@agents/anonymous/alias.md", content: "new body" }, ctx)).outcome, "overwrote");
 	await call(captured, "notes_update", { address: "@self/alias", crumpled: true }, ctx);
@@ -517,7 +527,7 @@ test("@ addresses select one home, reject illegal sigils, and never fall back", 
 	assert.ok(existsSync(physicalPath("human", "same.md", ctx)), "@human writes to the human home");
 	assert.match(resultRead(await call(captured, "notes_read", { address: "same.md" }, ctx)).content, /session$/);
 	assert.equal(resultError(await call(captured, "notes_read", { address: "@project/missing.md" }, ctx)).message, "note not found");
-	assert.match(resultError(await call(captured, "notes_read", { address: "@glboal/same.md" }, ctx)).message, /@project\/.*@human\/.*bare names are this session/);
+	assert.match(resultError(await call(captured, "notes_read", { address: "@glboal/same.md" }, ctx)).message, /no @ for this session.*@project\/.*@human\//);
 	assert.equal(resultError(await call(captured, "notes_write", { address: "bad@name.md", content: "no" }, ctx)).code, "invalid_address");
 	assert.equal(existsSync(join(root, "human", "bad@name.md")), false, "a bad sigil creates nothing anywhere");
 });
@@ -530,7 +540,9 @@ test("Pi adapter defaults to anonymous agent identity", async () => {
 	await withAgent(undefined, async () => {
 		await call(captured, "notes_write", { address: "@self/private.md", content: "anonymous agent note" }, ctx);
 		const listed = resultData<NotesListData>(await call(captured, "notes_list", {}, ctx));
-		assert.deepEqual(listed.files.map((row) => row.address), ["@agents/anonymous/private.md"]);
+		assert.deepEqual(listed.files.map((row) => row.address), ["@self/private.md"]);
+		const explicit = resultData<NotesListData>(await call(captured, "notes_list", { pattern: "@agents/*/private.md" }, ctx));
+		assert.deepEqual(explicit.files.map((row) => row.address), ["@self/private.md"], "explicit-id patterns still match the current home");
 		assert.equal(existsSync(join(root, "agents", "anonymous", "private.md")), true);
 	});
 });
@@ -547,9 +559,9 @@ test("Pi adapter resolves agent and switched model identity on each notes call a
 		assert.equal(resultError(await call(captured, "notes_read", { address: "@model/private.md" }, ctx)).message, "note not found", "switched model does not fall back to previous home");
 		await call(captured, "notes_write", { address: "@model/private.md", content: "second model note" }, ctx);
 		const listed = resultData<NotesListData>(await call(captured, "notes_list", {}, ctx));
-		assert.deepEqual(listed.files.map((row) => row.address).sort(), ["@agents/test-agent/private.md", "@models/second-model/private.md"]);
+		assert.deepEqual(listed.files.map((row) => row.address).sort(), ["@model/private.md", "@self/private.md"]);
 		const boot = await explicitBoot(ctx, "test-window", undefined);
-		assert.ok(boot.includes("@models/second-model/private.md"));
+		assert.ok(boot.includes("@model/private.md"));
 		assert.equal(boot.includes("@models/first-model/private.md"), false);
 		assert.match(resultRead(await call(captured, "notes_read", { address: "@models/first-model/private.md" }, ctx)).content, /first model note$/);
 		const refused = resultError(await call(captured, "notes_update", { address: "@models/first-model/private.md", crumpled: true }, ctx));

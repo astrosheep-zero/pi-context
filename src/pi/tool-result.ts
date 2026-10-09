@@ -33,6 +33,7 @@ export function registerOperation<TParams extends TSchema, TData, TRest extends 
 		parameters: operation.parameters,
 		outputSchema: operation.outputSchema,
 		executionMode: operation.executionMode,
+		...(namespace ? { namespace } : {}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			return piOperationResult(operation.render, await run(params, ctx));
 		},

@@ -18,11 +18,11 @@ function packageRoot(): string {
 	return dir;
 }
 
-function discoverDreamSkill(skillsDir: string) {
+function discoverSkill(skillsDir: string, name: string) {
 	const result = loadSkillsFromDir({ dir: skillsDir, source: "path" });
 	assert.deepEqual(result.diagnostics, []);
-	const skill = result.skills.find((candidate) => candidate.name === "dream");
-	assert.ok(skill, "Pi's public skill loader discovers dream");
+	const skill = result.skills.find((candidate) => candidate.name === name);
+	assert.ok(skill, `Pi's public skill loader discovers ${name}`);
 	assert.ok(skill.description.length > 0);
 	return skill;
 }
@@ -35,7 +35,8 @@ test("dream skill is publicly discoverable and resolves the CLI's shared playboo
 	assert.equal(manifest.bin.dream, "dist/src/pi/dream/cli.js");
 	assert.ok(manifest.files.includes("skills"));
 
-	const skill = discoverDreamSkill(join(root, "skills"));
+	discoverSkill(join(root, "skills"), "memory");
+	const skill = discoverSkill(join(root, "skills"), "dream");
 	const skillPlaybook = resolve(skill.baseDir, "../../playbook.md");
 	const packagePlaybook = resolve(root, "playbook.md");
 	assert.equal(skillPlaybook, packagePlaybook);
@@ -55,6 +56,7 @@ test("npm tarball keeps the skill's relative playbook path portable after extrac
 		}))[0] as { filename: string; files: Array<{ path: string }> };
 		const packedPaths = packed.files.map((file) => file.path);
 		assert.ok(packedPaths.includes("skills/dream/SKILL.md"));
+		assert.ok(packedPaths.includes("skills/memory/SKILL.md"));
 		assert.ok(packedPaths.includes("playbook.md"));
 		assert.ok(packedPaths.includes("src/index.ts"));
 		assert.ok(packedPaths.includes("dist/src/pi/dream/cli.js"));
@@ -63,7 +65,8 @@ test("npm tarball keeps the skill's relative playbook path portable after extrac
 		execFileSync("mkdir", ["-p", extracted]);
 		execFileSync("tar", ["-xzf", join(fixture, packed.filename), "-C", extracted]);
 		const installedRoot = join(extracted, "package");
-		const installedSkill = discoverDreamSkill(join(installedRoot, "skills"));
+		discoverSkill(join(installedRoot, "skills"), "memory");
+		const installedSkill = discoverSkill(join(installedRoot, "skills"), "dream");
 		const referencedPlaybook = resolve(installedSkill.baseDir, "../../playbook.md");
 		assert.equal(referencedPlaybook, resolve(installedRoot, "playbook.md"));
 		assert.equal(loadPlaybook(referencedPlaybook), readFileSync(referencedPlaybook, "utf8"));

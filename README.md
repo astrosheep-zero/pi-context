@@ -22,7 +22,7 @@ pi -e npm:@astrosheep/pi-context
 - **A boot block at every window head** — static once-per-window content (cache-stable) carrying the window identity, the recent-notes index, and a short protocol that teaches the model how to recover: notes for its own bookkeeping, history tools for everything before the reset. The five note homes are read once into that boot's snapshot; a home that is unavailable is omitted without blocking the window, and the boot says that `notes_list` can retry after recovery.
 - **Budget close-out** — one early reminder at the configured margin, followed (when automatic compaction is enabled) by a hidden warning above Pi's hard reserve. That warning allows a multi-turn close-out and, unlike manual `/wipe-memory` (which stops), continues in the fresh window. The hard reserve remains a separate safety reset.
 - **`get_context_remaining`** — the live context-budget countdown to the warning line (`reserve + 16,384`); the warning runway below that line is hidden, and unknown usage returns null.
-- **Nine history/notes tools** — Codex's History/Notes actions flattened into Pi's single tool namespace; notes are real markdown files under `~/.agents/notes` (`human/`, `project/`, `agents/`, `models/`, `pi/session/`):
+- **Nine history/notes tools** — Codex's History/Notes actions flattened into Pi tool names, grouped under the `notes` and `history` tool namespaces (both point to `/skill:memory`); notes are real markdown files under `~/.agents/notes` (`human/`, `project/`, `agents/`, `models/`, `pi/session/`):
 
 | Codex action | Pi tool |
 | --- | --- |
@@ -125,7 +125,7 @@ const matches = await notes.search(["library"]);
 
 The library returns full data, not tool envelopes or paginated/truncated output. `NoteError` exposes the existing named store refusals through `code`, with `lineNumbers` for ambiguous edits and `editIndex` for a failed edit. Runtime API fields and known persisted note metadata use camelCase; Pi tool wire fields such as `updated_at`, `offset_chars`, and `replace_all` retain their established names. Unrecognized frontmatter keys, including old snake_case metadata, are preserved as ordinary extras; they are not interpreted as current camelCase fields or migrated automatically. Invalid addresses/identities and filesystem failures reject; only a missing `read` returns `undefined`. Notes remain markdown files with the existing size limits and same-directory atomic rename. Same-file read/modify/write work is serialized by absolute physical filename across all store instances in this process (including `.md` address aliases); symlink/case aliases and cross-process locking are not guaranteed. `list` and `search` asynchronously traverse homes and serialize each discovered file read against pending mutations, but are not global snapshots and may not discover a file created after traversal. Foreign named homes can be read (including the access-metadata update), but their bodies cannot be written or edited through the store. These are cooperative address rules, not an OS security sandbox.
 
-Addresses use bare paths, `@project/`, `@human/`, `@self/`, `@model/`, or explicit `@agents/<slug>/` and `@models/<slug>/`. Relative self/model addresses resolve to the supplied identity; listing renders their concrete names. The disk layout remains `pi/session/<sessionId>/`, `project/<projectKey>/`, `human/`, `agents/<agent>/`, and `models/<model>/`. No data migration happens on library import or construction. Notes already using camelCase metadata retain their metadata; old snake_case keys are preserved as unrecognized extras, not interpreted or migrated. New session notes record the supplied project key.
+Addresses are a path with no `@` (a session note), `@project/`, `@human/`, `@self/`, `@model/`, or explicit `@agents/<slug>/` and `@models/<slug>/`. Relative self/model addresses resolve to the supplied identity. Results show the current agent's and model's notes as `@self/` and `@model/`; only other agents' or models' notes carry an explicit `@agents/<slug>/` or `@models/<slug>/`. Patterns accept either form. The disk layout remains `pi/session/<sessionId>/`, `project/<projectKey>/`, `human/`, `agents/<agent>/`, and `models/<model>/`. No data migration happens on library import or construction. Notes already using camelCase metadata retain their metadata; old snake_case keys are preserved as unrecognized extras, not interpreted or migrated. New session notes record the supplied project key.
 
 ### Library and plugin boundary
 
@@ -211,6 +211,10 @@ rm "${PI_NOTES_HOME:-$HOME/.agents/notes}/.dream.lock"
 ```
 
 Removing a lock while a holder is running is outside the supported cooperative protocol and can let two dreams run at once.
+
+## Memory skill
+
+The package provides `/skill:memory`, a short self-contained guide to the notes and history tools: note addresses and homes, finding and paging notes, searching and paging history, saving recovery state, and what to do when a memory tool is unavailable. It is a fallback for sessions where the boot protocol is missing or unclear and a reference on demand; normal tool calls do not require reading it. It is written independently of the boot text rather than generated from it. The Claude Code Mod does not ship it, because that host has no history tools.
 
 ## Dream skill
 

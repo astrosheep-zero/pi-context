@@ -48,12 +48,12 @@ function section(label: string, body: string): string {
 }
 
 /** One closed boot snapshot: five tabbed shelves, current hands first, durable last; each shelf keeps its map and its own freshest pages. */
-function notesIndex(snapshot: NotesSnapshot, agentName: string, modelName: string, tools: BootToolNames): string {
+function notesIndex(snapshot: NotesSnapshot, tools: BootToolNames): string {
 	const homes: ReadonlyArray<{ scope: NotesHome["scope"]; label: string }> = [
-		{ scope: "session", label: "THIS SESSION · bare paths" },
+		{ scope: "session", label: "THIS SESSION · no @" },
 		{ scope: "project", label: "THIS PROJECT · @project" },
-		{ scope: "agent", label: `YOU · @self → @agents/${agentName}` },
-		{ scope: "model", label: `YOUR MODEL · @model → @models/${modelName}` },
+		{ scope: "agent", label: "YOU · @self" },
+		{ scope: "model", label: "YOUR MODEL · @model" },
 		{ scope: "human", label: "THE HUMAN · @human" },
 	];
 
@@ -110,6 +110,6 @@ export function renderBootBlock(data: BootRenderData): string {
 	const parts: string[] = [];
 	parts.push(identityBlock(data.agentName, data.modelName, data.firstWindowId, data.currentWindowId, data.previousWindowId));
 	parts.push(renderProtocolBlock(data.tools));
-	parts.push(notesIndex(data.notes, data.agentName, data.modelName, data.tools));
+	parts.push(notesIndex(data.notes, data.tools));
 	return parts.join("\n\n");
 }

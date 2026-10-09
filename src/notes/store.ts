@@ -3,7 +3,7 @@ import type { Dirent } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { earliestMatchOffsetChars } from "../text-match.js";
-import { assertAddress, assertGlobPattern, addressFor, globToRegExp } from "./address.js";
+import { assertAddress, assertGlobPattern, addressFor, canonicalAddressFor, globToRegExp } from "./address.js";
 import { isFilesystemError } from "./fs-error.js";
 import { snapshotNotesIdentity, type NotesIdentity } from "./identity.js";
 import { NoteError } from "./errors.js";
@@ -138,7 +138,7 @@ async function homesForPattern(pattern: string | undefined, identity: NotesIdent
 	return [];
 }
 
-/** Relative pattern heads resolve to canonical names, so they match rendered addresses. */
+/** Relative pattern heads resolve to canonical names, so they match canonical addresses. */
 function normalizePattern(pattern: string | undefined, identity: NotesIdentity): string | undefined {
 	if (!pattern) return pattern;
 	if (pattern.startsWith("@self/")) return `@agents/${identity.agent}/${pattern.slice("@self/".length)}`;
@@ -422,8 +422,8 @@ export function createNotesStore(input: NotesIdentity): NotesStore {
 			let excluded = 0;
 			try {
 				for (const path of await walkMarkdown(root)) {
+					if (matcher && !matcher.test(canonicalAddressFor(identity, scope, path, home.who))) continue;
 					const address = addressFor(identity, scope, path, home.who);
-					if (matcher && !matcher.test(address)) continue;
 					const fullPath = join(root, path);
 					const raw = await withPathQueue(fullPath, () => readFile(fullPath, "utf8"));
 					const { meta, body } = parseNote(raw);

@@ -241,7 +241,7 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 	assert.match(rendered, /THIS PROJECT · @project\n─+/, "shelves carry underlined headers");
 	assert.ok(rendered.includes("New pages"), "shelves label their fresh pages");
 	assert.ok(rendered.indexOf("THIS SESSION") < rendered.indexOf("New pages"), "the first shelf opens the index");
-	const headings = ["THIS SESSION · bare paths", "THIS PROJECT · @project", "YOU · @self → @agents/root", "THE HUMAN · @human"];
+	const headings = ["THIS SESSION · no @", "THIS PROJECT · @project", "YOU · @self", "THE HUMAN · @human"];
 	for (let i = 1; i < headings.length; i++) assert.ok(rendered.indexOf(headings[i - 1]!) < rendered.indexOf(headings[i]!), "shelves proceed from current hands to durable");
 
 	const expanded = await loadNotesSnapshot(notesIdentityFromPi(ctx), Date.now(), (scope) => {
@@ -268,7 +268,7 @@ test("boot note acquisition is one closed snapshot and isolates one or all faile
 	] : []);
 	const mapAndUnicodeText = renderBootBlock({ ...renderData, notes: mapAndUnicode });
 	assert.match(mapAndUnicodeText, / {2}🐑字\n {2}unicode\.md · (?:just now|\d+s ago)/, "a headingless note is announced by its first line");
-	assert.ok(mapAndUnicodeText.includes("THIS SESSION · bare paths\n─────────────────────────\n\nMAP — MAP.md\n\n  SESSION_MAP_BODY\n\nNew pages\n\n  🐑字\n  unicode.md · just now"), "the session shelf keeps its typography");
+	assert.ok(mapAndUnicodeText.includes("THIS SESSION · no @\n───────────────────\n\nMAP — MAP.md\n\n  SESSION_MAP_BODY\n\nNew pages\n\n  🐑字\n  unicode.md · just now"), "the session shelf keeps its typography");
 	assert.equal(mapAndUnicodeText.includes("crumpled.md"), false);
 	assert.equal(/MAP\.md ·/.test(mapAndUnicodeText), false, "maps never take feed seats");
 	assert.equal(mapAndUnicodeText.includes("THE HUMAN"), false, "empty shelves are omitted");
@@ -323,7 +323,7 @@ test("the boot block gives awake agents the notes-home file layout", async () =>
 	const session = manager();
 	const rendered = await explicitBoot(context(session), "pcw:test:root", undefined);
 	assert.equal(rendered.includes(process.env.PI_NOTES_HOME ?? ""), false, "the absolute notes home is never exposed");
-	assert.match(rendered, /bare <vpath>[\s\S]*@project\/<vpath>[\s\S]*@human\/<vpath>/);
+	assert.match(rendered, /<path>, no @[\s\S]*@project\/<path>[\s\S]*@human\/<path>/);
 });
 
 test("an over-budget note is delivered as a bounded prefix and resumed by next_offset_chars", async () => {

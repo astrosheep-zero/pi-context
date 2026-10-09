@@ -4,7 +4,7 @@ import { SLUG_PATTERN, type Scope } from "./paths.js";
 
 export type NoteAddress = { scope: Scope; path: string; who?: string };
 
-export const ADDRESS_FORMS = "legal prefixes are @project/, @human/, @self/, and @model/; bare names are this session";
+export const ADDRESS_FORMS = "use <path> with no @ for this session, or @project/, @human/, @self/, or @model/ followed by a path";
 
 /** A refusal names the offending input; JSON quoting keeps control chars visible, and stringify misses get String(). */
 function shown(value: unknown): string {
@@ -90,11 +90,21 @@ export function assertAddress(value: unknown): NoteAddress {
 	return { scope, path, who };
 }
 
-/** Render a virtual path in its one unambiguous public address form. */
-export function addressFor(identity: NotesIdentity, scope: Scope, path: string, who?: string): string {
+/** Render a virtual path in its one unambiguous address form, used to match patterns. */
+export function canonicalAddressFor(identity: NotesIdentity, scope: Scope, path: string, who?: string): string {
 	if (scope === "session") return path;
 	if (scope === "project") return `@project/${path}`;
 	if (scope === "human") return `@human/${path}`;
 	if (scope === "agent") return `@agents/${who ?? identity.agent}/${path}`;
 	return `@models/${who ?? identity.model}/${path}`;
+}
+
+/**
+ * Render the address a caller sees. The current agent and model homes read as @self/ and
+ * @model/ so ordinary sessions are not taught explicit ids; only other homes (dream) name one.
+ */
+export function addressFor(identity: NotesIdentity, scope: Scope, path: string, who?: string): string {
+	if (scope === "agent" && (who === undefined || who === identity.agent)) return `@self/${path}`;
+	if (scope === "model" && (who === undefined || who === identity.model)) return `@model/${path}`;
+	return canonicalAddressFor(identity, scope, path, who);
 }
