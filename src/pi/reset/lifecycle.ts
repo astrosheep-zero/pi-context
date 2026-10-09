@@ -300,7 +300,7 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 		const markerExists = currentReset(ctx) !== undefined;
 		if (options.isEnabled() || markerExists) {
 			if (event.reason === "manual") {
-				ctx.ui.notify("pi-context: /compact is disabled while context windows are active; use /wipe-memory to start a fresh window.", "warning");
+				ctx.ui.notify("pi-context: /compact is disabled while context windows are active; use /clear-memory to start a fresh window.", "warning");
 			}
 			return { cancel: true };
 		}

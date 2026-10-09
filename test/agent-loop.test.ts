@@ -141,7 +141,7 @@ async function openFixture(options: {
 		settingsManager,
 		sessionManager,
 		resourceLoader: loader,
-		tools: options.tools ?? ["wipe_memory", "notes_write", "get_context_remaining"],
+		tools: options.tools ?? ["clear_memory", "notes_write", "get_context_remaining"],
 	});
 	session = created.session;
 	session.subscribe((event) => events.push(event as unknown as { type: string; [key: string]: unknown }));
@@ -380,7 +380,7 @@ test("real AgentSession: final warning survives its reset boundary and notifies 
 			if (request === 2) return assistant(fixture, [{ type: "toolCall", id: "final-budget-probe-2", name: "get_context_remaining", arguments: {} }], "toolUse", { usage: usage(60_000) });
 			if (request === 3) {
 				assert.ok(text(context).includes(WARNING_PROMPT), "the final warning reaches the model");
-				return assistant(fixture, [{ type: "toolCall", id: "final-budget-wipe", name: "wipe_memory", arguments: {} }], "toolUse", { usage: usage(60_000) });
+				return assistant(fixture, [{ type: "toolCall", id: "final-budget-wipe", name: "clear_memory", arguments: {} }], "toolUse", { usage: usage(60_000) });
 			}
 			return assistant(fixture, [{ type: "text", text: "fresh window ready" }]);
 		},
@@ -411,7 +411,7 @@ test("real AgentSession: explicit tiny-session wipe ignores keepRecentTokens and
 		compactionEnabled: false,
 		keepRecentTokens: 1_000_000,
 		script: (request, context) => request === 1
-			? assistant(fixture, [{ type: "toolCall", id: "wipe-1", name: "wipe_memory", arguments: {} }], "toolUse")
+			? assistant(fixture, [{ type: "toolCall", id: "wipe-1", name: "clear_memory", arguments: {} }], "toolUse")
 			: assistant(fixture, [{ type: "text", text: "resumed in a new window" }]),
 	});
 	try {
@@ -448,7 +448,7 @@ test("real AgentSession: manual command spans its tool batch and stops at settle
 		script: (request, context) => {
 			if (request === 1) return assistant(fixture, [{ type: "text", text: "before manual reset" }]);
 			if (request === 2) {
-				assert.ok(text(context).includes(WARNING_PROMPT), "idle /wipe-memory sends the shared checkpoint prompt");
+				assert.ok(text(context).includes(WARNING_PROMPT), "idle /clear-memory sends the shared checkpoint prompt");
 				return assistant(fixture, [{ type: "toolCall", id: "manual-note", name: "notes_write", arguments: { address: "manual-a.md", content: "MANUAL_NOTE_ALPHA" } }], "toolUse");
 			}
 			assert.equal(request, 3, "the close-out turn finishes in the old window");
@@ -459,7 +459,7 @@ test("real AgentSession: manual command spans its tool batch and stops at settle
 	try {
 		await fixture.session.prompt("MANUAL_CLOSEOUT_OLD_SENTINEL");
 		await fixture.session.waitForIdle();
-		await fixture.session.prompt("/wipe-memory");
+		await fixture.session.prompt("/clear-memory");
 		await fixture.session.waitForIdle();
 		assert.equal(fixture.requests.length, 3, "the run stops at settlement instead of continuing in the fresh window");
 		assert.equal(resetMarkers(fixture).length, 1);
@@ -498,13 +498,13 @@ test("real AgentSession: manual hard-reserve reset stops clean and mixed-tool tu
 				assert.equal(request, 2, "no provider work follows the manual safety reset");
 				return assistant(fixture, mixed ? [
 					{ type: "toolCall", id: "pressure-note", name: "notes_write", arguments: { address: "pressure.md", content: "PRESERVED_PRESSURE_NOTE" } },
-					{ type: "toolCall", id: "pressure-wipe", name: "wipe_memory", arguments: {} },
+					{ type: "toolCall", id: "pressure-wipe", name: "clear_memory", arguments: {} },
 				] : [{ type: "text", text: "close-out complete" }], mixed ? "toolUse" : "stop", { usage: usage(80_000) });
 			},
 		});
 		try {
 			await fixture.session.prompt("HARD_RESERVE_OLD_SENTINEL");
-			await fixture.session.prompt("/wipe-memory");
+			await fixture.session.prompt("/clear-memory");
 			await fixture.session.waitForIdle();
 			assert.equal(fixture.requests.length, 2);
 			assert.equal(resetMarkers(fixture).length, 1, "the safety wipe is not repeated at settlement");
@@ -549,7 +549,7 @@ test("real AgentSession: manual safety reset answers queued user input once befo
 	});
 	try {
 		await fixture.session.prompt("QUEUED_SAFETY_OLD_SENTINEL");
-		await fixture.session.prompt("/wipe-memory");
+		await fixture.session.prompt("/clear-memory");
 		await fixture.session.waitForIdle();
 		assert.equal(fixture.requests.length, 4, "queued input is answered once after Pi's tool follow-up, then the stop lands");
 		assert.equal(resetMarkers(fixture).length, 1);
@@ -571,7 +571,7 @@ test("real AgentSession: manual overflow wipes and stops even with automatic res
 	});
 	try {
 		await fixture.session.prompt("MANUAL_OVERFLOW_OLD_SENTINEL");
-		await fixture.session.prompt("/wipe-memory");
+		await fixture.session.prompt("/clear-memory");
 		await fixture.session.waitForIdle();
 		assert.equal(fixture.requests.length, 2);
 		assert.equal(resetMarkers(fixture).length, 1);
@@ -582,7 +582,7 @@ test("real AgentSession: manual overflow wipes and stops even with automatic res
 	}
 });
 
-test("real AgentSession: streaming /wipe-memory steers a close-out and stops at settlement", { timeout: 20000 }, async () => {
+test("real AgentSession: streaming /clear-memory steers a close-out and stops at settlement", { timeout: 20000 }, async () => {
 	let fixture!: Fixture;
 	let announceStarted!: () => void;
 	let releaseResponse!: () => void;
@@ -604,8 +604,8 @@ test("real AgentSession: streaming /wipe-memory steers a close-out and stops at 
 	try {
 		const running = fixture.session.prompt("STREAMING_WIPE_OLD_SENTINEL");
 		await started;
-		await fixture.session.prompt("/wipe-memory", { streamingBehavior: "steer" });
-		await fixture.session.prompt("/wipe-memory", { streamingBehavior: "followUp" });
+		await fixture.session.prompt("/clear-memory", { streamingBehavior: "steer" });
+		await fixture.session.prompt("/clear-memory", { streamingBehavior: "followUp" });
 		assert.equal(fixture.notices.filter((notice) => notice.includes("queued; the agent is asked to close out")).length, 1, "the user is notified once while output is ongoing");
 		assert.equal(resetMarkers(fixture).length, 0, "the ongoing turn is not interrupted");
 		releaseResponse();
@@ -639,9 +639,9 @@ test("real AgentSession: repeated manual commands share one pending window", { t
 		},
 	});
 	try {
-		const first = fixture.session.prompt("/wipe-memory");
+		const first = fixture.session.prompt("/clear-memory");
 		await started;
-		const second = fixture.session.prompt("/wipe-memory");
+		const second = fixture.session.prompt("/clear-memory");
 		releaseResponse();
 		await Promise.all([first, second]);
 		await fixture.session.waitForIdle();
@@ -674,7 +674,7 @@ test("real AgentSession: user abort, synthetic aborted response, and generic err
 			},
 		});
 		try {
-			await fixture.session.prompt("/wipe-memory");
+			await fixture.session.prompt("/clear-memory");
 			await fixture.session.waitForIdle();
 			assert.equal(resetMarkers(fixture).length, 0, `${mode} does not force a reset`);
 			assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "compaction").length, 0);
@@ -713,7 +713,7 @@ test("real AgentSession: steering and follow-up queued during a manual reset are
 			},
 		});
 		try {
-			const command = fixture.session.prompt("/wipe-memory");
+			const command = fixture.session.prompt("/clear-memory");
 			await started;
 			if (delivery === "steer") fixture.session.steer("QUEUED_DURING_FALLBACK");
 			else fixture.session.followUp("QUEUED_DURING_FALLBACK");
@@ -736,7 +736,7 @@ test("real AgentSession: a reset survives all notes-home read failures with an i
 		compactionEnabled: false,
 		notesRootFile: true,
 		script: (request) => request === 1
-			? assistant(fixture, [{ type: "toolCall", id: "wipe-notes-failure", name: "wipe_memory", arguments: {} }], "toolUse")
+			? assistant(fixture, [{ type: "toolCall", id: "wipe-notes-failure", name: "clear_memory", arguments: {} }], "toolUse")
 			: assistant(fixture, [{ type: "text", text: "resumed despite notes failure" }]),
 	});
 	try {
@@ -780,7 +780,7 @@ test("real AgentSession: reset projection drops legacy message shapes but keeps 
 			sessionManager.branchWithSummary(sessionManager.getLeafId(), legacyTexts[3], { legacy: true }, true);
 		},
 		script: (request, context) => {
-			if (request === 1) return assistant(fixture, [{ type: "toolCall", id: "wipe-legacy", name: "wipe_memory", arguments: {} }], "toolUse");
+			if (request === 1) return assistant(fixture, [{ type: "toolCall", id: "wipe-legacy", name: "clear_memory", arguments: {} }], "toolUse");
 			if (request === 2) {
 				const body = text(context);
 				for (const legacy of legacyTexts) assert.equal(body.includes(legacy), false, `${legacy} is cut from the reset projection`);
@@ -812,9 +812,9 @@ test("real AgentSession: successive resets and a mixed tool batch cut only after
 		fixture = await openFixture({
 			compactionEnabled: false,
 			script: (request) => {
-				if (scenario === "successive" && request < 3) return assistant(fixture, [{ type: "toolCall", id: `wipe-${request}`, name: "wipe_memory", arguments: {} }], "toolUse");
+				if (scenario === "successive" && request < 3) return assistant(fixture, [{ type: "toolCall", id: `wipe-${request}`, name: "clear_memory", arguments: {} }], "toolUse");
 				if (scenario === "mixed" && request === 1) return assistant(fixture, [
-					{ type: "toolCall", id: "wipe-1", name: "wipe_memory", arguments: {} },
+					{ type: "toolCall", id: "wipe-1", name: "clear_memory", arguments: {} },
 					{ type: "toolCall", id: "note-1", name: "notes_write", arguments: { address: "batch.md", content: "MIXED_BATCH_NOTE" } },
 				], "toolUse");
 				return assistant(fixture, [{ type: "text", text: "fresh completion" }]);
@@ -849,7 +849,7 @@ test("real AgentSession: two retain-none checkpoints survive session-file reopen
 		compactionEnabled: false,
 		sessionDir,
 		script: (request) => request < 3
-			? assistant(fixture, [{ type: "toolCall", id: `persisted-wipe-${request}`, name: "wipe_memory", arguments: {} }], "toolUse")
+			? assistant(fixture, [{ type: "toolCall", id: `persisted-wipe-${request}`, name: "clear_memory", arguments: {} }], "toolUse")
 			: assistant(fixture, [{ type: "text", text: "second reset window complete" }]),
 	});
 	try {
@@ -884,7 +884,7 @@ test("real AgentSession: two retain-none checkpoints survive session-file reopen
 		assert.ok(canonical.some((message) => message.role === "compactionSummary"), "the accepted empty-summary wrapper survives reload");
 		const system = getCurrentSystemMessage(canonical);
 		assert.ok(JSON.stringify(system).includes("Use the tools as requested."), "the complete system prompt survives the checkpoint");
-		assert.ok(system?.toolsAdded?.some((tool) => tool.name === "wipe_memory"), "the active tool loadout survives reopen");
+		assert.ok(system?.toolsAdded?.some((tool) => tool.name === "clear_memory"), "the active tool loadout survives reopen");
 		const reopenedMarkers = branch.filter((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE);
 		const latestMarker = reopenedMarkers.at(-1);
 		const previousMarker = reopenedMarkers[0];
@@ -906,13 +906,13 @@ test("real AgentSession: steering and follow-up are delivered exactly once in th
 			compactionEnabled: false,
 			hook: (pi, getSession) => {
 				pi.on("tool_call", async (event) => {
-					if ((event as { toolName?: string }).toolName !== "wipe_memory") return;
+					if ((event as { toolName?: string }).toolName !== "clear_memory") return;
 					if (deliverAs === "steer") await getSession().steer("QUEUED_ONCE");
 					else await getSession().followUp("QUEUED_ONCE");
 				});
 			},
 			script: (request) => request === 1
-				? assistant(fixture, [{ type: "toolCall", id: "wipe-queue", name: "wipe_memory", arguments: {} }], "toolUse")
+				? assistant(fixture, [{ type: "toolCall", id: "wipe-queue", name: "clear_memory", arguments: {} }], "toolUse")
 				: assistant(fixture, [{ type: "text", text: "queued message handled" }]),
 		});
 		try {
@@ -938,7 +938,7 @@ test("real AgentSession: hidden or missing reset boots refuse to move the bounda
 	try {
 		await fixture.session.prompt("ROOT_BEFORE_HIDDEN_BOOT");
 		await fixture.session.waitForIdle();
-		await fixture.session.prompt("/wipe-memory");
+		await fixture.session.prompt("/clear-memory");
 		await fixture.session.waitForIdle();
 		await fixture.session.prompt("VALID_POST_MARKER_WORK");
 		await fixture.session.waitForIdle();
@@ -994,7 +994,7 @@ test("real AgentSession: the complete system message and a changed tool loadout 
 	fixture = await openFixture({
 		compactionEnabled: false,
 		systemPrompt: ["SYSTEM_SECTION_ALPHA", "SYSTEM_SECTION_BETA", "SYSTEM_TOOLS_SECTION", "SYSTEM_LOADOUT_SECTION"].join("\n"),
-		tools: ["wipe_memory"],
+		tools: ["clear_memory"],
 		script: (request, context) => {
 			const systemText = JSON.stringify(context.messages.filter((message) => message.role === "system"));
 			const currentSystem = getCurrentSystemMessage(context.messages);
@@ -1004,11 +1004,11 @@ test("real AgentSession: the complete system message and a changed tool loadout 
 			assert.ok(systemText.includes("SYSTEM_TOOLS_SECTION"));
 			assert.ok(systemText.includes("SYSTEM_LOADOUT_SECTION"));
 			if (request === 1) {
-				assert.deepEqual(effectiveToolNames, ["wipe_memory"]);
-				fixture.session.setActiveToolsByName(["wipe_memory", "get_context_remaining"]);
-				return assistant(fixture, [{ type: "toolCall", id: "wipe-system", name: "wipe_memory", arguments: {} }], "toolUse");
+				assert.deepEqual(effectiveToolNames, ["clear_memory"]);
+				fixture.session.setActiveToolsByName(["clear_memory", "get_context_remaining"]);
+				return assistant(fixture, [{ type: "toolCall", id: "wipe-system", name: "clear_memory", arguments: {} }], "toolUse");
 			}
-			assert.deepEqual(effectiveToolNames, ["get_context_remaining", "wipe_memory"]);
+			assert.deepEqual(effectiveToolNames, ["get_context_remaining", "clear_memory"]);
 			assert.ok(JSON.stringify(context.messages).includes(CONTEXT_WINDOW_OPEN_TAG));
 			return assistant(fixture, [{ type: "text", text: "all system sections survived" }]);
 		},
@@ -1371,7 +1371,7 @@ test("real AgentSession: warning precedes a durable checkpoint, including failed
 					address: scenario === "write-error" ? "../invalid.md" : "checkpoint.md",
 					content: "CHECKPOINT_SENTINEL",
 				} }], "toolUse", { usage: usage(60_000) });
-				if (request === 4 && scenario !== "ignored-warning") return assistant(fixture, [{ type: "toolCall", id: "wipe-after-checkpoint", name: "wipe_memory", arguments: {} }], "toolUse", { usage: usage(60_000) });
+				if (request === 4 && scenario !== "ignored-warning") return assistant(fixture, [{ type: "toolCall", id: "wipe-after-checkpoint", name: "clear_memory", arguments: {} }], "toolUse", { usage: usage(60_000) });
 				return assistant(fixture, [{ type: "text", text: scenario === "ignored-warning" ? "warning intentionally ignored" : "checkpoint and wipe complete" }], "stop", { usage: usage(60_000) });
 			},
 		});

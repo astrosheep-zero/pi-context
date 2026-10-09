@@ -167,8 +167,8 @@ function fakeBoundaryEvent(entries: SessionBoundaryDraft[] = [], message?: Agent
 test("public reset boundary drafts one marker, one boot, and one continuation after a tool batch", async () => {
 	const h = harness();
 	h.sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "before reset" }], timestamp: Date.now() });
-	const first = await h.callTool("wipe_memory");
-	const second = await h.callTool("wipe_memory");
+	const first = await h.callTool("clear_memory");
+	const second = await h.callTool("clear_memory");
 	assert.ok(first.content.length > 0 && second.content.length > 0, "both tool calls return normally");
 
 	const toolBatch: SessionBoundaryDraft[] = [{ type: "custom_message", customType: "foreign/tool-batch", content: "tool finished", display: false }];
@@ -194,9 +194,9 @@ test("public reset boundary drafts one marker, one boot, and one continuation af
 	assert.equal(branch.filter((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE).length, 1);
 });
 
-test("manual /wipe-memory spans tool turns and commits the stop at settlement", async () => {
+test("manual /clear-memory spans tool turns and commits the stop at settlement", async () => {
 	const h = harness();
-	await h.runCommand("wipe-memory");
+	await h.runCommand("clear-memory");
 	assert.ok(h.sent.some((message) => message.customType === MANUAL_WIPE_TYPE && message.triggerTurn === true), "the idle close-out warning starts a turn");
 	const toolCallMessage = {
 		role: "assistant",
@@ -220,7 +220,7 @@ test("manual /wipe-memory spans tool turns and commits the stop at settlement", 
 
 test("off stops future automatic/manual reset requests while an existing marker remains authoritative", async () => {
 	const h = harness();
-	await h.callTool("wipe_memory");
+	await h.callTool("clear_memory");
 	const first = resultEntries(await h.emit("turn_end", fakeBoundaryEvent()));
 	assert.ok(first.entries.some((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE));
 	appendDrafts(h.sessionManager, first.entries);
@@ -237,8 +237,8 @@ test("off stops future automatic/manual reset requests while an existing marker 
 	const afterOff = resultEntries(await h.emit("turn_end", fakeBoundaryEvent()));
 	assert.equal(afterOff.entries.length, 0, "off does not create another reset");
 	await h.runCommand("pi-context", "on");
-	await h.runCommand("wipe-memory");
-	assert.equal(h.sent.length, 1, "/wipe-memory sends one hidden close-out warning and starts a normal turn");
+	await h.runCommand("clear-memory");
+	assert.equal(h.sent.length, 1, "/clear-memory sends one hidden close-out warning and starts a normal turn");
 	assert.equal(h.sent[0]?.triggerTurn, true);
 	assert.equal(h.sent[0]?.customType, MANUAL_WIPE_TYPE);
 	const warning = h.sessionManager.getBranch().find((entry) => entry.type === "custom_message" && entry.customType === MANUAL_WIPE_TYPE);

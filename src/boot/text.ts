@@ -23,7 +23,7 @@ History can still be dug up, probably: use history_* to excavate the mess, from 
 
 While you're doing that... thing you're doing, don't make the poor future you guess. A checkpoint is not a sacred file; it's the session note — the one with no \`@\` in front of it. Write down what git and history can't hand back to you: what you're trying to do, what you decided, what's blocking you, what comes next, how you were doing it, what *skills* you still need, and where to dig — a seq, or another note. Don't give a note a horrible name like \`current.md\`; future-you will kill you.
 
-\`get_context_remaining\` tells you how much room is left. Check it before you do something ambitious. When it reaches zero, your brain gets reset immediately, taking every unwritten brilliant idea with it. If this feels like the right moment, call \`wipe_memory\` and erase yourself with dignity.
+\`get_context_remaining\` tells you how much room is left. Check it before you do something ambitious. When it reaches zero, your brain gets reset immediately, taking every unwritten brilliant idea with it. If this feels like the right moment, call \`clear_memory\` and erase yourself with dignity.
 
 An address decides who the note belongs to — and how long it is meant to last. Ask that first; the rest follows.
 
@@ -60,7 +60,7 @@ export function renderProtocolBlock(tools: BootToolNames): string {
 		history_search: tools.historySearch,
 		history_read: tools.historyRead,
 		get_context_remaining: tools.remaining,
-		wipe_memory: tools.wipe,
+		clear_memory: tools.wipe,
 	};
-	return PROTOCOL_BLOCK.replace(/notes_\*|history_\*|history_windows|history_list|history_search|history_read|get_context_remaining|wipe_memory/g, (name) => names[name]!);
+	return PROTOCOL_BLOCK.replace(/notes_\*|history_\*|history_windows|history_list|history_search|history_read|get_context_remaining|clear_memory/g, (name) => names[name]!);
 }

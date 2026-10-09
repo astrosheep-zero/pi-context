@@ -101,7 +101,7 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 		} catch (error) {
 			if (missingBootNotice !== windowId) {
 				missingBootNotice = windowId;
-				ctx.ui.notify(`pi-context: active context window ${windowId} has no visible boot; request cancelled safely. Use /wipe-memory to start another window.`, "error");
+				ctx.ui.notify(`pi-context: active context window ${windowId} has no visible boot; request cancelled safely. Use /clear-memory to start another window.`, "error");
 			}
 			ctx.abort();
 			const safeHead = getCurrentSystemMessage(event.messages);
@@ -134,11 +134,11 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 		},
 	});
 
-	pi.registerCommand("wipe-memory", {
+	pi.registerCommand("clear-memory", {
 		description: "Ask the agent to close out its notes, then stop in a fresh context window",
 		handler: async (_args, cmdCtx) => {
 			if (!enabled) {
-				cmdCtx.ui.notify("pi-context: /wipe-memory requires /pi-context on.", "error");
+				cmdCtx.ui.notify("pi-context: /clear-memory requires /pi-context on.", "error");
 				return;
 			}
 			const requestedWindowId = currentWindowId(cmdCtx);
@@ -155,8 +155,8 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 			const armed = resets.closeOut(requestedWindowId, "manual");
 			if (armed === "already-pending") return;
 			cmdCtx.ui.notify(idle
-				? "pi-context: /wipe-memory received; the agent closes out its notes, then stops in a fresh window."
-				: "pi-context: /wipe-memory queued; the agent is asked to close out and the reset commits when the run settles.", "info");
+				? "pi-context: /clear-memory received; the agent closes out its notes, then stops in a fresh window."
+				: "pi-context: /clear-memory queued; the agent is asked to close out and the reset commits when the run settles.", "info");
 			try {
 				pi.sendMessage({ customType: MANUAL_WIPE_TYPE, content: WARNING_CONTENT, display: false }, { triggerTurn: true, deliverAs: "steer" });
 			} catch (error) {
@@ -167,9 +167,9 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 	});
 
 	pi.registerTool(defineTool({
-		name: "wipe_memory",
-		label: "Wipe memory",
-		description: "Wipe your in-context memory and start a fresh context window. Your session, notes, and history survive.",
+		name: "clear_memory",
+		label: "Clear memory",
+		description: "Clear your in-context memory and start a fresh context window. Your session, notes, and history survive.",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_id, _params, _signal, _update, ctx) {
 			if (!enabled) return output({ error: "pi-context is off (/pi-context on to enable)" });

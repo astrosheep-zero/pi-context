@@ -74,7 +74,7 @@ test("shared boot uses only explicit identity, loader, captured time and logical
 	assert.equal(renderBootBlock(block), rendered);
 	assert.ok(rendered.includes("😀\n  checkpoint.md · 1m ago"), "a feed entry is the note's own first line over its locator");
 	assert.ok(rendered.includes("ask memo_list to try again"));
-	assert.equal(/notes_\*|notes_list|history_\*|history_list|history_search|history_read|get_context_remaining|wipe_memory/.test(rendered), false);
+	assert.equal(/notes_\*|notes_list|history_\*|history_list|history_search|history_read|get_context_remaining|clear_memory/.test(rendered), false);
 });
 
 test("the shared result module bounds both surfaces and names what a window withheld", () => {

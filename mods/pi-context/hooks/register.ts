@@ -69,7 +69,7 @@ export function register(on: On) {
       notes: `${PREFIX}notes_*`, notesList: `${PREFIX}notes_list`,
       history: "history_* (unavailable in Claude)", historyWindows: "history_windows (unavailable in Claude)", historyList: "history_list (unavailable in Claude)",
       historySearch: "history_search (unavailable in Claude)", historyRead: "history_read (unavailable in Claude)",
-      remaining: "get_context_remaining (unavailable in Claude)", wipe: "wipe_memory (unavailable in Claude)",
+      remaining: "get_context_remaining (unavailable in Claude)", wipe: "clear_memory (unavailable in Claude)",
     } }, identity.cwd)
     const block = { name: "pi-context:boot", text: boot.ok ? String(boot.result) : `# pi-context\n${boot.error}` }
     return { ...result, blocks: [...result.blocks, block] }
