@@ -46,7 +46,7 @@ export function register(on: On) {
     if (!schemas.ok || !Array.isArray(schemas.result)) return next(e)
     for (const row of schemas.result as SchemaRow[]) {
       if (!TOOL_NAMES.includes(row.name as typeof TOOL_NAMES[number])) continue
-      const full = await $.tool.register({ name: row.name, description: row.description, inputSchema: row.inputSchema } satisfies ToolSpec)
+      const full = await $.tool.register({ name: row.name, description: row.description, inputSchema: row.inputSchema, isDeferred: false } satisfies ToolSpec)
       registered.add(full.tool)
     }
     return next(e)
@@ -71,6 +71,11 @@ export function register(on: On) {
       historySearch: "history_search (unavailable in Claude)", historyRead: "history_read (unavailable in Claude)",
       remaining: "get_context_remaining (unavailable in Claude)", wipe: "clear_memory (unavailable in Claude)",
     } }, identity.cwd)
+    if (!boot.ok) {
+      try {
+        await $.ui.notify("pi-context: Notes boot failed.")
+      } catch { /* Notification failure must not suppress the fallback block. */ }
+    }
     const block = { name: "pi-context:boot", text: boot.ok ? String(boot.result) : `# pi-context\n${boot.error}` }
     return { ...result, blocks: [...result.blocks, block] }
   })

@@ -12,13 +12,16 @@ const identity = { home: mkdtempSync(join(tmpdir(), "claude-mod-")), sessionId: 
 
 type ToolOutcome = { ok: boolean; error?: { code: string; message: string } };
 
+type HookToolSpec = { name: string; description: string; inputSchema: Record<string, unknown>; isDeferred?: boolean };
+
 /** One engine handler: it receives the engine, the event, and the rest of the chain. */
 type HookHandler = ($: HookEngine, e: Record<string, unknown>, next: (e: unknown) => Promise<unknown>) => Promise<unknown>;
 /** The engine surface the hook actually touches: no session, no model, no user configuration. */
 type HookEngine = {
   env: { get: (name: string) => Promise<string | undefined> };
   session: { id: () => Promise<string> };
-  tool: { register: (spec: { name: string }) => Promise<{ tool: string }> };
+  tool: { register: (spec: HookToolSpec) => Promise<{ tool: string }> };
+  ui?: { notify?: (text: string, options?: { title?: string }) => Promise<unknown> };
   process: { run: (argv: readonly string[], init?: { cwd?: string; stdin?: string }) => Promise<{ exitCode: number; stdout: string }> };
 };
 
@@ -46,14 +49,17 @@ async function loadHookModule(t: test.TestContext): Promise<{ register: (on: (ev
 }
 
 /** An engine that answers the hook by running the real helper against a throwaway notes home. */
-function fakeEngine(home: string): { host: HookEngine; registered: string[] } {
-  const registered: string[] = [];
+function fakeEngine(home: string): { host: HookEngine; registered: HookToolSpec[]; notifications: string[] } {
+  const registered: HookToolSpec[] = [];
+  const notifications: string[] = [];
   return {
     registered,
+    notifications,
     host: {
       env: { get: async (name) => name === "PI_NOTES_HOME" ? home : undefined },
       session: { id: async () => "hook-session" },
-      tool: { register: async (spec) => { registered.push(spec.name); return { tool: `mcp__pi-context__${spec.name}` }; } },
+      tool: { register: async (spec) => { registered.push(structuredClone(spec)); return { tool: `mcp__pi-context__${spec.name}` }; } },
+      ui: { notify: async (text) => { notifications.push(text); } },
       process: { run: async (argv, init) => ({
         exitCode: 0,
         stdout: execFileSync(argv[0]!, argv.slice(1), { cwd: init?.cwd, input: init?.stdin, encoding: "utf8" }),
@@ -155,7 +161,7 @@ test("Claude Mod appends boot once and reuses persisted blocks after re-registra
 
   // Count the boot requests the hook actually sends while the real helper still answers every one.
   let bootRequests = 0;
-  const { host } = fakeEngine(home);
+  const { host, notifications } = fakeEngine(home);
   const runProcess = host.process.run;
   host.process.run = async (argv, init) => {
     const request = JSON.parse(String(init?.stdin ?? "")) as { op?: string };
@@ -193,6 +199,59 @@ test("Claude Mod appends boot once and reuses persisted blocks after re-registra
   assert.deepEqual(second, first, "the persisted result, boot block and sentinel included, is reused unchanged");
   assert.equal(bootRequests, 1, "a persisted boot block needs no second boot helper request");
   assert.equal(nextCalls, 2, "the upstream chain still runs exactly once per prompt");
+  assert.deepEqual(notifications, [], "successful boot never notifies");
+});
+
+test("Claude Mod boot failure preserves fallback with available, absent, or failing notifications", async (t) => {
+  for (const mode of ["available", "no ui", "no notify", "throws", "rejects"] as const) {
+    await t.test(mode, async (t) => {
+      const hooks = await loadHookModule(t);
+      const home = mkdtempSync(join(tmpdir(), "claude-hook-home-"));
+      t.after(() => rmSync(home, { recursive: true, force: true }));
+      const { host, notifications } = fakeEngine(home);
+      if (mode === "no ui") delete host.ui;
+      else if (mode === "no notify") host.ui = {};
+      else if (mode === "throws" || mode === "rejects") {
+        host.ui = { notify: (text) => {
+          notifications.push(text);
+          if (mode === "throws") throw new Error("notification unavailable");
+          return Promise.reject(new Error("notification unavailable"));
+        } };
+      }
+
+      let bootRequests = 0;
+      const runProcess = host.process.run;
+      host.process.run = async (argv, init) => {
+        const request = JSON.parse(String(init?.stdin ?? "")) as { op?: string };
+        if (request.op === "boot") {
+          bootRequests += 1;
+          return { exitCode: 1, stdout: "" };
+        }
+        return await runProcess(argv, init);
+      };
+      const handlers = new Map<string, HookHandler>();
+      hooks.register((event, handler) => handlers.set(event, handler));
+      await handlers.get("session.start")!(host, { cwd: home }, async (event: unknown) => event);
+      let nextCalls = 0;
+      const promptContext = (result: Record<string, unknown>) =>
+        handlers.get("prompt.context")!(host, { cwd: home }, async () => { nextCalls += 1; return result; });
+      const upstream = { blocks: [{ name: "claude:user-context", text: "unrelated upstream block" }], sentinel: "kept" };
+      const failed = await promptContext(structuredClone(upstream));
+      assert.deepEqual(failed, {
+        ...upstream,
+        blocks: [...upstream.blocks, { name: "pi-context:boot", text: "# pi-context\nhelper exited unsuccessfully" }],
+      }, "boot failure keeps the original fallback and upstream fields even if notify is absent or fails");
+      const expectedNotifications = mode === "no ui" || mode === "no notify" ? [] : ["pi-context: Notes boot failed."];
+      assert.deepEqual(notifications, expectedNotifications, "one user-facing notification names pi-context and the notes boot failure");
+      assert.equal(bootRequests, 1);
+      assert.equal(nextCalls, 1);
+
+      assert.deepEqual(await promptContext(structuredClone(failed) as Record<string, unknown>), failed);
+      assert.deepEqual(notifications, expectedNotifications, "a persisted fallback does not notify again");
+      assert.equal(bootRequests, 1, "a persisted fallback needs no second boot request");
+      assert.equal(nextCalls, 2, "the upstream chain still runs exactly once per prompt");
+    });
+  }
 });
 
 test("Claude Mod hook delivers the helper's shared text, and marks only a refusal as an error", async (t) => {
@@ -203,7 +262,12 @@ test("Claude Mod hook delivers the helper's shared text, and marks only a refusa
   const handlers = new Map<string, HookHandler>();
   hooks.register((event, handler) => handlers.set(event, handler));
   await handlers.get("session.start")!(host, { cwd: home }, async (event: unknown) => event);
-  assert.deepEqual(registered, ["notes_write", "notes_update", "notes_read", "notes_list", "notes_search"]);
+  assert.deepEqual(registered.map((spec) => spec.name), ["notes_write", "notes_update", "notes_read", "notes_list", "notes_search"]);
+  for (const spec of registered) {
+    assert.equal(spec.isDeferred, false, `${spec.name} is available from the start without tool search`);
+    assert.ok(spec.description.length > 20);
+    assert.equal(spec.inputSchema.type, "object");
+  }
 
   const call = (tool: string, params: Record<string, unknown>) => handlers.get("tool.call")!(host, { tool: `mcp__pi-context__${tool}`, tool_use_id: "hook-1", ...params }, async (event: unknown) => event) as Promise<{ result: unknown; isError?: unknown }>;
 
