@@ -13,6 +13,12 @@ export const HistoryPageSchema = Type.Object({
 	older_before: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()], { description: "Pass as before to page older." }),
 	newer_after: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()], { description: "Pass as after to page newer." }),
 }, { additionalProperties: false });
+/** Search never returns conversation folds. */
+export const HistorySearchPageSchema = Type.Object({
+	...HistoryPageSchema.properties,
+	items: Type.Array(HistoryPageItemSchema),
+}, { additionalProperties: false });
+
 /** One whole page payload, before it becomes an outcome. */
 export type HistoryPage = Static<typeof HistoryPageSchema>;
 

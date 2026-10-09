@@ -277,21 +277,21 @@ const written = await tools.notes_write({ address: "smoke.md", content: "A😀�
 const listed = await tools.notes_list({});
 const read = await tools.notes_read({ address: "smoke.md", offset_chars: 1, limit_chars: 2 });
 const refused = await tools.notes_read({ address: "missing.md" });
-if (!written.ok || !listed.ok || !read.ok || refused.ok) throw new Error("wrong outcome");
-if (read.data.window.text !== "😀界" || read.data.window.next_offset_chars !== 3) throw new Error("wrong window");
-if (refused.error.code !== "not_found") throw new Error("missing typed refusal");
-text({ marker: "TYPED_SMOKE", files: listed.data.files.map(f => f.address), body: read.data.window.text, error: refused.error.code });
+if ("error" in written || "error" in listed || "error" in read || !("error" in refused)) throw new Error("wrong outcome");
+if (read.text !== "😀界" || read.next_offset_chars !== 3) throw new Error("wrong window");
+if (refused.code !== "not_found") throw new Error("missing typed refusal");
+text({ marker: "TYPED_SMOKE", files: listed.files.map(f => f.address), body: read.text, error: refused.code });
 ` } }], "toolUse");
 			if (request === 2) return assistant(fixture, [{ type: "toolCall", id: "structured-history-smoke", name: "codemode", arguments: { code: `
 const page = await tools.history_list({ roles: ["tool"] });
-if (!page.ok) throw new Error("history list failed");
-const parent = page.data.items.find(item => item.tool === "codemode");
+if ("error" in page) throw new Error("history list failed");
+const parent = page.items.find(item => item.tool === "codemode");
 if (!parent) throw new Error("missing codemode parent");
 const read = await tools.history_read({ seq: parent.seq });
-if (!read.ok || read.data.execution.name !== "codemode") throw new Error("missing typed execution");
-const calls = read.data.execution.nestedCalls;
-if (!calls || !calls.calls.some(call => call.name === "notes_read" && call.status === "error")) throw new Error("missing nested refusal evidence");
-text({ marker: "HISTORY_SMOKE", calls: calls.calls.length, complete: calls.complete });
+if ("error" in read || read.tool !== "codemode") throw new Error("missing typed tool summary");
+const calls = read.nested_calls;
+if (!calls || !read.text.includes("notes_read [error]")) throw new Error("missing nested refusal evidence");
+text({ marker: "HISTORY_SMOKE", calls: calls.call_count, complete: calls.complete });
 ` } }], "toolUse");
 			return assistant(fixture, [{ type: "text", text: "structured smoke complete" }]);
 		},

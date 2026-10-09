@@ -4,17 +4,17 @@ import { localIso } from "../notes/frontmatter.js";
 import { isFilesystemError } from "../notes/fs-error.js";
 import { createNotesStore, NoteError, noteIdentity, type NoteChange, type NoteMeta, type NoteQueryStatus, type NoteRow, type Scope } from "../notes/index.js";
 import { DEFAULT_READ_WINDOW_CHARS, MAX_READ_WINDOW_CHARS, prefixFit } from "./output.js";
-import { failure, fitsResult, outcomeSchema, readTextWindow, renderOutcome, renderTextWindow, structuredBytes, success, TextWindowSchema, type Outcome } from "./result.js";
-import { nullableString, positiveInteger, InvalidQueryError, searchQueries, searchQuery } from "./schema.js";
+import { failure, fitsResult, resultSchema, readTextWindow, renderOutcome, renderTextWindow, structuredBytes, success, TextWindowSchema, type Outcome } from "./result.js";
+import { nullableString, InvalidQueryError, searchQueries, searchQuery } from "./schema.js";
 
 const ORIGIN_VALUES = [Type.Literal("user"), Type.Literal("self"), Type.Literal("external")] as const;
 const ORIGIN = Type.Optional(Type.Union([...ORIGIN_VALUES], {
-	description: "Where the note's content came from. user: written or dictated by the human. self: written by you, the agent (default). external: anything else — third-party text, tool output, fetched material.",
+	description: "Content source: user, self (default), or external.",
 }));
-const CRUMPLED_PARAMETER = Type.Optional(Type.Boolean({ description: "true crumples the note: it leaves the boot index, list, and search, stays readable by address, and appears with wastebasket: true. false smooths it back." }));
+const CRUMPLED_PARAMETER = Type.Optional(Type.Boolean({ description: "true crumples (archives) the note: hidden from list/search, still readable by address; false restores it." }));
 const WASTEBASKET_PARAMETER = Type.Optional(Type.Boolean({ description: "true lists only crumpled notes instead of live ones." }));
-const ADDRESS_DESCRIPTION = "Address forms per the boot protocol. `@` addresses are notes, not files: feed one to read/write/edit/bash and a real directory named `@project` is born. Don't.";
-const WINDOW_DESCRIPTION = "The response carries the longest fitting prefix of that window as text, plus the same window as structured fields; when characters remain, the closing line names the offset_chars to pass back to continue.";
+const FILE_LIMIT_PARAMETER = Type.Optional(Type.Integer({ minimum: 1, description: "Max files (default: as many as fit the output budget)." }));
+const ADDRESS_DESCRIPTION = "Addresses: <path> with no @ for this session; @project/, @human/, @self/, @model/ for durable homes (see /skill:memory). Never pass them to filesystem tools.";
 
 /** The one receipt field a caller cannot derive from the address itself. */
 function projectKeyField(scope: Scope, projectKey: string): { project_key?: string } {
@@ -68,8 +68,6 @@ export const NoteMetadataSchema = Type.Object({
 	origin: Type.Union([...ORIGIN_VALUES]),
 	created_at: Type.String(),
 	updated_at: Type.String(),
-	last_accessed: Type.String(),
-	access_count: Type.Integer(),
 	crumpled_at: Type.Optional(Type.String()),
 	project: Type.Optional(Type.String()),
 	extra: Type.Record(Type.String(), Type.Unknown()),
@@ -100,8 +98,6 @@ function noteMetadata(meta: NoteMeta): NoteMetadata {
 		origin: meta.origin,
 		created_at: localIso(meta.createdAt),
 		updated_at: localIso(meta.updatedAt),
-		last_accessed: localIso(meta.lastAccessed),
-		access_count: meta.accessCount,
 		...(typeof meta.crumpledAt === "string" ? { crumpled_at: meta.crumpledAt } : {}),
 		...(typeof meta.project === "string" ? { project: meta.project } : {}),
 		extra,
@@ -114,7 +110,6 @@ function renderMetadata(metadata: NoteMetadata): string {
 		`origin ${metadata.origin}`,
 		`created ${metadata.created_at}`,
 		`updated ${metadata.updated_at}`,
-		`accessed ${metadata.last_accessed} (${metadata.access_count} ${metadata.access_count === 1 ? "read" : "reads"})`,
 		...(metadata.crumpled_at === undefined ? [] : [`crumpled ${metadata.crumpled_at}`]),
 		...(metadata.project === undefined ? [] : [`project ${metadata.project}`]),
 	];
@@ -170,7 +165,6 @@ export const NotesUpdateDataSchema = Type.Object({
 	diff: Type.String(),
 	diff_truncated: Type.Optional(Type.Literal(true)),
 	rename_from: Type.Optional(Type.String()),
-	rename_to: Type.Optional(Type.String()),
 	replaced_crumpled_target: Type.Optional(Type.Boolean()),
 });
 export type NotesUpdateData = Static<typeof NotesUpdateDataSchema>;
@@ -179,7 +173,7 @@ export const NotesReadDataSchema = Type.Object({
 	address: Type.String(),
 	project_key: Type.Optional(Type.String()),
 	metadata: NoteMetadataSchema,
-	window: TextWindowSchema,
+	...TextWindowSchema.properties,
 });
 export type NotesReadData = Static<typeof NotesReadDataSchema>;
 
@@ -237,8 +231,8 @@ function renderWriteData(data: NotesWriteData): string {
 
 export const notesWrite = {
 	name: "notes_write", label: "Notes write",
-	description: `Create or rewrite a note, and name it for what it holds and when to reach for it: a fresh window sees only the name in the index and decides whether to open by it. Write it so the next window can pick it up: what it's for, what was decided, what's still open. Whatever git and history can hand back on their own, leave out. Keep it true when the content drifts. ${ADDRESS_DESCRIPTION} A rewrite replaces the body whole while preserving createdAt and every other frontmatter key. Writing always produces an uncrumpled note. The receipt reports the resolved address, project key when applicable, and actual create/overwrite/uncrumple outcome.`,
-	parameters: notesWriteParameters, outputSchema: outcomeSchema(NotesWriteDataSchema), executionMode: "sequential",
+	description: `Create or replace a note body, preserving metadata; uncrumples a crumpled note. Name it for its contents and when to use it. Store what git/history cannot recover. ${ADDRESS_DESCRIPTION}`,
+	parameters: notesWriteParameters, outputSchema: resultSchema(NotesWriteDataSchema), executionMode: "sequential",
 	async execute(params: Static<typeof notesWriteParameters>, identity: NotesIdentity): Promise<Outcome<NotesWriteData>> {
 		try {
 			const { outcome } = await createNotesStore(identity).write(params.address, params.content, { origin: params.origin ?? "self" });
@@ -248,7 +242,7 @@ export const notesWrite = {
 	render: (result: Outcome<NotesWriteData>): string => renderOutcome(result, renderWriteData),
 } as const;
 
-export const notesUpdateParameters = Type.Object({ address: Type.String(), edits: Type.Optional(Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }, { additionalProperties: false }))), origin: ORIGIN, crumpled: CRUMPLED_PARAMETER, replace_all: Type.Optional(Type.Boolean()), rename_to: Type.Optional(Type.String({ description: "Move the note to this address (same address rules as address), preserving createdAt and all other metadata. Used alone: never combined with edits, origin, crumpled, or replace_all. A live note at the target refuses; a crumpled target is replaced. References elsewhere do not follow the move. An empty rename_to is ignored as if omitted." })) }, { additionalProperties: false });
+export const notesUpdateParameters = Type.Object({ address: Type.String(), edits: Type.Optional(Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }, { additionalProperties: false }))), origin: ORIGIN, crumpled: CRUMPLED_PARAMETER, replace_all: Type.Optional(Type.Boolean()), rename_to: Type.Optional(Type.String({ description: "Move, preserving metadata. Use alone. Refuses live targets; may replace crumpled targets. References are not updated. Empty string is ignored." })) }, { additionalProperties: false });
 
 function renderUpdateData(data: NotesUpdateData): string {
 	const head = data.rename_from === undefined
@@ -276,8 +270,8 @@ function boundedUpdate(data: NotesUpdateData): Outcome<NotesUpdateData> {
 
 export const notesUpdate = {
 	name: "notes_update", label: "Notes update",
-	description: `Update one note: exact-text body edits, a metadata-only change, or a rename_to move; frontmatter is never editable through edits. ${ADDRESS_DESCRIPTION} Each oldText must occur exactly once unless replace_all is set; a multi-match anchor fails with its match line numbers and a zero-match anchor names the failing edit index. edits may be omitted (or empty) for a metadata-only update, which requires at least one of origin/crumpled. rename_to moves the note to a new address preserving createdAt and every other metadata key; it is used alone, never combined with edits, origin, crumpled, or replace_all, refuses a live note at the target, and may replace a crumpled one. The receipt reports resolved identity, the number of edits that changed text, the change kind (including none), and the actual diff, shortened when it would not fit the output budget.`,
-	parameters: notesUpdateParameters, outputSchema: outcomeSchema(NotesUpdateDataSchema), executionMode: "sequential",
+	description: `Edit body text, change origin or crumpled state, or move a note. Each oldText must match once unless replace_all is true; edits cannot change frontmatter. Metadata-only updates need origin or crumpled. Returns applied changes and a bounded diff. ${ADDRESS_DESCRIPTION}`,
+	parameters: notesUpdateParameters, outputSchema: resultSchema(NotesUpdateDataSchema), executionMode: "sequential",
 	async execute(params: Static<typeof notesUpdateParameters>, identity: NotesIdentity, renderDiff: (change: NoteChange) => string): Promise<Outcome<NotesUpdateData>> {
 		try {
 			const store = createNotesStore(identity);
@@ -290,7 +284,7 @@ export const notesUpdate = {
 				const { replacedCrumpledTarget } = await store.rename(params.address, renameTo);
 				const from = noteIdentity(identity, params.address).address;
 				const to = noteIdentity(identity, renameTo);
-				return boundedUpdate({ ...to, rename_from: from, rename_to: to.address, applied: 0, change_kind: "file", diff: `rename ${from} -> ${to.address}`, replaced_crumpled_target: replacedCrumpledTarget });
+				return boundedUpdate({ ...to, rename_from: from, applied: 0, change_kind: "file", diff: `rename ${from} -> ${to.address}`, replaced_crumpled_target: replacedCrumpledTarget });
 			}
 			const { applied, change } = await store.update(params.address, params.edits, { origin: params.origin, crumpled: params.crumpled, replaceAll: params.replace_all });
 			return boundedUpdate({ ...noteIdentity(identity, params.address), applied, change_kind: change.kind, diff: renderDiff(change) });
@@ -299,16 +293,16 @@ export const notesUpdate = {
 	render: renderUpdate,
 } as const;
 
-export const notesReadParameters = Type.Object({ address: Type.String(), offset_chars: Type.Optional(Type.Integer({ description: `Code-point offset into the note body (default 0; the frontmatter is metadata, never body). A negative value counts back from the end; the response echoes the resolved absolute offset. Pass the previous next_offset_chars back unchanged to continue.` })), limit_chars: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_READ_WINDOW_CHARS, description: `Largest requested window in code points (default ${DEFAULT_READ_WINDOW_CHARS}). A window too large for the wire budget is cut short; next_offset_chars names where the next read resumes.` })) }, { additionalProperties: false });
+export const notesReadParameters = Type.Object({ address: Type.String(), offset_chars: Type.Optional(Type.Integer({ description: "Body code-point offset (default 0); negative counts from EOF." })), limit_chars: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_READ_WINDOW_CHARS, description: `Max code points (default ${DEFAULT_READ_WINDOW_CHARS}); also bounded by output bytes.` })) }, { additionalProperties: false });
 
 function renderReadData(data: NotesReadData): string {
-	return `${renderIdentity(data)}\n${renderMetadata(data.metadata)}\n\n${renderTextWindow(data.window)}`;
+	return `${renderIdentity(data)}\n${renderMetadata(data.metadata)}\n\n${renderTextWindow(data)}`;
 }
 
 export const notesRead = {
 	name: "notes_read", label: "Notes read",
-	description: `Read a window of one note's body, frontmatter excluded. ${ADDRESS_DESCRIPTION} The response leads with the resolved address and the note's metadata, then delivers the body window verbatim. offset_chars is the code-point offset into the body (default 0) - a negative value counts back from the end - and limit_chars caps the window (default ${DEFAULT_READ_WINDOW_CHARS}, max ${MAX_READ_WINDOW_CHARS}). ${WINDOW_DESCRIPTION} Body text is never re-encoded, so concatenating consecutive windows reconstructs the body exactly. Metadata values too large to show are counted rather than listed; they remain in the note file.`,
-	parameters: notesReadParameters, outputSchema: outcomeSchema(NotesReadDataSchema),
+	description: `Read note metadata and a verbatim body slice, excluding frontmatter. Pass next_offset_chars as offset_chars until null. ${ADDRESS_DESCRIPTION}`,
+	parameters: notesReadParameters, outputSchema: resultSchema(NotesReadDataSchema),
 	async execute(params: Static<typeof notesReadParameters>, identity: NotesIdentity): Promise<Outcome<NotesReadData>> {
 		try {
 			const note = await createNotesStore(identity).read(params.address);
@@ -317,13 +311,13 @@ export const notesRead = {
 			if (params.offset_chars !== undefined && params.offset_chars > totalChars) return failure("invalid_offset", `offset_chars ${params.offset_chars} is past the end of the body: the note has ${totalChars} body chars; the largest legal offset is ${totalChars} (an empty end-read)`);
 			const resolved = noteIdentity(identity, params.address);
 			const metadata = noteMetadata(note.meta);
-			return readTextWindow(note.body, params.offset_chars, params.limit_chars, (window) => ({ ...resolved, metadata, window }), (result) => renderOutcome(result, renderReadData));
+			return readTextWindow(note.body, params.offset_chars, params.limit_chars, (window) => ({ ...resolved, metadata, ...window }), (result) => renderOutcome(result, renderReadData));
 		} catch (error) { return failureOf(error); }
 	},
 	render: (result: Outcome<NotesReadData>): string => renderOutcome(result, renderReadData),
 } as const;
 
-export const notesListParameters = Type.Object({ pattern: nullableString(), limit: positiveInteger(), wastebasket: WASTEBASKET_PARAMETER }, { additionalProperties: false });
+export const notesListParameters = Type.Object({ pattern: nullableString(), limit: FILE_LIMIT_PARAMETER, wastebasket: WASTEBASKET_PARAMETER }, { additionalProperties: false });
 
 function renderListData(data: NotesListData): string {
 	const lines = [`${data.files.length} ${data.files.length === 1 ? "note" : "notes"}`];
@@ -338,8 +332,8 @@ function renderListData(data: NotesListData): string {
 
 export const notesList = {
 	name: "notes_list", label: "Notes list",
-	description: `List note files as a recent-first snapshot carrying address and updated_at; wastebasket rows also carry crumpled_at. more is the number of matching files omitted by limit or the wire budget; use pattern to narrow the address range. ${ADDRESS_DESCRIPTION} Listings merge your five prefixes: this session, @project/, @human/, @self/, and @model/. The receipt counts hidden crumpled files and names unavailable homes; row identities and omission counts reflect the scanned result.`,
-	parameters: notesListParameters, outputSchema: outcomeSchema(NotesListDataSchema),
+	description: `List notes in the session and the four @ homes, newest first. Snapshot, not pageable: more counts omitted files; pattern globs full addresses. Reports unavailable homes and how many crumpled notes were excluded. ${ADDRESS_DESCRIPTION}`,
+	parameters: notesListParameters, outputSchema: resultSchema(NotesListDataSchema),
 	async execute(params: Static<typeof notesListParameters>, identity: NotesIdentity): Promise<Outcome<NotesListData>> {
 		try {
 			const { rows, status } = await createNotesStore(identity).listWithStatus({ pattern: params.pattern ?? undefined, wastebasket: params.wastebasket });
@@ -349,7 +343,7 @@ export const notesList = {
 	render: (result: Outcome<NotesListData>): string => renderOutcome(result, renderListData),
 } as const;
 
-export const notesSearchParameters = Type.Object({ query: searchQuery(), pattern: nullableString(), limit: positiveInteger(), max_matches_per_file: positiveInteger(), wastebasket: WASTEBASKET_PARAMETER }, { additionalProperties: false });
+export const notesSearchParameters = Type.Object({ query: searchQuery(), pattern: nullableString(), limit: FILE_LIMIT_PARAMETER, max_matches_per_file: Type.Optional(Type.Integer({ minimum: 1, description: "Max matches shown per file (default: no cap); matches_total still counts all." })), wastebasket: WASTEBASKET_PARAMETER }, { additionalProperties: false });
 
 function renderSearchData(data: NotesSearchData): string {
 	const lines = [`${data.files.length} ${data.files.length === 1 ? "file" : "files"}`];
@@ -383,8 +377,8 @@ function fitSearchFile(file: SearchFile, fits: (candidate: SearchFile) => boolea
 
 export const notesSearch = {
 	name: "notes_search", label: "Notes search",
-	description: `Case-insensitive literal substring search over note bodies; query is one string or several (OR), each matched line appears once. Results are a recent-first snapshot, not pageable; more counts matching files omitted by limit or the wire budget. Use pattern to narrow the address range. ${ADDRESS_DESCRIPTION} Search merges the same five prefixes as notes_list. Patterns glob over full address strings. Each file entry carries matches_total, its full match count before per-file capping. Each match carries line, text, offset_chars (a code-point offset into the note body delivered by notes_read, at the earliest query match), and truncated (some line text is omitted). Pass address and offset_chars to notes_read to read from the match. The receipt counts hidden crumpled files and names unavailable homes; row identities, matches, and omission counts come from the scan.`,
-	parameters: notesSearchParameters, outputSchema: outcomeSchema(NotesSearchDataSchema),
+	description: `Search note bodies for case-insensitive literal queries (OR). Returns matching lines and body code-point offsets for notes_read. Snapshot, not pageable: more counts omitted files; matches_total is before per-file capping. pattern globs full addresses across the session and the four @ homes. ${ADDRESS_DESCRIPTION}`,
+	parameters: notesSearchParameters, outputSchema: resultSchema(NotesSearchDataSchema),
 	async execute(params: Static<typeof notesSearchParameters>, identity: NotesIdentity): Promise<Outcome<NotesSearchData>> {
 		try {
 			const { rows, status } = await createNotesStore(identity).searchWithStatus(searchQueries(params.query), { pattern: params.pattern ?? undefined, wastebasket: params.wastebasket });

@@ -317,7 +317,7 @@ test("notes_update rename_to moves a note and refuses combinations and live targ
 	assertReceiptIdentity(renamed, "moved.md", "session", ctx);
 	assert.equal(renamed.rename_from, "move-me.md");
 	assert.equal(renamed.change_kind, "file");
-	assert.equal(renamed.rename_to, "moved.md");
+	assert.equal(renamed.address, "moved.md");
 	assert.equal(renamed.replaced_crumpled_target, false);
 
 	const gone = resultError(await call(captured, "notes_read", { address: "move-me.md" }, ctx));
@@ -331,7 +331,7 @@ test("notes_update rename_to moves a note and refuses combinations and live targ
 	assert.equal(basket.files.some((file) => file.address === "moved.md"), true, "the note was crumpled");
 
 	const fillerRename = resultData<NotesUpdateData>(await call(captured, "notes_update", { address: "moved.md", rename_to: "moved-again.md", edits: [], replace_all: false }, ctx));
-	assert.equal(fillerRename.rename_to, "moved-again.md", "empty edits and replace_all: false ride along with a rename");
+	assert.equal(fillerRename.address, "moved-again.md", "empty edits and replace_all: false ride along with a rename");
 
 	const realCombo = resultError(await call(captured, "notes_update", { address: "moved-again.md", rename_to: "nope.md", replace_all: true }, ctx));
 	assert.match(realCombo.message, /rename_to is used alone/, "replace_all: true is a real combination and refuses");

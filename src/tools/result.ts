@@ -1,12 +1,12 @@
-/** Shared outcomes and bounded read windows. Host envelopes belong to the adapters. */
+/** Internal outcomes, compact wire results, and bounded read windows. */
 import { Type, type Static, type TSchema } from "typebox";
 import { DEFAULT_READ_WINDOW_CHARS, TOOL_OUTPUT_MAX_BYTES, withinTextBudget } from "./output.js";
 
 /** `details` is sanitized context for a caller, never a payload or a file body. */
 export const OperationErrorSchema = Type.Object({
-	code: Type.String({ description: "Stable refusal code, for example not_found or invalid_offset." }),
-	message: Type.String({ description: "One short sentence naming the refusal and the offending input." }),
-	details: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Sanitized structured context: edit index, match line numbers, known window ids. Never a raw payload." })),
+	code: Type.String(),
+	message: Type.String(),
+	details: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 }, { additionalProperties: false });
 export type OperationError = Static<typeof OperationErrorSchema>;
 
@@ -44,10 +44,24 @@ export function failure(code: string, message: string, details?: Record<string, 
 	};
 }
 
-export function outcomeSchema<S extends TSchema>(dataSchema: S) {
+/** Public results have no success envelope. `error` is reserved for a refusal message. */
+export type WireError = { error: string; code: string; details?: Record<string, unknown> };
+export type WireResult<T> = T | WireError;
+
+export function wireResult<T>(result: Outcome<T>): WireResult<T> {
+	if (result.ok) return result.data;
+	const { code, message, details } = result.error;
+	return { error: message, code, ...(details === undefined ? {} : { details }) };
+}
+
+export function resultSchema<S extends TSchema>(dataSchema: S) {
 	return Type.Union([
-		Type.Object({ ok: Type.Literal(true), data: dataSchema }, { additionalProperties: false }),
-		Type.Object({ ok: Type.Literal(false), error: OperationErrorSchema }, { additionalProperties: false }),
+		dataSchema,
+		Type.Object({
+			error: Type.String(),
+			code: Type.String(),
+			details: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+		}, { additionalProperties: false }),
 	]);
 }
 
@@ -68,16 +82,16 @@ export function structuredBytes(value: unknown): number {
  * measure covers everything the renderer puts around the payload, headers and footers included.
  */
 export function fitsResult<T>(result: Outcome<T>, render: (result: Outcome<T>) => string): boolean {
-	return withinTextBudget(render(result)) && structuredBytes(result) <= TOOL_OUTPUT_MAX_BYTES;
+	return withinTextBudget(render(result)) && structuredBytes(wireResult(result)) <= TOOL_OUTPUT_MAX_BYTES;
 }
 
 /** `text` is verbatim, with no marker inserted, so windows concatenate back into the source. */
 export const TextWindowSchema = Type.Object({
-	text: Type.String({ description: "The delivered slice, verbatim, with nothing inserted." }),
-	offset_chars: Type.Integer({ minimum: 0, description: "Resolved absolute code-point offset this slice starts at." }),
-	total_chars: Type.Integer({ minimum: 0, description: "Code-point length of the whole source text." }),
-	next_offset_chars: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()], { description: "Offset to pass back as offset_chars to continue; null only at the true end of the text." }),
-	limited_by: Type.Union([Type.Literal("limit"), Type.Literal("bytes"), Type.Null()], { description: "Why the slice stopped before the end: the requested count (limit) or the byte cap (bytes); null when nothing was withheld." }),
+	text: Type.String(),
+	offset_chars: Type.Integer({ minimum: 0 }),
+	total_chars: Type.Integer({ minimum: 0 }),
+	next_offset_chars: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()], { description: "Continue at this code-point offset; null at EOF." }),
+	limited_by: Type.Union([Type.Literal("limit"), Type.Literal("bytes"), Type.Null()]),
 }, { additionalProperties: false });
 export type TextWindow = Static<typeof TextWindowSchema>;
 
@@ -148,6 +162,7 @@ export type Operation<TParams extends TSchema, TData, TRest extends readonly unk
 	readonly parameters: TParams;
 	/** Absent leaves concurrency to the host default. */
 	readonly executionMode?: "sequential" | "parallel";
+	/** Schema of wireResult(outcome), not the internal outcome envelope. */
 	readonly outputSchema: TSchema;
 	readonly execute: (params: Static<TParams>, ...rest: TRest) => Promise<Outcome<TData>>;
 	readonly render: Renderer<TData>;

@@ -94,7 +94,7 @@ test("history schemas expose seq and anchor paging, while notes use snapshot lim
 	assert.ok(notesSearchSchema.properties?.limit);
 });
 
-test("every history operation declares an outcome schema its own payload satisfies", async () => {
+test("every history operation declares a result schema its own payload satisfies", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
@@ -110,8 +110,11 @@ test("every history operation declares an outcome schema its own payload satisfi
 		assert.equal(Check(operation.outputSchema, structured), true, `${toolName} payload satisfies its own outputSchema`);
 		assertWithinBudget(result, `${toolName} page`);
 	}
+	const conversation = await call(captured, "history_list", {}, ctx);
+	assert.equal(Check(historyList.outputSchema, conversation.structuredContent), true);
+	assert.equal(Check(historySearch.outputSchema, conversation.structuredContent), false, "search schema excludes list-only folds");
 	const refusal = await call(captured, "history_read", { seq: 999 }, ctx);
-	assert.equal(Check(historyRead.outputSchema, refusal.structuredContent), true, "a refusal satisfies the same outcome schema");
+	assert.equal(Check(historyRead.outputSchema, refusal.structuredContent), true, "a refusal satisfies the same result schema");
 });
 
 test("seq is stable across branch changes, abandoned entries stay unreadable, and a paired result seq is refused precisely", async () => {
@@ -251,7 +254,7 @@ test("conversation view folds tools and injected messages, while explicit roles 
 	assert.equal(turnId.length > 0, true);
 });
 
-test("tool events expose typed execution facts; pending and orphan runs read truthfully", async () => {
+test("tool summaries and documents preserve pending, errored, and orphan runs", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
@@ -268,18 +271,21 @@ test("tool events expose typed execution facts; pending and orphan runs read tru
 	assert.deepEqual(events.items.map((item) => [item.seq, item.tool_status]), [[2, "error"], [5, "unfinished"], [6, "ok"]]);
 	assert.equal(events.items[0]!.content, 'edit {"path":"😀.md","oldText":"before"}\n--- output ---\nreplacement OK');
 	assert.equal(events.items[1]!.content, 'edit {"path":"pending.md"}', "an unfinished call claims no output");
-	assert.equal(events.items[2]!.content, 'edit (arguments not recorded)\n--- output ---\norphan output\n--- nested calls (complete, 1 recorded) ---\n- read [ok] {"path":"orphan-nested.md"}', "an orphan result invents no arguments, and keeps the nested evidence the host recorded");
+	assert.equal(events.items[2]!.content, 'edit (arguments not recorded)\n--- output ---\norphan output\n--- nested calls (complete, 1 recorded) ---\n- orphan/1 read [ok] {"path":"orphan-nested.md"}', "an orphan result invents no arguments, and keeps the nested evidence the host recorded");
 	assert.deepEqual(events.items[2]!.nested_calls, { call_count: 1, complete: true }, "an orphan's nested records are counted on its row like any other run's");
 
-	const errored = resultRead<{ seq: number; execution: { name: string; status: string; arguments: Record<string, unknown> } }>(await call(captured, "history_read", { seq: 2 }, ctx));
-	assert.deepEqual(errored.execution, { name: "edit", status: "error", arguments: { path: "😀.md", oldText: "before" } });
-	assert.equal("output" in errored.execution, false, "the run's output text is the window, not a field of execution");
+	const errored = resultRead<{ tool: string; tool_status: string }>(await call(captured, "history_read", { seq: 2 }, ctx));
+	assert.equal(errored.tool, "edit");
+	assert.equal(errored.tool_status, "error");
+	assert.equal(errored.text, events.items[0]!.content);
+	assert.equal("execution" in errored, false, "arguments are delivered once, in the document");
 
-	const pending = resultRead<{ execution: { status: string } }>(await call(captured, "history_read", { seq: 5 }, ctx));
-	assert.equal(pending.execution.status, "unfinished");
+	const pending = resultRead<{ tool_status: string }>(await call(captured, "history_read", { seq: 5 }, ctx));
+	assert.equal(pending.tool_status, "unfinished");
 
-	const orphan = resultRead<{ execution: { nestedCalls: { calls: Array<Record<string, unknown>>; complete: boolean } } }>(await call(captured, "history_read", { seq: 6 }, ctx));
-	assert.deepEqual(orphan.execution.nestedCalls, { calls: [{ id: "orphan/1", name: "read", arguments: { path: "orphan-nested.md" }, status: "ok" }], complete: true }, "an orphan's nested records are readable evidence, not a gap left by the missing call");
+	const orphan = resultRead<{ nested_calls: { call_count: number; complete: boolean } }>(await call(captured, "history_read", { seq: 6 }, ctx));
+	assert.deepEqual(orphan.nested_calls, { call_count: 1, complete: true });
+	assert.equal(orphan.text, events.items[2]!.content, "an orphan's nested evidence stays readable despite the missing call");
 
 	assert.deepEqual(seqs(await call(captured, "history_search", { query: "edit", roles: ["tool"] }, ctx)), [2, 5, 6]);
 	assert.deepEqual(seqs(await call(captured, "history_search", { query: "pending.md", roles: ["tool"] }, ctx)), [5]);
@@ -308,19 +314,11 @@ test("native nested-call records are searchable, readable, and never gain a resu
 	const row = found.items[0]!;
 	assert.deepEqual(row.nested_calls, { call_count: 3, complete: false }, "the list row reports counts and the host's own completeness flag");
 
-	const read = resultRead<{ execution: { name: string; status: string; nestedCalls: { calls: Array<Record<string, unknown>>; complete: boolean; trimmed?: boolean } } }>(await call(captured, "history_read", { seq: 2 }, ctx));
-	const calls = read.execution.nestedCalls.calls;
-	assert.equal(calls.length, 3);
-	assert.deepEqual(calls[0], { id: "codemode/1", name: "read", arguments: { path: "nested-needle.md" }, status: "ok", durationMs: 12 });
-	assert.deepEqual(calls[1], { id: "codemode/2", name: "bash", status: "error", durationMs: 4, error: "exit 1" });
-	assert.deepEqual(calls[2], { id: "codemode/3", name: "spawn", status: "unfinished" });
-	assert.equal(read.execution.nestedCalls.complete, false, "an incomplete host record stays incomplete");
-	assert.equal(read.execution.nestedCalls.trimmed, undefined, "three records are inside the bound, so nothing is withheld");
-	for (const call of calls) {
-		assert.equal("result" in call, false, "a nested record carries no result body; the host stores none");
-		assert.equal("output" in call, false);
-		assert.equal("seq" in call, false, "a nested record carries no history address");
-	}
+	const read = resultRead<{ nested_calls: { call_count: number; complete: boolean } }>(await call(captured, "history_read", { seq: 2 }, ctx));
+	assert.deepEqual(read.nested_calls, { call_count: 3, complete: false }, "the host's completeness flag stays unchanged");
+	assert.equal(read.text, 'codemode {"script":"run()"}\n--- output ---\nscript finished\n--- nested calls (incomplete, 3 recorded) ---\n- codemode/1 read [ok] 12ms {"path":"nested-needle.md"}\n- codemode/2 bash [error] 4ms error: exit 1 (arguments not recorded)\n- codemode/3 spawn [unfinished] (arguments not recorded)');
+	assert.equal(read.next_offset_chars, null);
+	assert.equal("execution" in read, false, "nested records are not duplicated outside the document");
 	const rendered = read.content;
 	for (const [needle, offset] of [["nested-needle.md", earliestMatchOffsetChars(read.content, ["nested-needle.md"])], ["exit 1", earliestMatchOffsetChars(read.content, ["exit 1"])], ["unfinished", earliestMatchOffsetChars(read.content, ["unfinished"])]] as const) {
 		assert.ok(offset >= 0 && rendered.slice(offset).startsWith(needle), `nested evidence "${needle}" is readable in the document`);
@@ -335,12 +333,12 @@ test("absent nested calls mean unavailable, not a known-empty record", async () 
 	toolResult(session, "plain", "read", "contents");
 	const listed = page(await call(captured, "history_list", { roles: ["tool"] }, ctx));
 	assert.equal("nested_calls" in listed.items[0]!, false, "no record is reported as empty when none was recorded");
-	const read = resultRead<{ execution: Record<string, unknown> }>(await call(captured, "history_read", { seq: 2 }, ctx));
-	assert.equal("nestedCalls" in read.execution, false);
+	const read = resultRead(await call(captured, "history_read", { seq: 2 }, ctx));
+	assert.equal("nested_calls" in read, false);
 	assert.equal(read.content.includes("nested calls"), false);
 });
 
-test("oversized arguments and long nested records are withheld whole and named", async () => {
+test("oversized arguments and long nested records remain fully pageable and searchable", async () => {
 	const session = manager();
 	const captured = makeExtension(session);
 	const ctx = context(session);
@@ -355,18 +353,30 @@ test("oversized arguments and long nested records are withheld whole and named",
 
 	const listed = page(await call(captured, "history_list", { roles: ["tool"] }, ctx));
 	assert.deepEqual(listed.items[0]!.nested_calls, { call_count: 400, complete: true }, "the page row counts every recorded call, not only the records one read can carry");
-	const read = resultRead<{ execution: { argumentsBytes?: number; arguments?: unknown; nestedCalls: { calls: unknown[]; complete: boolean; trimmed?: boolean; omittedCalls?: number } } }>(await call(captured, "history_read", { seq: 2 }, ctx));
-	assert.equal(read.execution.arguments, undefined, "the oversized arguments object is withheld whole");
-	assert.equal(typeof read.execution.argumentsBytes, "number");
-	assert.equal(read.execution.nestedCalls.complete, true, "the host's completeness flag is preserved as recorded");
-	assert.equal(read.execution.nestedCalls.trimmed, true);
-	assert.ok(read.execution.nestedCalls.calls.length < 400, "the read is what gets trimmed");
-	assert.equal(read.execution.nestedCalls.calls.length + (read.execution.nestedCalls.omittedCalls ?? 0), 400, "every record is accounted for");
-	assertWithinBudget(await call(captured, "history_read", { seq: 2 }, ctx), "bounded execution metadata");
+	let read = resultRead<{ nested_calls: { call_count: number; complete: boolean } }>(await call(captured, "history_read", { seq: 2, limit_chars: 50_000 }, ctx));
+	assert.deepEqual(read.nested_calls, { call_count: 400, complete: true });
+	assert.equal(read.limited_by, "bytes");
+	let document = read.text;
+	while (read.next_offset_chars !== null) {
+		const next = read.next_offset_chars;
+		const result = await call(captured, "history_read", { seq: 2, offset_chars: next, limit_chars: 50_000 }, ctx);
+		assertWithinBudget(result, "bounded document page");
+		read = resultRead(result);
+		assert.equal(read.offset_chars, next);
+		assert.ok(read.text.length > 0, "every continuation makes progress");
+		document += read.text;
+	}
+	const expectedCalls = Array.from({ length: 400 }, (_, index) => `- big/${index} read [ok] 1ms {"path":"p${index}.md"}`).join("\n");
+	assert.equal(document, `write ${JSON.stringify({ path: "big.md", content: huge })}\n--- output ---\nwritten\n--- nested calls (complete, 400 recorded) ---\n${expectedCalls}`, "paging reconstructs all arguments and all recorded calls exactly");
+	assertWithinBudget(await call(captured, "history_read", { seq: 2 }, ctx), "bounded first read");
 	assertWithinBudget(await call(captured, "history_list", { roles: ["tool"] }, ctx), "bounded list row");
 
 	const searchHit = page(await call(captured, "history_search", { query: "big.md", max_chars_per_item: 40 }, ctx));
 	assert.deepEqual(searchHit.items.map((item) => item.seq), [2], "the document still carries the real arguments, so search still finds them");
+	const late = page(await call(captured, "history_search", { query: "p399.md" }, ctx)).items[0]!;
+	assert.equal(late.seq, 2);
+	const resumed = resultRead(await call(captured, "history_read", { seq: 2, offset_chars: late.offset_chars }, ctx));
+	assert.ok(resumed.text.startsWith("p399.md"), "search can jump directly to evidence beyond the first read");
 });
 
 test("standalone bash execution retains command, output, and truncation path", async () => {

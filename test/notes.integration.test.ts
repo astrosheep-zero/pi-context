@@ -343,8 +343,8 @@ test("an over-budget note is delivered as a bounded prefix and resumed by next_o
 	assert.equal(first.total_chars, Array.from(text).length, "the window counts the body, not the serialized file");
 	assert.equal(first.limited_by, "limit", "the requested window ended this page, not the byte budget");
 	assert.equal(first.content.length, 12000, "the default window is the full requested count");
-	assert.deepEqual(Object.keys(resultData<NotesReadData>(rawFirst)).sort(), ["address", "metadata", "window"], "the structured read separates identity, metadata, and the window");
-	assert.equal(resultData<NotesReadData>(rawFirst).metadata.access_count, 1, "the read bumped the access counter that the frontmatter no longer sits inside the window");
+	assert.deepEqual(Object.keys(resultData<NotesReadData>(rawFirst)).sort(), ["address", "limited_by", "metadata", "next_offset_chars", "offset_chars", "text", "total_chars"], "read fields are flat");
+	assert.equal("access_count" in resultData<NotesReadData>(rawFirst).metadata, false, "access bookkeeping stays in storage");
 	assert.equal(textOf(rawFirst).endsWith(`\n\n[${first.total_chars - first.content.length} more characters. Use offset_chars=${first.next_offset_chars} to continue.]`), true, "the footer names the resume cursor in the new read style");
 
 	// Asking for the largest legal window still cannot exceed the byte budget, and says so.
@@ -492,7 +492,7 @@ test("oversized note metadata is counted out of a read instead of quietly droppe
 	const metadata = resultData<NotesReadData>(raw).metadata;
 	assert.equal(read.content, "body text", "metadata size never enters the body window");
 	assert.equal(metadata.origin, "external");
-	assert.equal(metadata.access_count, 5, "the read reports the access it just recorded");
+	assert.equal("access_count" in metadata, false, "access bookkeeping stays in storage");
 	assert.equal(metadata.extra.small, "kept", "a small unrecognized key is delivered");
 	assert.equal(metadata.extra.fat, undefined, "an oversized value is not delivered in part");
 	assert.deepEqual(metadata.omitted_extra, { keys: 1, bytes: JSON.stringify("fat").length + 1 + JSON.stringify("x".repeat(8000)).length }, "the withheld entry is summarized, never listed, and its key bytes are counted");

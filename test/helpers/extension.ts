@@ -291,35 +291,33 @@ function isTextWindow(value: unknown): value is TextWindow {
 /** Data of a successful outcome, asserting both the structured success and the non-error result. */
 export function resultData<T>(result: AgentToolResult<unknown>): T {
 	const outcome = outcomeOf(result);
-	assert.equal(outcome.ok, true, `expected success, got refusal ${JSON.stringify(outcome.error ?? null)}`);
+	assert.equal("error" in outcome, false, `expected success, got refusal ${JSON.stringify(outcome)}`);
 	assert.notEqual(result.isError, true, "a successful outcome is never delivered as an error result");
-	return outcome.data as T;
+	return outcome as T;
 }
 
 /** The typed refusal of a failed outcome, asserting the error result and the refusal shape. */
 export function resultError(result: AgentToolResult<unknown>): OperationError {
 	const outcome = outcomeOf(result);
-	assert.equal(outcome.ok, false, `expected a refusal, got success ${JSON.stringify(outcome.data ?? null).slice(0, 200)}`);
 	assert.equal(result.isError, true, "a refusal is delivered as an error result");
-	assert.ok(isOperationError(outcome.error), "refusal carries a code and a message");
-	return outcome.error;
+	const error = { code: outcome.code, message: outcome.error, ...(outcome.details === undefined ? {} : { details: outcome.details }) };
+	assert.ok(isOperationError(error), "refusal carries a code and an error message");
+	return error;
 }
 
 /** Identity a read outcome carries next to its window; tests narrow it with an explicit type. */
 export type ReadIdentity = { metadata?: Record<string, unknown>; address?: string; seq?: number; window_id?: string };
 
 /** The structured data of a read outcome: the window plus whatever identity the operation adds. */
-export type ReadOutcome<T extends object = ReadIdentity> = { window: TextWindow } & T;
+export type ReadOutcome<T extends object = ReadIdentity> = TextWindow & T;
 
-/** A read as tests consume it: its window fields, plus `content` as a test-only alias for `window.text`. */
+/** A read as tests consume it: its window fields, plus `content` as a test-only alias for `text`. */
 export type ReadWindowResult<T extends object = ReadIdentity> = TextWindow & { content: string } & T;
 
 export function resultRead<T extends object = ReadIdentity>(result: AgentToolResult<unknown>): ReadWindowResult<T> {
 	const data = resultData<ReadOutcome<T>>(result);
-	assert.ok(isTextWindow(data.window), "read outcome carries a text window");
-	const { window } = data;
-	const read = { ...window, ...data, content: window.text };
-	return read;
+	assert.ok(isTextWindow(data), "read carries flat text and pagination fields");
+	return { ...data, content: data.text };
 }
 
 /** Assert both surfaces of one result fit the wire budget: the model text and the structured payload. */
