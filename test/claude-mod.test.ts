@@ -16,12 +16,15 @@ type HookToolSpec = { name: string; description: string; inputSchema: Record<str
 
 /** One engine handler: it receives the engine, the event, and the rest of the chain. */
 type HookHandler = ($: HookEngine, e: Record<string, unknown>, next: (e: unknown) => Promise<unknown>) => Promise<unknown>;
-/** The engine surface the hook actually touches: no session, no model, no user configuration. */
+/** The engine surface the hook actually touches; no live model or user configuration. */
 type HookEngine = {
   env: { get: (name: string) => Promise<string | undefined> };
-  session: { id: () => Promise<string> };
+  session: { id: () => Promise<string>; messages: () => Promise<Array<{ role: string; text: string }>>; usage: () => Promise<{ context: { percent?: number } }>; compact: (options: { instructions: string }) => Promise<{ skip?: string; messages?: Array<{ role: string; text: string }> }> };
+  command: { register: (spec: { name: string; description: string; immediate?: boolean }) => Promise<unknown> };
+  clock: { after: (ms: number, callback: () => void | Promise<void>) => unknown };
+  prompt: { submit: (input: { text: string }) => Promise<unknown> };
   tool: { register: (spec: HookToolSpec) => Promise<{ tool: string }> };
-  ui?: { notify?: (text: string, options?: { title?: string }) => Promise<unknown> };
+  ui?: { notify?: (text: string, options?: { title?: string }) => Promise<unknown>; log?: (text: string) => void };
   process: { run: (argv: readonly string[], init?: { cwd?: string; stdin?: string }) => Promise<{ exitCode: number; stdout: string }> };
 };
 
@@ -57,9 +60,12 @@ function fakeEngine(home: string): { host: HookEngine; registered: HookToolSpec[
     notifications,
     host: {
       env: { get: async (name) => name === "PI_NOTES_HOME" ? home : undefined },
-      session: { id: async () => "hook-session" },
+      session: { id: async () => "hook-session", messages: async () => [], usage: async () => ({ context: {} }), compact: async () => ({ skip: "test default" }) },
+      command: { register: async (spec) => ({ command: spec.name }) },
+      clock: { after: () => { throw new Error("test has no pending manual timer") } },
+      prompt: { submit: async () => undefined },
       tool: { register: async (spec) => { registered.push(structuredClone(spec)); return { tool: `mcp__pi-context__${spec.name}` }; } },
-      ui: { notify: async (text) => { notifications.push(text); } },
+      ui: { notify: async (text) => { notifications.push(text); }, log: (text) => { notifications.push(text); } },
       process: { run: async (argv, init) => ({
         exitCode: 0,
         stdout: execFileSync(argv[0]!, argv.slice(1), { cwd: init?.cwd, input: init?.stdin, encoding: "utf8" }),
@@ -174,7 +180,7 @@ test("Claude Mod appends boot once and reuses persisted blocks after re-registra
     const hooks = await loadHookModule(t);
     const handlers = new Map<string, HookHandler>();
     hooks.register((event, handler) => handlers.set(event, handler));
-    await handlers.get("session.start")!(host, { cwd: home }, async (event: unknown) => event);
+    await handlers.get("session.start")!(host, { cwd: home, isInteractive: true }, async (event: unknown) => event);
     return handlers;
   };
 
@@ -231,7 +237,7 @@ test("Claude Mod boot failure preserves fallback with available, absent, or fail
       };
       const handlers = new Map<string, HookHandler>();
       hooks.register((event, handler) => handlers.set(event, handler));
-      await handlers.get("session.start")!(host, { cwd: home }, async (event: unknown) => event);
+      await handlers.get("session.start")!(host, { cwd: home, isInteractive: true }, async (event: unknown) => event);
       let nextCalls = 0;
       const promptContext = (result: Record<string, unknown>) =>
         handlers.get("prompt.context")!(host, { cwd: home }, async () => { nextCalls += 1; return result; });
@@ -261,7 +267,7 @@ test("Claude Mod hook delivers the helper's shared text, and marks only a refusa
   const { host, registered } = fakeEngine(home);
   const handlers = new Map<string, HookHandler>();
   hooks.register((event, handler) => handlers.set(event, handler));
-  await handlers.get("session.start")!(host, { cwd: home }, async (event: unknown) => event);
+  await handlers.get("session.start")!(host, { cwd: home, isInteractive: true }, async (event: unknown) => event);
   assert.deepEqual(registered.map((spec) => spec.name), ["notes_write", "notes_update", "notes_read", "notes_list", "notes_search"]);
   for (const spec of registered) {
     assert.equal(spec.isDeferred, false, `${spec.name} is available from the start without tool search`);
@@ -282,6 +288,160 @@ test("Claude Mod hook delivers the helper's shared text, and marks only a refusa
   // A tool this plugin never registered is somebody else's answer, not a pi-context refusal.
   const foreign = await call("other_tool", {});
   assert.equal("result" in foreign, false, "an unregistered tool falls through to the engine's own handling");
+});
+
+
+test("Claude Mod resets at 85 after the turn, retains one fresh boot and deduplicates measure", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "claude-reset-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const { host, registered, notifications } = fakeEngine(home);
+  const handlers = new Map<string, HookHandler>();
+  (await loadHookModule(t)).register((event, handler) => handlers.set(event, handler));
+  const invoke = (name: string, event: Record<string, unknown> = {}) => handlers.get(name)!(host, event, async () => ({ sentinel: name }));
+  let percent: number | undefined = 84;
+  let compactions = 0;
+  let kept: Array<{ role: string; text: string }> = [];
+  host.session.usage = async () => ({ context: { percent } });
+  host.session.compact = async ({ instructions }) => {
+    compactions++;
+    const result = await invoke("session.compact", { trigger: "plugin", instructions: `${instructions} (rewritten upstream)`, messages: [{ role: "user", text: "OLD_SECRET" }] }) as { messages: typeof kept };
+    kept = result.messages;
+    percent = undefined; // The real engine invalidates token usage after compact.
+    return result;
+  };
+  await invoke("session.start", { cwd: home, isInteractive: true });
+  assert.equal(registered.length, 5);
+  const initial = await handlers.get("prompt.context")!(host, {}, async () => ({ blocks: [] })) as { blocks: Array<{ text: string }> };
+  assert.match(initial.blocks[0]!.text, /Current context window id: claude:hook-session:0/);
+  await invoke("turn.start");
+  await invoke("session.measure");
+  await invoke("turn.complete");
+  assert.equal(compactions, 0, "84 is below the fixed threshold");
+  host.session.usage = async () => { throw new Error("usage unavailable"); };
+  await invoke("session.measure");
+  await invoke("turn.complete");
+  assert.equal(notifications.filter((text) => text.includes("context usage unavailable")).length, 1, "usage failure logs once per session");
+  host.session.usage = async () => ({ context: { percent } });
+  await dispatch({ op: "tool", tool: "notes_write", identity: { ...identity, home, cwd: home, sessionId: "hook-session" }, params: { address: "@human/MAP.md", content: "FRESH_NOTES_AT_RESET" } });
+  await invoke("turn.start");
+  percent = 85;
+  await invoke("session.measure");
+  assert.equal(compactions, 0, "measure cannot compact under a running turn");
+  assert.deepEqual(await invoke("turn.complete"), { sentinel: "turn.complete" });
+  assert.equal(compactions, 1);
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0]!.role, "user");
+  assert.match(kept[0]!.text, /Current context window id: claude:hook-session:1/);
+  assert.match(kept[0]!.text, /Previous context window id: claude:hook-session:0/);
+  assert.match(kept[0]!.text, /FRESH_NOTES_AT_RESET/);
+  assert.doesNotMatch(kept[0]!.text, /OLD_SECRET/);
+  await invoke("session.measure");
+  assert.equal(compactions, 1, "invalidated percent cannot immediately reset twice");
+  const upstream = { blocks: [{ name: "unrelated", text: "leave this alone" }], sentinel: "kept" };
+  assert.deepEqual(await handlers.get("prompt.context")!(host, {}, async () => upstream), upstream, "the retained boot is not injected a second time");
+});
+
+test("Claude Mod headless detection skips compaction and logs once", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "claude-headless-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const { host, notifications } = fakeEngine(home);
+  const handlers = new Map<string, HookHandler>();
+  (await loadHookModule(t)).register((event, handler) => handlers.set(event, handler));
+  const invoke = (name: string, e: Record<string, unknown> = {}) => handlers.get(name)!(host, e, async () => ({ sentinel: name }));
+  let percent: number | undefined;
+  let attempts = 0;
+  host.session.usage = async () => ({ context: { percent } });
+  host.session.compact = async () => { attempts++; throw new Error("not available in a headless (-p / SDK) session yet"); };
+  await invoke("session.start", { cwd: home, isInteractive: false });
+  await invoke("turn.start");
+  await invoke("turn.complete");
+  await invoke("session.measure");
+  assert.equal(attempts, 0, "no counters means no automatic reset");
+  percent = 85;
+  await invoke("turn.start");
+  assert.deepEqual(await invoke("turn.complete"), { sentinel: "turn.complete" }, "a rejection does not break the turn chain");
+  await invoke("session.measure");
+  await invoke("turn.complete");
+  assert.equal(attempts, 0, "headless sessions skip the unsupported capability from startup");
+  assert.deepEqual(notifications, ["pi-context: reset skipped in headless (-p / SDK) session."]);
+  const manual = await invoke("command.run", { command: "clear-memory" }) as { text: string };
+  assert.match(manual.text, /reset skipped in headless/);
+  assert.equal(notifications.length, 1);
+  const boot = await handlers.get("prompt.context")!(host, {}, async () => ({ blocks: [] })) as { blocks: Array<{ text: string }> };
+  assert.match(boot.blocks[0]!.text, /Current context window id: claude:hook-session:0/);
+});
+
+test("Claude Mod refuses to wipe on boot failure and can retry without advancing the window", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "claude-reset-failure-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const { host } = fakeEngine(home);
+  const handlers = new Map<string, HookHandler>();
+  (await loadHookModule(t)).register((event, handler) => handlers.set(event, handler));
+  const invoke = (name: string, e: Record<string, unknown> = {}) => handlers.get(name)!(host, e, async () => ({}));
+  await invoke("session.start", { cwd: home, isInteractive: true });
+  const run = host.process.run;
+  let failBoot = true;
+  host.process.run = async (argv, init) => {
+    if (JSON.parse(init!.stdin!).op === "boot" && failBoot) return { exitCode: 1, stdout: "" };
+    return run(argv, init);
+  };
+  host.session.usage = async () => ({ context: { percent: 85 } });
+  let result: Awaited<ReturnType<HookEngine["session"]["compact"]>> = {};
+  host.session.compact = async ({ instructions }) => result = await invoke("session.compact", { trigger: "plugin", instructions }) as typeof result;
+  await invoke("turn.start");
+  await invoke("turn.complete");
+  assert.match(result.skip!, /Notes boot failed/);
+  assert.equal(result.messages, undefined, "a failed builder must veto rather than fall through to summary");
+  failBoot = false;
+  await invoke("turn.start");
+  await invoke("turn.complete");
+  assert.equal(result.skip, undefined);
+  assert.match(result.messages![0]!.text, /Current context window id: claude:hook-session:1/, "a failed reset never consumes a window ordinal");
+});
+
+test("Claude Mod manual reset uses one hidden close-out turn, then recovers its boot on reload", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "claude-manual-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const { host } = fakeEngine(home);
+  let handlers = new Map<string, HookHandler>();
+  const invoke = (name: string, e: Record<string, unknown> = {}) => handlers.get(name)!(host, e, async () => ({}));
+  const timers: Array<() => void | Promise<void>> = [];
+  const prompts: string[] = [];
+  let kept: Array<{ role: string; text: string }> = [];
+  let compactions = 0;
+  host.clock.after = (_ms, callback) => { timers.push(callback); };
+  host.session.compact = async ({ instructions }) => {
+    compactions++;
+    const result = await invoke("session.compact", { trigger: "plugin", instructions }) as { messages: typeof kept };
+    kept = result.messages;
+    return result;
+  };
+  host.prompt.submit = async ({ text }) => {
+    prompts.push(text);
+    await invoke("turn.start");
+    await invoke("turn.complete");
+  };
+  (await loadHookModule(t)).register((event, handler) => handlers.set(event, handler));
+  await invoke("session.start", { cwd: home, isInteractive: true });
+  const command = await invoke("command.run", { command: "clear-memory" }) as { text: string };
+  assert.match(command.text, /closing out/);
+  await Promise.resolve();
+  assert.equal(compactions, 0, "command.run must not call compact under its held turn");
+  assert.equal(timers.length, 1);
+  await timers.shift()!();
+  assert.equal(prompts.length, 1, "exactly one hidden normal-model close-out turn, not a summary");
+  assert.equal(compactions, 1);
+  assert.match(kept[0]!.text, /Current context window id: claude:hook-session:1/);
+  host.session.messages = async () => [{ role: "user", text: "OLD_SECRET" }, ...kept];
+  handlers = new Map();
+  (await loadHookModule(t)).register((event, handler) => handlers.set(event, handler));
+  await invoke("session.start", { cwd: home, isInteractive: true });
+  assert.deepEqual(await handlers.get("prompt.context")!(host, {}, async () => ({ blocks: [] })), { blocks: [] }, "reload does not duplicate the already-retained boot");
+  await invoke("turn.start");
+  await invoke("command.run", { command: "clear-memory" });
+  await invoke("turn.complete");
+  assert.equal(prompts.length, 1, "a busy manual request reuses the current turn instead of submitting another");
+  assert.match(kept[0]!.text, /Current context window id: claude:hook-session:2/);
 });
 
 

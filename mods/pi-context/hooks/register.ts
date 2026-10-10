@@ -1,13 +1,33 @@
-import type { On, ProcessRunResult, ToolCallResult, ToolSpec } from "claude-code"
+import type { EngineInterface, On, ProcessRunResult, ToolCallResult, ToolSpec } from "claude-code"
 
 const PREFIX = "mcp__pi-context__"
 const TOOL_NAMES = ["notes_write", "notes_update", "notes_read", "notes_list", "notes_search"] as const
+// @ts-expect-error Claude's hook sandbox supplies import.meta.dir; Node's typings do not.
 const HELPER = `${import.meta.dir}/../dist/claude/helper.js`
 const TIMEOUT_MS = 10_000
 const OUTPUT_LIMIT = 1024 * 1024
 
 type Identity = { home: string; sessionId: string; cwd: string; agent: string; model: string }
 type SchemaRow = { name: string; description: string; inputSchema: Record<string, unknown> }
+type Engine = Pick<EngineInterface, "process" | "session" | "ui" | "clock" | "prompt">
+type ResetState = {
+  identity?: Identity; window: number; turnRunning: boolean; resetting: boolean
+  manualPending: boolean; headless: boolean; usageFailureLogged: boolean; preparedBoot?: string; retainedBoot?: string
+}
+const RESET_INSTRUCTIONS = "pi-context: reset to a fresh notes-only context window."
+const BOOT_TOOLS = {
+  notes: `${PREFIX}notes_*`, notesList: `${PREFIX}notes_list`,
+  history: "history_* (unavailable in Claude)", historyWindows: "history_windows (unavailable in Claude)", historyList: "history_list (unavailable in Claude)",
+  historySearch: "history_search (unavailable in Claude)", historyRead: "history_read (unavailable in Claude)",
+  remaining: "get_context_remaining (unavailable in Claude)", wipe: "/clear-memory (user command; no model reset tool in Claude)",
+}
+
+async function buildBoot($: Engine, identity: Identity, window: number) {
+  return run($, { op: "boot", identity, window, tools: BOOT_TOOLS }, identity.cwd)
+}
+function log($: Engine, text: string) {
+  try { $.ui.log(`pi-context: ${text}`) } catch { /* UI must not break a turn or reset. */ }
+}
 
 function errorResult(message: string): ToolCallResult { return { result: `pi-context: ${message}`, isError: true } }
 /** The helper's tool result: the shared text the model reads, plus whether that outcome refused. */
@@ -38,10 +58,24 @@ function identityOf(e: { cwd: string }, sessionId: string, home: string, model: 
 
 export function register(on: On) {
   let identity: Identity | undefined
+  const manualSignal: { wake?: () => void } = {}
+  const state: ResetState = { window: 0, turnRunning: false, resetting: false, manualPending: false, headless: false, usageFailureLogged: false }
   const registered = new Set<string>()
   on("session.start", async ($, e, next) => {
     const home = await $.env.get("PI_NOTES_HOME") ?? `${await $.env.get("HOME") ?? await $.env.get("USERPROFILE") ?? ""}/.agents/notes`
     identity = identityOf(e, await $.session.id(), home, "claude")
+    state.identity = identity
+    state.window = 0
+    state.turnRunning = state.resetting = state.manualPending = state.usageFailureLogged = false
+    state.headless = !e.isInteractive
+    if (state.headless) log($, "reset skipped in headless (-p / SDK) session.")
+    state.preparedBoot = state.retainedBoot = undefined
+    // The engine's history view includes retained boots on resume/reload.
+    // Recover their ordinal without treating that view as inference context.
+    try { restoreWindow(state, await $.session.messages()) } catch { /* A fresh session starts at zero. */ }
+    registered.clear()
+    armManual($, state, manualSignal)
+    await $.command.register({ name: "clear-memory", description: "Reset context to a fresh notes-only window", immediate: true })
     const schemas = await run($, { op: "schemas" }, e.cwd)
     if (!schemas.ok || !Array.isArray(schemas.result)) return next(e)
     for (const row of schemas.result as SchemaRow[]) {
@@ -61,16 +95,52 @@ export function register(on: On) {
     if (!outcome) return errorResult("helper returned an invalid tool result")
     return outcome.ok ? { result: outcome.text } : { result: outcome.text, isError: true }
   })
+  on("turn.start", async ($, e, next) => {
+    state.turnRunning = true
+    return next(e)
+  })
+  on("turn.complete", async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId !== undefined) return result
+    state.turnRunning = false
+    await maybeReset($, state, true)
+    return result
+  })
+  on("session.measure", async ($, e, next) => {
+    const result = await next(e)
+    await maybeReset($, state, false)
+    return result
+  })
+  on("command.run", async ($, e, next) => {
+    if (e.command !== "clear-memory") return next(e)
+    if (state.headless) return { text: "pi-context: reset skipped in headless (-p / SDK) session." }
+    if (state.resetting || state.manualPending) return { text: "pi-context: reset already pending." }
+    if (state.turnRunning) {
+      state.manualPending = true
+      return { text: "pi-context: reset queued until the turn completes." }
+    }
+    // command.run holds a turn even when idle. Start one hidden close-out
+    // turn after it returns; turn.complete is the verified self-hook path.
+    state.manualPending = true
+    manualSignal.wake?.()
+    return { text: "pi-context: reset requested; closing out the current window." }
+  })
+  on("session.compact", async ($, e, next) => {
+    // Do not take over native /compact or another plugin's compaction.
+    if (!state.resetting || e.trigger !== "plugin" || e.agentId !== undefined || !identity) return next(e)
+    const boot = await buildBoot($, identity, state.window + 1)
+    if (!boot.ok) return { skip: `pi-context: Notes boot failed: ${boot.error}` }
+    state.preparedBoot = String(boot.result)
+    return { messages: [{ role: "user", text: state.preparedBoot, toolUses: [] }] }
+  })
   on("prompt.context", async ($, e, next) => {
     const result = await next(e)
+    // The reset already retained its boot as the sole conversation message.
+    // Prompt context still recomputes, but must not inject a duplicate snapshot.
+    if (state.retainedBoot !== undefined) return { ...result, blocks: result.blocks.filter((block) => block.name !== "pi-context:boot") }
     if (result.blocks.some((block) => block.name === "pi-context:boot")) return result
     if (!identity) return result
-    const boot = await run($, { op: "boot", identity, tools: {
-      notes: `${PREFIX}notes_*`, notesList: `${PREFIX}notes_list`,
-      history: "history_* (unavailable in Claude)", historyWindows: "history_windows (unavailable in Claude)", historyList: "history_list (unavailable in Claude)",
-      historySearch: "history_search (unavailable in Claude)", historyRead: "history_read (unavailable in Claude)",
-      remaining: "get_context_remaining (unavailable in Claude)", wipe: "clear_memory (unavailable in Claude)",
-    } }, identity.cwd)
+    const boot = await buildBoot($, identity, state.window)
     if (!boot.ok) {
       try {
         await $.ui.notify("pi-context: Notes boot failed.")
@@ -79,4 +149,93 @@ export function register(on: On) {
     const block = { name: "pi-context:boot", text: boot.ok ? String(boot.result) : `# pi-context\n${boot.error}` }
     return { ...result, blocks: [...result.blocks, block] }
   })
+
+}
+
+function restoreWindow(state: ResetState, messages: readonly { role: string; text: string }[]) {
+  if (!state.identity) return
+  const prefix = `Current context window id: claude:${state.identity.sessionId}:`
+  for (const message of messages) {
+    if (message.role !== "user" || !message.text.startsWith("<context_window>\nAgent name: claude ")) continue
+    const line = message.text.split("\n").find((value) => value.startsWith(prefix))
+    if (!line) continue
+    const suffix = line.slice(prefix.length)
+    const window = Number(suffix)
+    if (!/^\d+$/.test(suffix) || !Number.isSafeInteger(window) || window <= state.window) continue
+    state.window = window
+    state.retainedBoot = message.text
+  }
+}
+
+// The waiter is created in session.start, so its Promise continuation keeps
+// that non-held host context. Timers started inside command.run inherit its
+// held dispatch even after the command returns. No polling timer is needed.
+function armManual($: Engine, state: ResetState, signal: { wake?: () => void }) {
+  const requested = new Promise<void>((resolve) => { signal.wake = resolve })
+  void requested.then(() => {
+    signal.wake = undefined
+    $.clock.after(0, () => finishManual($, state, signal))
+  })
+}
+async function finishManual($: Engine, state: ResetState, signal: { wake?: () => void }) {
+  try {
+    if (state.manualPending && !state.turnRunning) {
+      await $.prompt.submit({ text: "A context reset was requested. Save any essential checkpoint to session notes now, then end this turn. pi-context will reset to a fresh notes-only window after the turn completes." })
+    }
+  } catch {
+    state.manualPending = false
+    log($, "manual reset skipped; the close-out turn could not start.")
+  } finally { armManual($, state, signal) }
+}
+
+// The sandbox permits $ forwarding only to file-top-level helpers.
+async function maybeReset($: Engine, state: ResetState, complete: boolean) {
+  if (!state.identity || state.resetting || state.headless) return
+  let percent: number | undefined
+  try { percent = (await $.session.usage()).context?.percent }
+  catch {
+    if (!state.usageFailureLogged) {
+      state.usageFailureLogged = true
+      log($, "context usage unavailable; automatic reset skipped.")
+    }
+  }
+  if (state.turnRunning) return
+  if ((complete && state.manualPending) || (typeof percent === "number" && Number.isFinite(percent) && percent >= 85)) {
+    state.manualPending = false
+    await reset($, state)
+  }
+}
+async function reset($: Engine, state: ResetState): Promise<string> {
+  if (!state.identity) return "pi-context: reset skipped; notes identity unavailable."
+  if (state.headless) return "pi-context: reset skipped in headless (-p / SDK) session."
+  if (state.resetting) return "pi-context: reset already in progress."
+  state.resetting = true
+  state.preparedBoot = undefined
+  try {
+    const result = await $.session.compact({ instructions: RESET_INSTRUCTIONS })
+    if (result.skip !== undefined || state.preparedBoot === undefined) {
+      const text = `reset skipped: ${result.skip ?? "notes boot was not retained"}`
+      log($, text)
+      return `pi-context: ${text}`
+    }
+    state.retainedBoot = state.preparedBoot
+    state.window++
+    log($, `memory cleared · window ${state.window}`)
+    return `pi-context: memory cleared · window ${state.window}`
+  } catch (error) {
+    const text = String(error)
+    if (text.includes("headless (-p / SDK)")) {
+      state.headless = true
+      log($, "reset skipped in headless (-p / SDK) session.")
+    } else if (/a turn is (running|in flight)/.test(text)) {
+      state.manualPending = true
+      return "pi-context: reset queued until the turn completes."
+    } else {
+      log($, `reset failed; keeping the current window: ${text.replace(/[\r\n].*$/s, "")}`)
+    }
+    return state.headless ? "pi-context: reset skipped in headless (-p / SDK) session." : "pi-context: reset failed; keeping the current window."
+  } finally {
+    state.preparedBoot = undefined
+    state.resetting = false
+  }
 }

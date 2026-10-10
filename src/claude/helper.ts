@@ -73,8 +73,11 @@ export async function dispatch(request: unknown): Promise<unknown> {
 	if (value.op === "boot") {
 		const id = identity(value.identity as ClaudeIdentityInput);
 		if (!value.tools || typeof value.tools !== "object") throw new Error("invalid boot tools");
+		const window = value.window ?? 0;
+		if (typeof window !== "number" || !Number.isSafeInteger(window) || window < 0) throw new Error("invalid context window");
 		const snapshot = await loadNotesSnapshot(id, typeof value.openedAt === "number" ? value.openedAt : Date.now());
-		return renderBootBlock({ agentName: id.agent, modelName: id.model, firstWindowId: `claude:${id.sessionId}`, currentWindowId: `claude:${id.sessionId}`, notes: snapshot, tools: value.tools as BootToolNames });
+		const windowId = (index: number) => `claude:${id.sessionId}:${index}`;
+		return renderBootBlock({ agentName: id.agent, modelName: id.model, firstWindowId: windowId(0), currentWindowId: windowId(window), ...(window > 0 ? { previousWindowId: windowId(window - 1) } : {}), notes: snapshot, tools: value.tools as BootToolNames });
 	}
 	throw new Error("unknown operation");
 }
