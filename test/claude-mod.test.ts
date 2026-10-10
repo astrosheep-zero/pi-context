@@ -38,7 +38,7 @@ async function callTool(tool: string, params: Record<string, unknown>): Promise<
  * gets the real one; nothing else about the module is changed.
  */
 async function loadHookModule(t: test.TestContext): Promise<{ register: (on: (event: string, handler: HookHandler) => void) => void }> {
-  const hooksDir = join(process.cwd(), "mods/pi-context/hooks");
+  const hooksDir = join(process.cwd(), "mods/notesoup/hooks");
   const transpiled = await build({
     stdin: { contents: readFileSync(join(hooksDir, "register.ts"), "utf8"), loader: "ts", resolveDir: hooksDir, sourcefile: "register.ts" },
     bundle: false, format: "esm", platform: "node", target: "node22", write: false,
@@ -64,7 +64,7 @@ function fakeEngine(home: string): { host: HookEngine; registered: HookToolSpec[
       command: { register: async (spec) => ({ command: spec.name }) },
       clock: { after: () => { throw new Error("test has no pending manual timer") } },
       prompt: { submit: async () => undefined },
-      tool: { register: async (spec) => { registered.push(structuredClone(spec)); return { tool: `mcp__pi-context__${spec.name}` }; } },
+      tool: { register: async (spec) => { registered.push(structuredClone(spec)); return { tool: `mcp__notesoup__${spec.name}` }; } },
       ui: { notify: async (text) => { notifications.push(text); }, log: (text) => { notifications.push(text); } },
       process: { run: async (argv, init) => ({
         exitCode: 0,
@@ -131,11 +131,11 @@ test("Claude helper refuses schema-invalid parameters before any operation runs"
 
 test("Claude helper boot uses actual Claude note tool bindings and a fresh snapshot", async () => {
   const boot = await dispatch({ op: "boot", identity, openedAt: 1700000000000, tools: {
-    notes: "mcp__pi-context__notes_*", notesList: "mcp__pi-context__notes_list",
+    notes: "mcp__notesoup__notes_*", notesList: "mcp__notesoup__notes_list",
     history: "history unavailable", historyWindows: "history_windows unavailable", historyList: "history_list unavailable", historySearch: "history_search unavailable", historyRead: "history_read unavailable",
     remaining: "remaining unavailable", wipe: "wipe unavailable",
   } }) as string;
-  assert.match(boot, /mcp__pi-context__notes_\*/);
+  assert.match(boot, /mcp__notesoup__notes_\*/);
   assert.match(boot, /claude:session/);
   assert.doesNotMatch(boot, /memory cleared|continuation/);
 });
@@ -144,8 +144,8 @@ test("Claude helper boot uses actual Claude note tool bindings and a fresh snaps
 test("Claude Mod helper runs from a standalone copied plugin directory", () => {
   const fixture = mkdtempSync(join(tmpdir(), "claude-mod-install-"));
   try {
-    const plugin = join(fixture, "pi-context");
-    cpSync(join(process.cwd(), "mods/pi-context"), plugin, { recursive: true });
+    const plugin = join(fixture, "notesoup");
+    cpSync(join(process.cwd(), "mods/notesoup"), plugin, { recursive: true });
     const hook = readFileSync(join(plugin, "hooks/register.ts"), "utf8");
     assert.ok(hook.includes('${import.meta.dir}/../dist/claude/helper.js'));
     const helper = join(plugin, "dist/claude/helper.js");
@@ -194,9 +194,9 @@ test("Claude Mod appends boot once and reuses persisted blocks after re-registra
   assert.equal(first.blocks.length, 2, "exactly one boot block joins the upstream blocks");
   assert.deepEqual(first.blocks[0], upstream.blocks[0], "the upstream block is preserved untouched");
   const boot = first.blocks[1]!;
-  assert.equal(boot.name, "pi-context:boot");
+  assert.equal(boot.name, "notesoup:boot");
   assert.ok(boot.text.length > 0, "the boot block carries real boot text");
-  assert.match(boot.text, /mcp__pi-context__notes_\*/, "the boot text names the actual Claude note tool binding");
+  assert.match(boot.text, /mcp__notesoup__notes_\*/, "the boot text names the actual Claude note tool binding");
   assert.equal(first.sentinel, "kept", "unrelated result fields survive");
   assert.equal(bootRequests, 1, "the first prompt makes exactly one boot helper request");
   assert.equal(nextCalls, 1, "the upstream chain runs exactly once per prompt");
@@ -245,10 +245,10 @@ test("Claude Mod boot failure preserves fallback with available, absent, or fail
       const failed = await promptContext(structuredClone(upstream));
       assert.deepEqual(failed, {
         ...upstream,
-        blocks: [...upstream.blocks, { name: "pi-context:boot", text: "# pi-context\nhelper exited unsuccessfully" }],
+        blocks: [...upstream.blocks, { name: "notesoup:boot", text: "# notesoup\nhelper exited unsuccessfully" }],
       }, "boot failure keeps the original fallback and upstream fields even if notify is absent or fails");
-      const expectedNotifications = mode === "no ui" || mode === "no notify" ? [] : ["pi-context: Notes boot failed."];
-      assert.deepEqual(notifications, expectedNotifications, "one user-facing notification names pi-context and the notes boot failure");
+      const expectedNotifications = mode === "no ui" || mode === "no notify" ? [] : ["notesoup: Notes boot failed."];
+      assert.deepEqual(notifications, expectedNotifications, "one user-facing notification names notesoup and the notes boot failure");
       assert.equal(bootRequests, 1);
       assert.equal(nextCalls, 1);
 
@@ -275,7 +275,7 @@ test("Claude Mod hook delivers the helper's shared text, and marks only a refusa
     assert.equal(spec.inputSchema.type, "object");
   }
 
-  const call = (tool: string, params: Record<string, unknown>) => handlers.get("tool.call")!(host, { tool: `mcp__pi-context__${tool}`, tool_use_id: "hook-1", ...params }, async (event: unknown) => event) as Promise<{ result: unknown; isError?: unknown }>;
+  const call = (tool: string, params: Record<string, unknown>) => handlers.get("tool.call")!(host, { tool: `mcp__notesoup__${tool}`, tool_use_id: "hook-1", ...params }, async (event: unknown) => event) as Promise<{ result: unknown; isError?: unknown }>;
 
   const written = await call("notes_write", { address: "hook.md", content: "hook body" });
   assert.equal(written.result, "created hook.md", "the hook hands back the shared text unchanged");
@@ -285,7 +285,7 @@ test("Claude Mod hook delivers the helper's shared text, and marks only a refusa
   assert.equal(refused.isError, true, "a refusal carries the literal the public ToolCallResult declares");
   assert.match(String(refused.result), /^error: not_found: /, "the refusal reads as the shared error line");
 
-  // A tool this plugin never registered is somebody else's answer, not a pi-context refusal.
+  // A tool this plugin never registered is somebody else's answer, not a notesoup refusal.
   const foreign = await call("other_tool", {});
   assert.equal("result" in foreign, false, "an unregistered tool falls through to the engine's own handling");
 });
@@ -363,7 +363,7 @@ test("Claude Mod headless detection skips compaction and logs once", async (t) =
   await invoke("session.measure");
   await invoke("turn.complete");
   assert.equal(attempts, 0, "headless sessions skip the unsupported capability from startup");
-  assert.deepEqual(notifications, ["pi-context: reset skipped in headless (-p / SDK) session."]);
+  assert.deepEqual(notifications, ["notesoup: reset skipped in headless (-p / SDK) session."]);
   const manual = await invoke("command.run", { command: "clear-memory" }) as { text: string };
   assert.match(manual.text, /reset skipped in headless/);
   assert.equal(notifications.length, 1);
@@ -447,14 +447,14 @@ test("Claude Mod manual reset uses one hidden close-out turn, then recovers its 
 
 test("Claude dream skill projection stays byte-identical to canonical shared files", () => {
   assert.deepEqual(
-    readFileSync(join(process.cwd(), "mods/pi-context/skills/dream/SKILL.md")),
+    readFileSync(join(process.cwd(), "mods/notesoup/skills/dream/SKILL.md")),
     readFileSync(join(process.cwd(), "skills/dream/SKILL.md")),
   );
   assert.deepEqual(
-    readFileSync(join(process.cwd(), "mods/pi-context/playbook.md")),
+    readFileSync(join(process.cwd(), "mods/notesoup/playbook.md")),
     readFileSync(join(process.cwd(), "playbook.md")),
   );
-  const skill = readFileSync(join(process.cwd(), "mods/pi-context/skills/dream/SKILL.md"), "utf8");
+  const skill = readFileSync(join(process.cwd(), "mods/notesoup/skills/dream/SKILL.md"), "utf8");
   assert.match(skill, /\.\.\/\.\.\/playbook\.md/);
   assert.doesNotMatch(skill, /Claude.*runner|dream runner/i);
 });

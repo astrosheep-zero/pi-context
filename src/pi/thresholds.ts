@@ -1,12 +1,12 @@
 import { deriveThresholds, type ResolvedThresholds } from "../budget/policy.js";
 import { SettingsManager, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_RESERVE_TOKENS, DEFAULT_REMINDER_MARGIN_TOKENS, WARNING_RUNWAY_TOKENS } from "../budget/constants.js";
-import { mergePiContextSettings } from "../settings.js";
+import { mergeNotesoupSettings } from "../settings.js";
 
 /**
- * Read the active compaction reserve, enablement, and pi-context margin settings. This
+ * Read the active compaction reserve, enablement, and notesoup margin settings. This
  * function deliberately has no cache: the budget owner supplies the invocation-scoped
- * cache so two live piContext instances cannot share mutable policy state.
+ * cache so two live notesoup instances cannot share mutable policy state.
  */
 export type ThresholdSettingsResolution = {
 	thresholds: ResolvedThresholds;
@@ -20,7 +20,7 @@ function readThresholdSettingsFromManager(ctx: ExtensionContext, settingsManager
 	const compaction = settingsManager.getCompactionSettings(model ? { provider: model.provider, id: model.id } : undefined);
 	const derived = deriveThresholds(
 		compaction.reserveTokens,
-		mergePiContextSettings(settingsManager.getGlobalSettings(), settingsManager.getProjectSettings()),
+		mergeNotesoupSettings(settingsManager.getGlobalSettings(), settingsManager.getProjectSettings()),
 	);
 	return { thresholds: derived.thresholds, automatic: compaction.enabled, warnings: derived.warnings };
 }
@@ -44,7 +44,7 @@ export function readThresholdSettings(ctx: ExtensionContext, settingsManager?: S
 				warning: DEFAULT_RESERVE_TOKENS + WARNING_RUNWAY_TOKENS,
 			},
 			automatic: true,
-			warnings: [`pi-context: could not read settings; using defaults (${String(error)}).`],
+			warnings: [`notesoup: could not read settings; using defaults (${String(error)}).`],
 		};
 	}
 }

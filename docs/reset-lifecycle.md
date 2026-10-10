@@ -18,10 +18,10 @@ Boot acquisition/rendering is shared: `src/boot/snapshot.ts` receives explicit i
 A new boundary is ordered as:
 
 1. A native `compaction` entry with `summary: ""` and `firstKeptEntryId` set to its own ID. This is Pi's retain-none canonical checkpoint; it is not a generated summary request.
-2. A `pi-context/reset-marker` custom entry with `{ windowId }`.
-3. A hidden `pi-context/boot` custom message with matching `details.windowId`.
+2. A `notesoup/reset-marker` custom entry with `{ windowId }`.
+3. A hidden `notesoup/boot` custom message with matching `details.windowId`.
 4. A hidden continuation message.
-5. If the manual command supplied a prompt, a visible `pi-context/reset-prompt` custom message containing that literal text. Pi boundary drafts do not support ordinary user entries; the prompt is committed with the reset instead of queued separately.
+5. If the manual command supplied a prompt, a visible `notesoup/reset-prompt` custom message containing that literal text. Pi boundary drafts do not support ordinary user entries; the prompt is committed with the reset instead of queued separately.
 
 The raw session branch is preserved for history. New checkpoint-backed branches use Pi's canonical retain-none projection, which preserves the empty summary wrapper and system/tool state while excluding earlier conversational context. Older marker-only sessions use marker slicing as a narrow compatibility fallback. A marker is trusted as checkpoint-backed only when it directly follows an empty native compaction whose `firstKeptEntryId` is the compaction's own ID; a generic preceding compaction is not enough.
 
@@ -48,7 +48,7 @@ The raw session branch is preserved for history. New checkpoint-backed branches 
 - `tool_request(windowId)` marks that window for a turn-end reset. Matching duplicates deduplicate. Inside a budget close-out the call upgrades to a turn-end commit because context pressure cannot wait for settlement; inside a manual close-out it is only an acknowledgement, so a manual wipe is never converted into a turn-end commit that Pi's tool-batch continuation would overrun.
 - `turn_end` first clears everything on abort. Overflow-like errors preserve a manual close-out, including across queued work; other requests arm automatic overflow recovery only when there is no queued work, the extension is enabled, and automatic reset is enabled. Other failures drop the request but preserve the overflow chain. A successful, enabled turn commits for a tool request or hard-reserve condition; a close-out alone remains armed. Bare manual hard-reserve commits request no continuation and retain `stop-pending` across the window change. A manual request with a prompt instead returns the prompt with the commit effect, clears request state, and continues after the prompt is durably appended; it never enters the stop latch. Further turns cannot reset that stopped run again.
 - `agent_before_settle` clears state on actual abort. Pending manual overflow commits a reset without continuation when enabled and unqueued; it does not require automatic reset enablement. Other pending overflow recovery gets its one bounded attempt when enabled and unqueued. A committed `stop-pending` reset needs only a stop, never a second wipe. Otherwise only a manual close-out commits, if the outcome is successful, the request belongs to the current window, the extension is enabled, and no queued work remains. An automatic close-out alone is cleared without a reset.
-- `agent_settled`, session start/tree navigation/shutdown, `/pi-context off`, and abort clear transient request state. Durable checkpoint/marker history remains authoritative after transient state is gone.
+- `agent_settled`, session start/tree navigation/shutdown, `/notesoup off`, and abort clear transient request state. Durable checkpoint/marker history remains authoritative after transient state is gone.
 
 After a manual safety reset, `context_with_system` verifies the committed checkpoint/marker/boot/continuation before using public `ctx.abort()` to cancel Pi's otherwise unavoidable tool-batch follow-up, returning a system-only safe context. Pending messages or a real user message after the reset marker bypass cancellation so queued work is not swallowed. A follow-up queue may require Pi's ordinary tool follow-up to finish before delivery; the stop intent remains armed until that work settles. Abort/settlement clears the run-scoped latch, so later user prompts work normally.
 

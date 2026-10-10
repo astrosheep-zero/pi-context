@@ -33,7 +33,7 @@ import {
 } from "./helpers/extension.js";
 import { installExtensionTestHooks } from "./helpers/extension-test-environment.js";
 
-const testEnvironment = installExtensionTestHooks("pi-context-integration");
+const testEnvironment = installExtensionTestHooks("notesoup-integration");
 
 test("custom reset marker removes old provider context while history remains searchable", async () => {
 	const sessionManager = manager();
@@ -232,7 +232,7 @@ test("off preserves an existing marker window and still cancels native compactio
 	const windowId = "pcw:test:existing";
 	sessionManager.appendCustomEntry(RESET_MARKER_TYPE, { windowId });
 	sessionManager.appendCustomMessageEntry(BOOT_TYPE, "fresh boot", false, { windowId });
-	await runCommand(captured, "pi-context", "off", ctx);
+	await runCommand(captured, "notesoup", "off", ctx);
 	const before = await runManualCompact(captured, ctx);
 	assert.deepEqual(before, { cancel: true });
 	const projected = await runContextWithSystemHook(captured, ctx, sessionManager.buildSessionContext().messages);
@@ -273,7 +273,7 @@ test("/clear-memory waits out non-agent busy work before starting its single-tur
 	assert.equal(notices.filter((message) => message.includes("received; the agent closes out its notes")).length, 1);
 });
 
-test("pi-context command toggles future work, /clear-memory schedules a turn-end reset, and /compact remains disabled", async () => {
+test("notesoup command toggles future work, /clear-memory schedules a turn-end reset, and /compact remains disabled", async () => {
 	const sessionManager = manager();
 	appendText(sessionManager, "user", "hello");
 	const captured = makeExtension(sessionManager);
@@ -284,7 +284,7 @@ test("pi-context command toggles future work, /clear-memory schedules a turn-end
 	assert.equal(captured.sent.length, 1);
 	assert.equal(captured.sent[0]?.message.customType, BOOT_TYPE);
 
-	let notices = await runCommand(captured, "pi-context", "off", low);
+	let notices = await runCommand(captured, "notesoup", "off", low);
 	assert.match(notices[0]?.message ?? "", /off/);
 	assert.equal(await runContextHook(captured, low), undefined, "no guidance while off");
 	assert.equal(sentOf(captured, GUIDANCE_TYPE).length, 0, "no guidance persisted while off");
@@ -293,7 +293,7 @@ test("pi-context command toggles future work, /clear-memory schedules a turn-end
 	const offResult = resultJson<{ error?: string }>(await call(captured, "clear_memory", {}, low));
 	assert.match(offResult.error ?? "", /off/, "clear_memory refuses while off");
 
-	notices = await runCommand(captured, "pi-context", "on", low);
+	notices = await runCommand(captured, "notesoup", "on", low);
 	assert.match(notices[0]?.message ?? "", /on/);
 	notices = await runCommand(captured, "clear-memory", "", low);
 	assert.equal(notices.length, 1, "the command acknowledges the reset request");
@@ -308,11 +308,11 @@ test("pi-context command toggles future work, /clear-memory schedules a turn-end
 	const projected = await runContextWithSystemHook(captured, low, sessionManager.buildSessionContext().messages);
 	assert.equal(JSON.stringify(projected?.messages ?? []).includes("hello"), true, "the old window remains active until the close-out commits");
 
-	notices = await runCommand(captured, "pi-context", "maybe", low);
+	notices = await runCommand(captured, "notesoup", "maybe", low);
 	assert.equal(notices[0]?.type, "error", "unknown argument rejected");
 
 	// Bare command reports current state without changing it.
-	notices = await runCommand(captured, "pi-context", "", low);
+	notices = await runCommand(captured, "notesoup", "", low);
 	assert.match(notices[0]?.message ?? "", /on/);
 });
 

@@ -1,5 +1,5 @@
 {
-	"name": "@astrosheep/pi-context",
+	"name": "notesoup",
 	"version": "0.38.0",
 	"type": "module",
 	"main": "./dist/src/index.js",
@@ -20,11 +20,12 @@
 	"keywords": [
 		"pi-package",
 		"pi-extension",
-		"context-management"
+		"agent-memory",
+		"notes"
 	],
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/astrosheep-zero/pi-context.git"
+		"url": "https://github.com/astrosheep-zero/notesoup.git"
 	},
 	"pi": {
 		"extensions": [

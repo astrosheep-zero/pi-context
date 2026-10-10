@@ -236,7 +236,7 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 		try {
 			resetDrafts = await options.buildReset(ctx, isCurrent, prompt);
 		} catch (error) {
-			if (isCurrent()) ctx.ui.notify(`pi-context: could not build reset (${String(error)}).${prompt ? " The follow-up prompt was not executed." : ""}`, "warning");
+			if (isCurrent()) ctx.ui.notify(`notesoup: could not build reset (${String(error)}).${prompt ? " The follow-up prompt was not executed." : ""}`, "warning");
 			return entries.length > 0 ? { entries } : undefined;
 		}
 		if (!isCurrent()) return entries.length > 0 ? { entries } : undefined;
@@ -309,7 +309,7 @@ export function registerResetLifecycle(pi: ExtensionAPI, options: ResetOptions) 
 		const markerExists = currentReset(ctx) !== undefined;
 		if (options.isEnabled() || markerExists) {
 			if (event.reason === "manual") {
-				ctx.ui.notify("pi-context: /compact is disabled while context windows are active; use /clear-memory to start a fresh window.", "warning");
+				ctx.ui.notify("notesoup: /compact is disabled while context windows are active; use /clear-memory to start a fresh window.", "warning");
 			}
 			return { cancel: true };
 		}

@@ -66,7 +66,7 @@ export function registerBudget(
 		for (const [key, notice] of pendingNotices) {
 			if (warningCommittedInWindow(ctx, notice)) {
 				pendingNotices.delete(key);
-				ctx.ui.notify("pi-context: context almost full; close out the current memory window.", "warning");
+				ctx.ui.notify("notesoup: context almost full; close out the current memory window.", "warning");
 			} else if (settled) {
 				// An uncommitted draft must not be matched to a later manual warning.
 				pendingNotices.delete(key);

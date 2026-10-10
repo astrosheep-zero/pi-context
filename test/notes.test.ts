@@ -1,5 +1,5 @@
 /**
- * OWNER: pi-context (adopted).
+ * OWNER: notesoup (adopted).
  * STATUS: tracked acceptance spec for the real-file notes store and its five tools.
  * CLAIM: notes live as markdown files under $PI_NOTES_HOME with harness-owned frontmatter;
  *   the five tools (notes_write/update/read/list/search) are the only note surface, and the
@@ -21,7 +21,7 @@ import type { NotesListData, NotesReadData, NotesSearchData, NotesUpdateData, No
 import { call, context, explicitBoot, makeExtension, manager, resultData, resultError, resultRead } from "./helpers/extension.js";
 import { installExtensionTestHooks } from "./helpers/extension-test-environment.js";
 
-const testEnvironment = installExtensionTestHooks("pi-context-notes");
+const testEnvironment = installExtensionTestHooks("notesoup-notes");
 
 function freshRoot(): string {
 	return testEnvironment.newNotesRoot();

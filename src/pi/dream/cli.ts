@@ -36,7 +36,7 @@ export async function main(argv = process.argv.slice(2), deps: DreamDependencies
 		console.log(issues.length ? issues.join("\n") : `dream doctor: OK (${home})`);
 		return issues.length ? 1 : 0;
 	}
-	const a = args(argv); if (a.help) { console.log("dream doctor [--notes-home <dir>] — read-only diagnostics\ndream --notes-home <dir> [--min-hours 24] [--min-sessions 3] [--force] [--dreamer <model pattern>] [--playbook <path>]\nDreamer model: --dreamer wins, else pi-context.dreamer from settings, else the automatic model. Default playbook: <installed package root>/playbook.md; --playbook overrides it."); return 0; }
+	const a = args(argv); if (a.help) { console.log("dream doctor [--notes-home <dir>] — read-only diagnostics\ndream --notes-home <dir> [--min-hours 24] [--min-sessions 3] [--force] [--dreamer <model pattern>] [--playbook <path>]\nDreamer model: --dreamer wins, else notesoup.dreamer from settings, else the automatic model. Default playbook: <installed package root>/playbook.md; --playbook overrides it."); return 0; }
 	const home = resolve(String(a["notes-home"] ?? notesRoot())); process.env.PI_NOTES_HOME = home; mkdirSync(home, { recursive: true });
 	const lockPath = join(home, ".dream.lock"); const stampPath = lastRunPath(lockPath);
 	const minHours = Number(a["min-hours"] ?? 24); const minSessions = Number(a["min-sessions"] ?? 3);

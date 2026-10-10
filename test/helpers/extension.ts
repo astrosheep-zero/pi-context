@@ -19,7 +19,7 @@ import {
 	type ToolDefinition,
 	type TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
-import piContext, { createPiContext } from "../../src/pi/extension.js";
+import notesoup, { createNotesoup } from "../../src/pi/extension.js";
 import { loadNotesSnapshot } from "../../src/boot/snapshot.js";
 import { renderBootBlock } from "../../src/boot/render.js";
 import { agentSlug, modelSlug } from "../../src/pi/notes/adapter.js";
@@ -27,7 +27,7 @@ import { rootWindowId } from "../../src/pi/window.js";
 import { TOOL_OUTPUT_MAX_BYTES } from "../../src/tools/output.js";
 import { structuredBytes, type OperationError, type TextWindow } from "../../src/tools/result.js";
 
-let defaultCwd = "/private/tmp/pi-context-test-cwd";
+let defaultCwd = "/private/tmp/notesoup-test-cwd";
 let registerTempPath: ((path: string) => void) | undefined;
 
 export type ExtensionTestEnvironment = {
@@ -43,7 +43,7 @@ export type ExtensionTestEnvironment = {
  * Install the process-level settings and notes roots needed by one test file.
  * The caller owns the lifecycle hooks; this helper never registers tests or hooks.
  */
-export function installExtensionTestEnvironment(prefix = "pi-context-test"): ExtensionTestEnvironment {
+export function installExtensionTestEnvironment(prefix = "notesoup-test"): ExtensionTestEnvironment {
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const previousNotesHome = process.env.PI_NOTES_HOME;
 	const defaultAgentDir = mkdtempSync(join(tmpdir(), `${prefix}-agent-`));
@@ -105,8 +105,8 @@ export function settingsFixture(options: {
 	project?: Record<string, unknown>;
 	reserveTokens?: number;
 } = {}): SettingsFixture {
-	const cwd = mkdtempSync(join(tmpdir(), "pi-context-cwd-"));
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-context-agent-"));
+	const cwd = mkdtempSync(join(tmpdir(), "notesoup-cwd-"));
+	const agentDir = mkdtempSync(join(tmpdir(), "notesoup-agent-"));
 	const global = { ...(options.global ?? {}) };
 	if (options.reserveTokens !== undefined) global.compaction = { reserveTokens: options.reserveTokens };
 	writeJson(join(agentDir, "settings.json"), global);
@@ -151,9 +151,9 @@ export function objectSchema(tool: ToolDefinition | undefined): { type?: string;
 }
 
 export function manager(persisted = false): SessionManager {
-	if (!persisted) return SessionManager.inMemory("/private/tmp/pi-context-test");
-	const dir = mkdtempSync(join(tmpdir(), "pi-context-session-"));
-	return SessionManager.create("/private/tmp/pi-context-test", dir);
+	if (!persisted) return SessionManager.inMemory("/private/tmp/notesoup-test");
+	const dir = mkdtempSync(join(tmpdir(), "notesoup-session-"));
+	return SessionManager.create("/private/tmp/notesoup-test", dir);
 }
 
 export function makeExtension(sessionManager: SessionManager, settingsManager?: SettingsManager): Captured {
@@ -182,7 +182,7 @@ export function makeExtension(sessionManager: SessionManager, settingsManager?: 
 		},
 	};
 	// The harness implements only the ExtensionAPI members this extension uses.
-	(settingsManager ? createPiContext({ settingsManager }) : piContext)(api as unknown as ExtensionAPI);
+	(settingsManager ? createNotesoup({ settingsManager }) : notesoup)(api as unknown as ExtensionAPI);
 	return captured;
 }
 

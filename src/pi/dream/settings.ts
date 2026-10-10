@@ -1,6 +1,6 @@
 import { deriveDreamer, type DreamerSetting } from "../../dream/settings.js";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
-import { mergePiContextSettings } from "../../settings.js";
+import { mergeNotesoupSettings } from "../../settings.js";
 
 /**
  * Resolve the configurable dreamer model from Pi settings for a CLI invocation: global
@@ -10,8 +10,8 @@ import { mergePiContextSettings } from "../../settings.js";
 export function readDreamerSettings(cwd = process.cwd()): DreamerSetting {
 	try {
 		const settingsManager = SettingsManager.create(cwd, undefined, { projectTrusted: true });
-		return deriveDreamer(mergePiContextSettings(settingsManager.getGlobalSettings(), settingsManager.getProjectSettings()));
+		return deriveDreamer(mergeNotesoupSettings(settingsManager.getGlobalSettings(), settingsManager.getProjectSettings()));
 	} catch (error) {
-		return { warnings: [`pi-context: could not read settings; using the automatic dreamer model (${String(error)}).`] };
+		return { warnings: [`notesoup: could not read settings; using the automatic dreamer model (${String(error)}).`] };
 	}
 }

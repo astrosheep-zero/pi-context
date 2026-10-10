@@ -1,1 +1,1 @@
-export { default, createPiContext } from "./pi/extension.js";
+export { default, createNotesoup } from "./pi/extension.js";

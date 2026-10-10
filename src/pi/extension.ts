@@ -3,10 +3,10 @@ import { registerHistoryTools } from "./history-tools.js";
 import { registerNotesTools } from "./notes/tools.js";
 import { registerContext } from "./runtime.js";
 
-function registerPiContext(pi: ExtensionAPI, settingsManager?: SettingsManager): void {
+function registerNotesoup(pi: ExtensionAPI, settingsManager?: SettingsManager): void {
 	const [major, minor] = VERSION.split(".").map(Number);
 	if (!(major > 0 || (major === 0 && minor >= 87))) {
-		throw new Error(`pi-context requires Pi >= 0.87.0; running ${VERSION}. Upgrade Pi and restart the process; /reload only reloads extensions.`);
+		throw new Error(`notesoup requires Pi >= 0.87.0; running ${VERSION}. Upgrade Pi and restart the process; /reload only reloads extensions.`);
 	}
 	registerContext(pi, settingsManager);
 	registerHistoryTools(pi);
@@ -17,11 +17,11 @@ function registerPiContext(pi: ExtensionAPI, settingsManager?: SettingsManager):
  * Create an extension factory bound to an SDK settings authority. The host must pass
  * the same manager to createAgentSession and to this factory's resource loader.
  */
-export function createPiContext(options: { settingsManager?: SettingsManager } = {}): ExtensionFactory {
-	return (pi) => registerPiContext(pi, options.settingsManager);
+export function createNotesoup(options: { settingsManager?: SettingsManager } = {}): ExtensionFactory {
+	return (pi) => registerNotesoup(pi, options.settingsManager);
 }
 
 /** The Pi-discovered extension keeps the standard file-backed settings behavior. */
-export default function piContext(pi: ExtensionAPI): void {
-	registerPiContext(pi);
+export default function notesoup(pi: ExtensionAPI): void {
+	registerNotesoup(pi);
 }

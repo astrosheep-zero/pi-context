@@ -16,7 +16,7 @@ import {
 	type ExtensionAPI,
 	type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
-import piContext, { createPiContext } from "../src/pi/extension.js";
+import notesoup, { createNotesoup } from "../src/pi/extension.js";
 import { BOOT_TYPE, CONTINUATION_TYPE, GUIDANCE_TYPE, MANUAL_WIPE_TYPE, RESET_MARKER_TYPE, WARNING_TYPE } from "../src/pi/entries.js";
 import { CONTEXT_WINDOW_OPEN_TAG } from "../src/boot/text.js";
 import { CONTINUATION, WARNING_CONTENT, WARNING_PROMPT } from "../src/pi/reset/text.js";
@@ -64,9 +64,9 @@ async function openFixture(options: {
 	script: StreamScript;
 	hook?: Hook;
 }): Promise<Fixture> {
-	const dir = options.cwd ?? mkdtempSync(join(tmpdir(), "pi-context-agent-loop-"));
+	const dir = options.cwd ?? mkdtempSync(join(tmpdir(), "notesoup-agent-loop-"));
 	const ownsDir = options.cwd === undefined;
-	const notesRoot = options.notesRoot ?? mkdtempSync(join(tmpdir(), "pi-context-agent-loop-notes-"));
+	const notesRoot = options.notesRoot ?? mkdtempSync(join(tmpdir(), "notesoup-agent-loop-notes-"));
 	const ownsNotesRoot = options.notesRoot === undefined;
 	const agentDir = options.agentDir ?? dir;
 	const managesEnvironment = options.manageEnvironment ?? true;
@@ -126,7 +126,7 @@ async function openFixture(options: {
 		noPromptTemplates: true,
 		systemPromptOverride: () => options.systemPrompt ?? "Use the tools as requested.",
 		agentsFilesOverride: () => ({ agentsFiles: [] }),
-		extensionFactories: [...(options.codemode ? [createCodemodeExtension({ models: false })] : []), options.settingsManager ? createPiContext({ settingsManager }) : piContext, (pi) => {
+		extensionFactories: [...(options.codemode ? [createCodemodeExtension({ models: false })] : []), options.settingsManager ? createNotesoup({ settingsManager }) : notesoup, (pi) => {
 		options.hook?.(pi, () => session, requests);
 	}],
 	});
@@ -177,12 +177,12 @@ async function openFixture(options: {
 	await session.bindExtensions({
 		uiContext: {
 			notify(message: string, type?: "info" | "warning" | "error") {
-				if (message.startsWith("pi-context: memory cleared · ")) {
+				if (message.startsWith("notesoup: memory cleared · ")) {
 					const windowId = message.split(" · ")[1];
 					assert.ok(sessionManager.getBranch().some((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE && (entry.data as { windowId?: string })?.windowId === windowId), "notification follows the reset marker commit");
 					assert.ok(sessionManager.getBranch().some((entry) => entry.type === "custom_message" && entry.customType === BOOT_TYPE && (entry.details as { windowId?: string })?.windowId === windowId), "notification follows the reset boot commit");
 				}
-				if (type === "warning" && /^pi-context: context (?:almost full|running low)/.test(message)) budgetNotices++;
+				if (type === "warning" && /^notesoup: context (?:almost full|running low)/.test(message)) budgetNotices++;
 				notices.push(message);
 			},
 		} as ExtensionUIContext,
@@ -394,12 +394,12 @@ test("real AgentSession: final warning survives its reset boundary and notifies 
 		assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === WARNING_TYPE).length, 1);
 		assert.equal(resetMarkers(fixture).length, 1, "the reset commits in the same boundary as the final warning");
 		assert.equal(fixture.budgetNotices(), 1, "the old-window committed warning reaches the UI after reset");
-		assert.equal(fixture.notices.filter((notice) => notice.startsWith("pi-context: memory cleared · ")).length, 1, "reset notification remains intact");
+		assert.equal(fixture.notices.filter((notice) => notice.startsWith("notesoup: memory cleared · ")).length, 1, "reset notification remains intact");
 		assert.equal(fixture.notices.some((notice) => notice.includes("Context running low")), false, "early guidance stays silent");
 		await fixture.session.prompt("Continue after reset.");
 		await fixture.session.waitForIdle();
 		assert.equal(fixture.budgetNotices(), 1, "later turns cannot repeat the consumed final warning");
-		assert.equal(fixture.notices.filter((notice) => notice.startsWith("pi-context: memory cleared · ")).length, 1, "the prior reset notification is also deduplicated");
+		assert.equal(fixture.notices.filter((notice) => notice.startsWith("notesoup: memory cleared · ")).length, 1, "the prior reset notification is also deduplicated");
 	} finally {
 		fixture.close();
 	}
@@ -519,7 +519,7 @@ test("real AgentSession: clear commands append a prompt after continuation and r
 			const continuationIndex = branch.findIndex((entry) => entry.type === "custom_message" && entry.customType === CONTINUATION_TYPE);
 			const appended = branch[continuationIndex + 1];
 			assert.ok(appended?.type === "custom_message");
-			assert.equal(appended.customType, "pi-context/reset-prompt");
+			assert.equal(appended.customType, "notesoup/reset-prompt");
 			assert.equal(appended.content, prompt);
 			assert.equal(appended.display, true);
 			assert.ok(fixture.notices.some((notice) => notice.includes("memory cleared")));
@@ -542,7 +542,7 @@ test("real AgentSession: whitespace-only /cm clears and stops", { timeout: 20000
 		await fixture.session.prompt("/cm   ");
 		await fixture.session.waitForIdle();
 		assert.equal(resetMarkers(fixture).length, 1);
-		assert.equal(fixture.sessionManager.getBranch().some((entry) => entry.type === "custom_message" && entry.customType === "pi-context/reset-prompt"), false);
+		assert.equal(fixture.sessionManager.getBranch().some((entry) => entry.type === "custom_message" && entry.customType === "notesoup/reset-prompt"), false);
 	} finally { fixture.close(); }
 });
 
@@ -934,7 +934,7 @@ test("real AgentSession: successive resets and a mixed tool batch cut only after
 });
 
 test("real AgentSession: two retain-none checkpoints survive session-file reopen", { timeout: 20000 }, async () => {
-	const sessionDir = mkdtempSync(join(tmpdir(), "pi-context-persisted-session-"));
+	const sessionDir = mkdtempSync(join(tmpdir(), "notesoup-persisted-session-"));
 	let fixture!: Fixture;
 	let sessionFile = "";
 	let sessionId = "";
@@ -1154,11 +1154,11 @@ test("real AgentSession: overflow and recoverable length reset and retry once; r
 });
 
 test("real AgentSession: concurrent trusted projects keep reserve and automatic policy isolated", { timeout: 20000 }, async () => {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-context-shared-agent-"));
-	const notesRoot = mkdtempSync(join(tmpdir(), "pi-context-shared-notes-"));
-	const cwdAutomatic = mkdtempSync(join(tmpdir(), "pi-context-project-automatic-"));
-	const cwdModel = mkdtempSync(join(tmpdir(), "pi-context-project-model-"));
-	const cwdSession = mkdtempSync(join(tmpdir(), "pi-context-project-session-"));
+	const agentDir = mkdtempSync(join(tmpdir(), "notesoup-shared-agent-"));
+	const notesRoot = mkdtempSync(join(tmpdir(), "notesoup-shared-notes-"));
+	const cwdAutomatic = mkdtempSync(join(tmpdir(), "notesoup-project-automatic-"));
+	const cwdModel = mkdtempSync(join(tmpdir(), "notesoup-project-model-"));
+	const cwdSession = mkdtempSync(join(tmpdir(), "notesoup-project-session-"));
 	writeFileSync(join(agentDir, "settings.json"), JSON.stringify({
 		compaction: { enabled: true, reserveTokens: 70_000, keepRecentTokens: 200 },
 		retry: { enabled: false },
@@ -1246,8 +1246,8 @@ test("real AgentSession: concurrent trusted projects keep reserve and automatic 
 test("real AgentSession: injected settings managers own live policy and ignore conflicting default files", { timeout: 20000 }, async () => {
 	const firstManager = SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens: 80_000 } });
 	const secondManager = SettingsManager.inMemory({ compaction: { enabled: false, reserveTokens: 20_000 } });
-	const defaultAgentDir = mkdtempSync(join(tmpdir(), "pi-context-injected-default-agent-"));
-	const notesRoot = mkdtempSync(join(tmpdir(), "pi-context-injected-notes-"));
+	const defaultAgentDir = mkdtempSync(join(tmpdir(), "notesoup-injected-default-agent-"));
+	const notesRoot = mkdtempSync(join(tmpdir(), "notesoup-injected-notes-"));
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const previousNotesRoot = process.env.PI_NOTES_HOME;
 	writeFileSync(join(defaultAgentDir, "settings.json"), JSON.stringify({ compaction: { enabled: false, reserveTokens: 1_000 } }));
@@ -1336,7 +1336,7 @@ test("real AgentSession: injected settings managers own live policy and ignore c
 test("real AgentSession: injected model overrides select the active model's reserve", { timeout: 20000 }, async () => {
 	let settingsManager!: SettingsManager;
 	let modelBId = "";
-	const notesRoot = mkdtempSync(join(tmpdir(), "pi-context-model-override-notes-"));
+	const notesRoot = mkdtempSync(join(tmpdir(), "notesoup-model-override-notes-"));
 	const previousNotesRoot = process.env.PI_NOTES_HOME;
 	process.env.PI_NOTES_HOME = notesRoot;
 	let fixture!: Fixture;

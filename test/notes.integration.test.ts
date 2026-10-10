@@ -27,7 +27,7 @@ import {
 } from "./helpers/extension.js";
 import { installExtensionTestHooks } from "./helpers/extension-test-environment.js";
 
-const testEnvironment = installExtensionTestHooks("pi-context-integration");
+const testEnvironment = installExtensionTestHooks("notesoup-integration");
 
 /** The model-facing text of one tool result. */
 function textOf(result: AgentToolResult<unknown>): string {

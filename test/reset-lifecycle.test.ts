@@ -14,7 +14,7 @@ import type {
 	TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import { SessionManager as Manager } from "@earendil-works/pi-coding-agent";
-import piContext from "../src/pi/extension.js";
+import notesoup from "../src/pi/extension.js";
 import { BOOT_TYPE, CONTINUATION_TYPE, GUIDANCE_TYPE, RESET_MARKER_TYPE } from "../src/pi/entries.js";
 import { MANUAL_WIPE_TYPE } from "../src/pi/entries.js";
 import { toolContext } from "./helpers/extension.js";
@@ -29,7 +29,7 @@ import {
 } from "../src/pi/reset/lifecycle.js";
 
 const previousNotesHome = process.env.PI_NOTES_HOME;
-const testNotesHome = mkdtempSync(join(tmpdir(), "pi-context-lifecycle-notes-"));
+const testNotesHome = mkdtempSync(join(tmpdir(), "notesoup-lifecycle-notes-"));
 process.env.PI_NOTES_HOME = testNotesHome;
 test.after(() => {
 	if (previousNotesHome === undefined) delete process.env.PI_NOTES_HOME;
@@ -41,7 +41,7 @@ type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 type Command = { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> };
 
 function harness() {
-	const sessionManager = Manager.inMemory("/private/tmp/pi-context-lifecycle-test");
+	const sessionManager = Manager.inMemory("/private/tmp/notesoup-lifecycle-test");
 	const handlers = new Map<string, Handler[]>();
 	const tools = new Map<string, ToolDefinition>();
 	const commands = new Map<string, Command>();
@@ -63,7 +63,7 @@ function harness() {
 			sessionManager.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
 		},
 	};
-	piContext(api as unknown as ExtensionAPI);
+	notesoup(api as unknown as ExtensionAPI);
 	const ctx = {
 		sessionManager,
 		cwd: "/private/tmp",
@@ -224,7 +224,7 @@ test("off stops future automatic/manual reset requests while an existing marker 
 	const first = resultEntries(await h.emit("turn_end", fakeBoundaryEvent()));
 	assert.ok(first.entries.some((entry) => entry.type === "custom" && entry.customType === RESET_MARKER_TYPE));
 	appendDrafts(h.sessionManager, first.entries);
-	await h.runCommand("pi-context", "off");
+	await h.runCommand("notesoup", "off");
 	const before = await h.emit("session_before_compact", {
 		type: "session_before_compact",
 		reason: "manual",
@@ -236,7 +236,7 @@ test("off stops future automatic/manual reset requests while an existing marker 
 	assert.deepEqual(before.at(-1), { cancel: true }, "/compact is canceled when an existing marker would expose old canonical history");
 	const afterOff = resultEntries(await h.emit("turn_end", fakeBoundaryEvent()));
 	assert.equal(afterOff.entries.length, 0, "off does not create another reset");
-	await h.runCommand("pi-context", "on");
+	await h.runCommand("notesoup", "on");
 	await h.runCommand("clear-memory");
 	assert.equal(h.sent.length, 1, "/clear-memory sends one hidden close-out warning and starts a normal turn");
 	assert.equal(h.sent[0]?.triggerTurn, true);
@@ -249,7 +249,7 @@ test("off stops future automatic/manual reset requests while an existing marker 
 });
 
 test("reset construction failure preserves incoming and budget drafts without continuation", async () => {
-	const sessionManager = Manager.inMemory("/private/tmp/pi-context-reset-failure-test");
+	const sessionManager = Manager.inMemory("/private/tmp/notesoup-reset-failure-test");
 	const handlers = new Map<string, Handler[]>();
 	const notices: Array<{ message: string; type?: string }> = [];
 	const api = {
@@ -292,7 +292,7 @@ test("reset construction failure preserves incoming and budget drafts without co
 });
 
 test("a stale async reset is discarded after a lifecycle switch without staging a notice", async () => {
-	const sessionManager = Manager.inMemory("/private/tmp/pi-context-stale-reset-test");
+	const sessionManager = Manager.inMemory("/private/tmp/notesoup-stale-reset-test");
 	const handlers = new Map<string, Handler[]>();
 	const api = {
 		on(name: string, handler: Handler) {
@@ -339,7 +339,7 @@ test("a stale async reset is discarded after a lifecycle switch without staging 
 });
 
 test("a queued success clears an overflow failure before settle recovery can reset", async () => {
-	const sessionManager = Manager.inMemory("/private/tmp/pi-context-queued-overflow-test");
+	const sessionManager = Manager.inMemory("/private/tmp/notesoup-queued-overflow-test");
 	const handlers = new Map<string, Handler[]>();
 	const api = {
 		on(name: string, handler: Handler) {
@@ -575,7 +575,7 @@ test("reset-control: lazy guards preserve overflow policy ordering", () => {
 });
 
 test("a committed reset places incoming and budget drafts before marker -> boot -> continuation", async () => {
-	const sessionManager = Manager.inMemory("/private/tmp/pi-context-reset-ordering-test");
+	const sessionManager = Manager.inMemory("/private/tmp/notesoup-reset-ordering-test");
 	const handlers = new Map<string, Handler[]>();
 	const api = {
 		on(name: string, handler: Handler) {

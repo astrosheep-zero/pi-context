@@ -20,7 +20,7 @@ import {
 } from "./helpers/extension.js";
 import { installExtensionTestHooks } from "./helpers/extension-test-environment.js";
 
-installExtensionTestHooks("pi-context-history-v2");
+installExtensionTestHooks("notesoup-history-v2");
 
 type Page = { items: Array<Record<string, unknown>>; older_before: number | null; newer_after: number | null };
 type Appendable = Parameters<SessionManager["appendMessage"]>[0];
@@ -411,7 +411,7 @@ test("list renders paging and fold recipes, read renders a neighborhood call, an
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	for (let i = 0; i < 30; i++) appendText(session, "user", `older window ${i}`);
-	session.appendCustomEntry("pi-context/reset-marker", { windowId: "pcw:test:w2" });
+	session.appendCustomEntry("notesoup/reset-marker", { windowId: "pcw:test:w2" });
 	appendText(session, "user", "current window");
 
 	const listed = await call(captured, "history_list", {}, ctx);
@@ -464,7 +464,7 @@ test("search covers all roles, supports filters and anchor paging", async () => 
 	const captured = makeExtension(session);
 	const ctx = context(session);
 	appendText(session, "user", "visible needle");
-	session.appendCustomMessageEntry("pi-context/boot", "developer needle", false);
+	session.appendCustomMessageEntry("notesoup/boot", "developer needle", false);
 	appendText(session, "assistant", "assistant needle");
 	const all = page(await call(captured, "history_search", { query: "needle" }, ctx));
 	assert.deepEqual(all.items.map((item) => item.role), ["user", "context", "assistant"]);

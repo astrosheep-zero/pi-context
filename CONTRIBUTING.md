@@ -12,7 +12,7 @@ Read [architecture](docs/architecture.md) and [reset lifecycle](docs/reset-lifec
 
 ## APIs and persistence
 
-The root intentionally exports only the default Pi extension and `createPiContext`; `/notes` exports the standalone notes API with `NotesIdentity`. Tests import implementation owners, not a root internal bag. Source/API breaking changes are allowed in this refactor: do not restore old-path shims, `NotesContext` aliases or deep-entry export aliases to satisfy legacy packaging tests.
+The root intentionally exports only the default Pi extension and `createNotesoup`; `/notes` exports the standalone notes API with `NotesIdentity`. Tests import implementation owners, not a root internal bag. Source/API breaking changes are allowed in this refactor: do not restore old-path shims, `NotesContext` aliases or deep-entry export aliases to satisfy legacy packaging tests.
 
 Preserve tool/command names, model-facing copy, note homes/addresses/metadata and raw session archives unless a separately authorized change requires otherwise. No storage migration accompanies this refactor. Retain native checkpoints, branch isolation, stable seq/result aliases, abort/error refusal, queued-batch boundaries, stale async guards, warning-runway countdown and committed-only notices. Keep dream jail, live-note deletion refusal, lock ownership and partial-failure audit/report assertions intact.
 

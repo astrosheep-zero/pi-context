@@ -1,6 +1,6 @@
 import type { EngineInterface, On, ProcessRunResult, ToolCallResult, ToolSpec } from "claude-code"
 
-const PREFIX = "mcp__pi-context__"
+const PREFIX = "mcp__notesoup__"
 const TOOL_NAMES = ["notes_write", "notes_update", "notes_read", "notes_list", "notes_search"] as const
 // @ts-expect-error Claude's hook sandbox supplies import.meta.dir; Node's typings do not.
 const HELPER = `${import.meta.dir}/../dist/claude/helper.js`
@@ -14,7 +14,7 @@ type ResetState = {
   identity?: Identity; window: number; turnRunning: boolean; resetting: boolean
   manualPending: boolean; headless: boolean; usageFailureLogged: boolean; preparedBoot?: string; retainedBoot?: string
 }
-const RESET_INSTRUCTIONS = "pi-context: reset to a fresh notes-only context window."
+const RESET_INSTRUCTIONS = "notesoup: reset to a fresh notes-only context window."
 const BOOT_TOOLS = {
   notes: `${PREFIX}notes_*`, notesList: `${PREFIX}notes_list`,
   history: "history_* (unavailable in Claude)", historyWindows: "history_windows (unavailable in Claude)", historyList: "history_list (unavailable in Claude)",
@@ -26,10 +26,10 @@ async function buildBoot($: Engine, identity: Identity, window: number) {
   return run($, { op: "boot", identity, window, tools: BOOT_TOOLS }, identity.cwd)
 }
 function log($: Engine, text: string) {
-  try { $.ui.log(`pi-context: ${text}`) } catch { /* UI must not break a turn or reset. */ }
+  try { $.ui.log(`notesoup: ${text}`) } catch { /* UI must not break a turn or reset. */ }
 }
 
-function errorResult(message: string): ToolCallResult { return { result: `pi-context: ${message}`, isError: true } }
+function errorResult(message: string): ToolCallResult { return { result: `notesoup: ${message}`, isError: true } }
 /** The helper's tool result: the shared text the model reads, plus whether that outcome refused. */
 function toolResultOf(value: unknown): { text: string; ok: boolean } | undefined {
 	if (typeof value !== "object" || value === null) return undefined
@@ -113,23 +113,23 @@ export function register(on: On) {
   })
   on("command.run", async ($, e, next) => {
     if (e.command !== "clear-memory") return next(e)
-    if (state.headless) return { text: "pi-context: reset skipped in headless (-p / SDK) session." }
-    if (state.resetting || state.manualPending) return { text: "pi-context: reset already pending." }
+    if (state.headless) return { text: "notesoup: reset skipped in headless (-p / SDK) session." }
+    if (state.resetting || state.manualPending) return { text: "notesoup: reset already pending." }
     if (state.turnRunning) {
       state.manualPending = true
-      return { text: "pi-context: reset queued until the turn completes." }
+      return { text: "notesoup: reset queued until the turn completes." }
     }
     // command.run holds a turn even when idle. Start one hidden close-out
     // turn after it returns; turn.complete is the verified self-hook path.
     state.manualPending = true
     manualSignal.wake?.()
-    return { text: "pi-context: reset requested; closing out the current window." }
+    return { text: "notesoup: reset requested; closing out the current window." }
   })
   on("session.compact", async ($, e, next) => {
     // Do not take over native /compact or another plugin's compaction.
     if (!state.resetting || e.trigger !== "plugin" || e.agentId !== undefined || !identity) return next(e)
     const boot = await buildBoot($, identity, state.window + 1)
-    if (!boot.ok) return { skip: `pi-context: Notes boot failed: ${boot.error}` }
+    if (!boot.ok) return { skip: `notesoup: Notes boot failed: ${boot.error}` }
     state.preparedBoot = String(boot.result)
     return { messages: [{ role: "user", text: state.preparedBoot, toolUses: [] }] }
   })
@@ -137,16 +137,16 @@ export function register(on: On) {
     const result = await next(e)
     // The reset already retained its boot as the sole conversation message.
     // Prompt context still recomputes, but must not inject a duplicate snapshot.
-    if (state.retainedBoot !== undefined) return { ...result, blocks: result.blocks.filter((block) => block.name !== "pi-context:boot") }
-    if (result.blocks.some((block) => block.name === "pi-context:boot")) return result
+    if (state.retainedBoot !== undefined) return { ...result, blocks: result.blocks.filter((block) => block.name !== "notesoup:boot") }
+    if (result.blocks.some((block) => block.name === "notesoup:boot")) return result
     if (!identity) return result
     const boot = await buildBoot($, identity, state.window)
     if (!boot.ok) {
       try {
-        await $.ui.notify("pi-context: Notes boot failed.")
+        await $.ui.notify("notesoup: Notes boot failed.")
       } catch { /* Notification failure must not suppress the fallback block. */ }
     }
-    const block = { name: "pi-context:boot", text: boot.ok ? String(boot.result) : `# pi-context\n${boot.error}` }
+    const block = { name: "notesoup:boot", text: boot.ok ? String(boot.result) : `# notesoup\n${boot.error}` }
     return { ...result, blocks: [...result.blocks, block] }
   })
 
@@ -180,7 +180,7 @@ function armManual($: Engine, state: ResetState, signal: { wake?: () => void }) 
 async function finishManual($: Engine, state: ResetState, signal: { wake?: () => void }) {
   try {
     if (state.manualPending && !state.turnRunning) {
-      await $.prompt.submit({ text: "A context reset was requested. Save any essential checkpoint to session notes now, then end this turn. pi-context will reset to a fresh notes-only window after the turn completes." })
+      await $.prompt.submit({ text: "A context reset was requested. Save any essential checkpoint to session notes now, then end this turn. notesoup will reset to a fresh notes-only window after the turn completes." })
     }
   } catch {
     state.manualPending = false
@@ -206,9 +206,9 @@ async function maybeReset($: Engine, state: ResetState, complete: boolean) {
   }
 }
 async function reset($: Engine, state: ResetState): Promise<string> {
-  if (!state.identity) return "pi-context: reset skipped; notes identity unavailable."
-  if (state.headless) return "pi-context: reset skipped in headless (-p / SDK) session."
-  if (state.resetting) return "pi-context: reset already in progress."
+  if (!state.identity) return "notesoup: reset skipped; notes identity unavailable."
+  if (state.headless) return "notesoup: reset skipped in headless (-p / SDK) session."
+  if (state.resetting) return "notesoup: reset already in progress."
   state.resetting = true
   state.preparedBoot = undefined
   try {
@@ -216,12 +216,12 @@ async function reset($: Engine, state: ResetState): Promise<string> {
     if (result.skip !== undefined || state.preparedBoot === undefined) {
       const text = `reset skipped: ${result.skip ?? "notes boot was not retained"}`
       log($, text)
-      return `pi-context: ${text}`
+      return `notesoup: ${text}`
     }
     state.retainedBoot = state.preparedBoot
     state.window++
     log($, `memory cleared · window ${state.window}`)
-    return `pi-context: memory cleared · window ${state.window}`
+    return `notesoup: memory cleared · window ${state.window}`
   } catch (error) {
     const text = String(error)
     if (text.includes("headless (-p / SDK)")) {
@@ -229,11 +229,11 @@ async function reset($: Engine, state: ResetState): Promise<string> {
       log($, "reset skipped in headless (-p / SDK) session.")
     } else if (/a turn is (running|in flight)/.test(text)) {
       state.manualPending = true
-      return "pi-context: reset queued until the turn completes."
+      return "notesoup: reset queued until the turn completes."
     } else {
       log($, `reset failed; keeping the current window: ${text.replace(/[\r\n].*$/s, "")}`)
     }
-    return state.headless ? "pi-context: reset skipped in headless (-p / SDK) session." : "pi-context: reset failed; keeping the current window."
+    return state.headless ? "notesoup: reset skipped in headless (-p / SDK) session." : "notesoup: reset failed; keeping the current window."
   } finally {
     state.preparedBoot = undefined
     state.resetting = false

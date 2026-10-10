@@ -44,7 +44,7 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 			const marker = branch.find((entry): entry is WindowMarker => isWindowMarker(entry) && entry.data.windowId === windowId);
 			if (!marker || !isCheckpointBackedReset(ctx, marker) || !resetBoundaryCommitted(ctx, marker.id, windowId)) continue;
 			pendingResetNotices.delete(windowId);
-			ctx.ui.notify(`pi-context: memory cleared · ${windowId}`, "info");
+			ctx.ui.notify(`notesoup: memory cleared · ${windowId}`, "info");
 		}
 	};
 	pi.on("turn_start", (_event, ctx) => notifyCommittedResets(ctx));
@@ -56,7 +56,7 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 		if (snapshot.unavailable.length === 0 || incompleteNotesNotified.has(windowId)) return;
 		incompleteNotesNotified.add(windowId);
 		const homes = snapshot.unavailable.map((home) => home.label).join(", ");
-		ctx.ui.notify(`pi-context: notes index incomplete for ${homes}; notes_list can retry after recovery.`, "warning");
+		ctx.ui.notify(`notesoup: notes index incomplete for ${homes}; notes_list can retry after recovery.`, "warning");
 	};
 	const budget = registerBudget(pi, () => enabled, settingsManager, (windowId) => resets.closeOut(windowId, "automatic"));
 
@@ -83,7 +83,7 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 	pi.on("session_before_tree", (event, ctx) => {
 		if (!event.preparation.userWantsSummary) return undefined;
 		if (!branchHasWindowMarker(ctx) && !branchHasWindowMarker(ctx, event.preparation.targetId)) return undefined;
-		ctx.ui.notify("pi-context: skipped branch summary across a reset window; navigation continues without erased history.", "info");
+		ctx.ui.notify("notesoup: skipped branch summary across a reset window; navigation continues without erased history.", "info");
 		return { summary: { summary: "" } };
 	});
 
@@ -101,7 +101,7 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 		} catch (error) {
 			if (missingBootNotice !== windowId) {
 				missingBootNotice = windowId;
-				ctx.ui.notify(`pi-context: active context window ${windowId} has no visible boot; request cancelled safely. Use /clear-memory to start another window.`, "error");
+				ctx.ui.notify(`notesoup: active context window ${windowId} has no visible boot; request cancelled safely. Use /clear-memory to start another window.`, "error");
 			}
 			ctx.abort();
 			const safeHead = getCurrentSystemMessage(event.messages);
@@ -109,8 +109,8 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 		}
 	});
 
-	pi.registerCommand("pi-context", {
-		description: "Show loaded version/build and toggle pi-context context windows",
+	pi.registerCommand("notesoup", {
+		description: "Show loaded version/build and toggle notesoup context windows",
 		getArgumentCompletions: (prefix) =>
 			["on", "off"].filter((a) => a.startsWith(prefix)).map((a) => ({ value: a, label: a })),
 		handler: async (args, cmdCtx) => {
@@ -126,11 +126,11 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 				budget.clear();
 				resets.clear();
 			} else if (arg !== "") {
-				cmdCtx.ui.notify("Usage: /pi-context [on|off]", "error");
+				cmdCtx.ui.notify("Usage: /notesoup [on|off]", "error");
 				return;
 			}
 			const remaining = budget.statusFor(cmdCtx).remaining;
-			cmdCtx.ui.notify(`pi-context: ${enabled ? "on" : "off"} · ${buildLabel} · Pi ${VERSION} · window ${currentWindowId(cmdCtx)}${remaining === null ? "" : ` · ${remaining.toLocaleString("en-US")} tokens before close-out`}`, "info");
+			cmdCtx.ui.notify(`notesoup: ${enabled ? "on" : "off"} · ${buildLabel} · Pi ${VERSION} · window ${currentWindowId(cmdCtx)}${remaining === null ? "" : ` · ${remaining.toLocaleString("en-US")} tokens before close-out`}`, "info");
 		},
 	});
 
@@ -138,7 +138,7 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 		description: "Close out notes and clear memory; optionally append a prompt to continue in the fresh window",
 		handler: async (args: string, cmdCtx: ExtensionCommandContext) => {
 			if (!enabled) {
-				cmdCtx.ui.notify("pi-context: /clear-memory requires /pi-context on.", "error");
+				cmdCtx.ui.notify("notesoup: /clear-memory requires /notesoup on.", "error");
 				return;
 			}
 			const requestedWindowId = currentWindowId(cmdCtx);
@@ -154,19 +154,19 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 			const prompt = args.trim() || undefined;
 			const armed = resets.closeOut(requestedWindowId, "manual", prompt);
 			if (armed === "already-pending") {
-				cmdCtx.ui.notify("pi-context: a clear-memory request is already pending; keeping its original prompt and behavior.", "info");
+				cmdCtx.ui.notify("notesoup: a clear-memory request is already pending; keeping its original prompt and behavior.", "info");
 				return;
 			}
 			cmdCtx.ui.notify(prompt
-				? "pi-context: clear-memory queued; after closing out notes, the agent continues with your prompt in a fresh window."
+				? "notesoup: clear-memory queued; after closing out notes, the agent continues with your prompt in a fresh window."
 				: idle
-				? "pi-context: /clear-memory received; the agent closes out its notes, then stops in a fresh window."
-				: "pi-context: /clear-memory queued; the agent is asked to close out and the reset commits when the run settles.", "info");
+				? "notesoup: /clear-memory received; the agent closes out its notes, then stops in a fresh window."
+				: "notesoup: /clear-memory queued; the agent is asked to close out and the reset commits when the run settles.", "info");
 			try {
 				pi.sendMessage({ customType: MANUAL_WIPE_TYPE, content: WARNING_CONTENT, display: false }, { triggerTurn: true, deliverAs: "steer" });
 			} catch (error) {
 				resets.clear();
-				cmdCtx.ui.notify(`pi-context: could not start manual close-out (${String(error)}).`, "error");
+				cmdCtx.ui.notify(`notesoup: could not start manual close-out (${String(error)}).`, "error");
 			}
 		},
 	};
@@ -179,7 +179,7 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 		description: "Clear your in-context memory and start a fresh context window. Your session, notes, and history survive.",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_id, _params, _signal, _update, ctx) {
-			if (!enabled) return output({ error: "pi-context is off (/pi-context on to enable)" });
+			if (!enabled) return output({ error: "notesoup is off (/notesoup on to enable)" });
 			return output({ status: resets.request(currentWindowId(ctx)) }, undefined, true);
 		},
 	}));

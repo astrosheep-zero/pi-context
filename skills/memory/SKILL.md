@@ -1,6 +1,6 @@
 ---
 name: memory
-description: How pi-context's notes_* and history_* tools fit together — note addresses and homes, finding things again, and saving recovery state. Use when the context-window protocol is missing or unclear, or when unsure where a note belongs or how to find something again.
+description: How notesoup's notes_* and history_* tools fit together — note addresses and homes, finding things again, and saving recovery state. Use when the context-window protocol is missing or unclear, or when unsure where a note belongs or how to find something again.
 ---
 
 # Memory

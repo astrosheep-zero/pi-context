@@ -4,7 +4,7 @@ import test from "node:test";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_REMINDER_MARGIN_TOKENS, DEFAULT_RESERVE_TOKENS } from "../src/budget/constants.js";
 import { GUIDANCE_TYPE, WARNING_TYPE } from "../src/pi/entries.js";
-import { PI_CONTEXT_SETTINGS_KEY } from "../src/settings.js";
+import { NOTESOUP_SETTINGS_KEY } from "../src/settings.js";
 import {
 	appendText,
 	call,
@@ -23,7 +23,7 @@ import {
 } from "./helpers/extension.js";
 import { installExtensionTestHooks } from "./helpers/extension-test-environment.js";
 
-const testEnvironment = installExtensionTestHooks("pi-context-integration");
+const testEnvironment = installExtensionTestHooks("notesoup-integration");
 
 test("low-budget guidance and warning persist at turn_end, once per active window", async () => {
 	const sessionManager = manager();
@@ -61,7 +61,7 @@ test("early guidance stays silent and the committed final warning notifies once"
 	await commitTurnEndBoundary(captured, sm, final);
 	await runHandlers(captured, "turn_start", {}, final);
 	await runHandlers(captured, "agent_settled", {}, final);
-	assert.equal(noticesOf(final).filter((notice) => notice.message === "pi-context: context almost full; close out the current memory window.").length, 1, "only the committed final warning notifies, exactly once");
+	assert.equal(noticesOf(final).filter((notice) => notice.message === "notesoup: context almost full; close out the current memory window.").length, 1, "only the committed final warning notifies, exactly once");
 });
 
 test("the visible countdown ends at the warning line, clamps at zero, and preserves unknown usage", async () => {
@@ -88,13 +88,13 @@ test("the visible countdown ends at the warning line, clamps at zero, and preser
 	assert.equal(await readBudget(72_563, false), 94_669, "session start reloads the global reserve when the project is untrusted");
 });
 
-test("absent pi-context key or margins reproduce the default reminder threshold at Pi's default reserve", async () => {
+test("absent notesoup key or margins reproduce the default reminder threshold at Pi's default reserve", async () => {
 	assert.equal(DEFAULT_RESERVE_TOKENS, 16_384);
 	assert.equal(DEFAULT_RESERVE_TOKENS + DEFAULT_REMINDER_MARGIN_TOKENS, 40_960);
 
 	for (const [label, options] of [
 		["absent key", { global: {} }],
-		["absent margins", { global: { [PI_CONTEXT_SETTINGS_KEY]: {} } }],
+		["absent margins", { global: { [NOTESOUP_SETTINGS_KEY]: {} } }],
 	] as const) {
 		const fixture = settingsFixture(options);
 		const sm = manager();
@@ -115,11 +115,11 @@ test("absent pi-context key or margins reproduce the default reminder threshold 
 	}
 });
 
-test("project pi-context reminder margin and reserve override global per key", async () => {
+test("project notesoup reminder margin and reserve override global per key", async () => {
 	const fixture = settingsFixture({
 		reserveTokens: 20_000,
-		global: { [PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 30_000 } },
-		project: { compaction: { reserveTokens: 50_000 }, [PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 40_000 } },
+		global: { [NOTESOUP_SETTINGS_KEY]: { reminderMarginTokens: 30_000 } },
+		project: { compaction: { reserveTokens: 50_000 }, [NOTESOUP_SETTINGS_KEY]: { reminderMarginTokens: 40_000 } },
 	});
 	// Project reserve wins: reminder = 50000 + 40000 (project margin).
 	const sm = manager();
@@ -136,7 +136,7 @@ test("project pi-context reminder margin and reserve override global per key", a
 });
 
 test("an invalid reminder margin degrades to its default with one warning and never throws", async () => {
-	const fixture = settingsFixture({ global: { [PI_CONTEXT_SETTINGS_KEY]: { reminderMarginTokens: 0 } } });
+	const fixture = settingsFixture({ global: { [NOTESOUP_SETTINGS_KEY]: { reminderMarginTokens: 0 } } });
 	const sm = manager();
 	const captured = makeExtension(sm);
 	const ctx = context(sm, undefined, undefined, true, fixture.cwd);

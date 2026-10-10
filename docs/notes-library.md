@@ -3,11 +3,11 @@
 The same package provides a **Node.js TypeScript library independent of Pi**:
 
 ```sh
-npm install @astrosheep/pi-context
+npm install notesoup
 ```
 
 ```ts
-import { createNotesStore, type NotesIdentity } from "@astrosheep/pi-context/notes";
+import { createNotesStore, type NotesIdentity } from "notesoup/notes";
 
 const identity: NotesIdentity = {
   home: "/path/to/notes",          // explicit filesystem root
@@ -51,7 +51,7 @@ Ownership is explicit in the file tree:
 
 ```text
 src/
-  index.ts               # only the Pi extension and createPiContext factory
+  index.ts               # only the Pi extension and createNotesoup factory
   notes/                 # filesystem semantics and explicit NotesIdentity
   boot/                  # five-home snapshot and pure rendering with tool bindings
   history/               # decoded query projection, pairing, paging and folding

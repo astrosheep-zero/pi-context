@@ -8,7 +8,7 @@ export const CONTEXT_WINDOW_PROTOCOL_OPEN_TAG = "<context_window_protocol>";
 export const CONTEXT_WINDOW_PROTOCOL_CLOSE_TAG = "</context_window_protocol>";
 /**
  * Static protocol teaching adapted from Codex's token_budget.guidance_message to
- * pi-context's tool names. It lives once per window in the persisted boot block;
+ * notesoup's tool names. It lives once per window in the persisted boot block;
  * it is never re-injected, so it stays cache-stable at the head of the window.
  *
  * Deliberate fiction: the countdown ends at the warning line, and the runway below

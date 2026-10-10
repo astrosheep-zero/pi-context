@@ -9,7 +9,7 @@ import test from "node:test";
 import ts from "typescript";
 import { dependencyViolations, moduleReferences } from "./helpers/dependency-graph.js";
 import * as entry from "../src/index.js";
-import piContext, { createPiContext } from "../src/pi/extension.js";
+import notesoup, { createNotesoup } from "../src/pi/extension.js";
 
 function repository(): string {
 	let root = dirname(fileURLToPath(import.meta.url));
@@ -81,10 +81,10 @@ test("AST guard sees every literal module edge, not import-like prose or comment
 });
 
 test("the intentional root exports only the Pi extension and its settings-bound factory", () => {
-	assert.deepEqual(Object.keys(entry).sort(), ["createPiContext", "default"]);
-	assert.equal(entry.default, piContext);
-	assert.equal(entry.createPiContext, createPiContext);
-	assert.equal(typeof entry.createPiContext(), "function");
+	assert.deepEqual(Object.keys(entry).sort(), ["createNotesoup", "default"]);
+	assert.equal(entry.default, notesoup);
+	assert.equal(entry.createNotesoup, createNotesoup);
+	assert.equal(typeof entry.createNotesoup(), "function");
 });
 
 
@@ -102,7 +102,7 @@ test("configured extension source and moved dream CLI are executable current ent
 		registerCommand(name: string) { commands.push(name); },
 	} as unknown as ExtensionAPI);
 	assert.deepEqual(tools.map((tool) => tool.name).sort(), ["clear_memory", "get_context_remaining", "history_list", "history_read", "history_search", "history_windows", "notes_list", "notes_read", "notes_search", "notes_update", "notes_write"]);
-	assert.deepEqual(commands.sort(), ["clear-memory", "cm", "pi-context"]);
+	assert.deepEqual(commands.sort(), ["clear-memory", "cm", "notesoup"]);
 	const help = execFileSync(process.execPath, [resolve(root, manifest.bin.dream), "--help"], { cwd: root, encoding: "utf8" });
 	assert.ok(help.startsWith("dream doctor [--notes-home <dir>]"));
 	assert.ok(help.includes("Default playbook: <installed package root>/playbook.md"));
