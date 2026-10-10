@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resetBoundaryCommitted } from "./reset/committed.js";
 import { getCurrentSystemMessage, Type } from "@earendil-works/pi-ai";
-import { VERSION, defineTool, type ExtensionAPI, type ExtensionContext, type SettingsManager } from "@earendil-works/pi-coding-agent";
+import { VERSION, defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { registerBudget } from "./budget.js";
 import { output } from "../tools/output.js";
 import { currentReset, currentWindowId, isCheckpointBackedReset, isWindowBoot, isWindowMarker, projectRootWindow, projectWindow, rootWindowId, type WindowMarker } from "./window.js";
@@ -134,9 +134,9 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 		},
 	});
 
-	pi.registerCommand("clear-memory", {
-		description: "Ask the agent to close out its notes, then stop in a fresh context window",
-		handler: async (_args, cmdCtx) => {
+	const clearMemoryCommand = {
+		description: "Close out notes and clear memory; optionally append a prompt to continue in the fresh window",
+		handler: async (args: string, cmdCtx: ExtensionCommandContext) => {
 			if (!enabled) {
 				cmdCtx.ui.notify("pi-context: /clear-memory requires /pi-context on.", "error");
 				return;
@@ -148,13 +148,18 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 				if (!enabled || currentWindowId(cmdCtx) !== requestedWindowId) return;
 				idle = true;
 			}
-			// Manual wipes are close-outs: they commit at settlement so the run actually
-			// stops. The hidden warning goes out in both cases — triggered when idle,
+			// Manual wipes close out at settlement, then stop or continue with the prompt. The hidden warning goes out in both cases — triggered when idle,
 			// steered into the running turn when busy — so the agent closes out promptly
 			// instead of the reset waiting for the whole run.
-			const armed = resets.closeOut(requestedWindowId, "manual");
-			if (armed === "already-pending") return;
-			cmdCtx.ui.notify(idle
+			const prompt = args.trim() || undefined;
+			const armed = resets.closeOut(requestedWindowId, "manual", prompt);
+			if (armed === "already-pending") {
+				cmdCtx.ui.notify("pi-context: a clear-memory request is already pending; keeping its original prompt and behavior.", "info");
+				return;
+			}
+			cmdCtx.ui.notify(prompt
+				? "pi-context: clear-memory queued; after closing out notes, the agent continues with your prompt in a fresh window."
+				: idle
 				? "pi-context: /clear-memory received; the agent closes out its notes, then stops in a fresh window."
 				: "pi-context: /clear-memory queued; the agent is asked to close out and the reset commits when the run settles.", "info");
 			try {
@@ -164,7 +169,9 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 				cmdCtx.ui.notify(`pi-context: could not start manual close-out (${String(error)}).`, "error");
 			}
 		},
-	});
+	};
+	pi.registerCommand("clear-memory", clearMemoryCommand);
+	pi.registerCommand("cm", clearMemoryCommand);
 
 	pi.registerTool(defineTool({
 		name: "clear_memory",
@@ -179,7 +186,7 @@ export function registerContext(pi: ExtensionAPI, settingsManager?: SettingsMana
 
 	const resets = registerResetLifecycle(pi, {
 		isEnabled: () => enabled,
-		buildReset: (ctx, isCurrent) => buildResetDrafts(ctx, notifyIncompleteNotes, isCurrent),
+		buildReset: (ctx, isCurrent, prompt) => buildResetDrafts(ctx, notifyIncompleteNotes, isCurrent, prompt),
 		getLifecycleGeneration: () => lifecycleGeneration,
 		onResetReady: (_ctx, drafts) => {
 			const boot = drafts.find((draft) => draft.type === "custom_message" && draft.customType === BOOT_TYPE);

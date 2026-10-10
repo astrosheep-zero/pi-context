@@ -276,17 +276,19 @@ test("reset construction failure preserves incoming and budget drafts without co
 			consumeTurnEnd: () => [budgetDraft],
 			clear: () => {},
 		},
-		buildReset: () => { throw new Error("synthetic reset construction failure"); },
+		buildReset: (_ctx, _isCurrent, prompt) => { assert.equal(prompt, "AFTER_RESET"); throw new Error("synthetic reset construction failure"); },
 	});
-	lifecycle.request(`pcw:${sessionManager.getSessionId().slice(0, 8)}:root`);
+	lifecycle.closeOut(`pcw:${sessionManager.getSessionId().slice(0, 8)}:root`, "manual", "AFTER_RESET");
 	const incoming: SessionBoundaryDraft = { type: "custom_message", customType: "foreign/boundary", content: "foreign draft", display: false };
 	const results = [];
 	for (const handler of handlers.get("turn_end") ?? []) results.push(await handler(fakeBoundaryEvent([incoming]), ctx));
+	for (const handler of handlers.get("agent_before_settle") ?? []) results.push(await handler(fakeBoundaryEvent([]), ctx));
 	const result = resultEntries(results);
 	assert.deepEqual(result.entries, [incoming, budgetDraft], "already-built drafts survive reset construction failure");
 	assert.equal(result.continue, false, "a failed reset does not request continuation");
 	assert.equal(notices.at(-1)?.type, "warning");
 	assert.match(notices.at(-1)?.message ?? "", /could not build reset/);
+	assert.match(notices.at(-1)?.message ?? "", /follow-up prompt was not executed/);
 });
 
 test("a stale async reset is discarded after a lifecycle switch without staging a notice", async () => {

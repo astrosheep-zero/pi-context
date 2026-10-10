@@ -487,6 +487,98 @@ test("real AgentSession: manual command spans its tool batch and stops at settle
 	}
 });
 
+test("real AgentSession: clear commands append a prompt after continuation and resume once", { timeout: 25000 }, async () => {
+	for (const mode of ["clear-memory", "cm", "hard-reserve", "overflow"] as const) {
+		let fixture!: Fixture;
+		const prompt = 'AFTER_CLEAR_PROMPT /cm "literal text"';
+		fixture = await openFixture({
+			compactionEnabled: mode === "hard-reserve",
+			script: (request, context) => {
+				if (request === 1) return assistant(fixture, [{ type: "text", text: "initial work" }]);
+				if (request === 2) {
+					assert.equal(text(context).includes(prompt), false, "the old window never sees the trailing prompt");
+					if (mode === "overflow") return assistant(fixture, [], "error", { errorMessage: "Prompt too long: context exceeds maximum context length" });
+					return mode === "hard-reserve"
+						? assistant(fixture, [{ type: "toolCall", id: "prompt-note", name: "notes_write", arguments: { address: "prompt-note.md", content: "saved" } }], "toolUse", { usage: usage(80_000) })
+						: assistant(fixture, [{ type: "text", text: "notes complete" }]);
+				}
+				assert.equal(request, 3, "exactly one fresh-window request");
+				assert.equal(text(context).includes("PROMPT_RESET_OLD_SENTINEL"), false);
+				assert.equal(text(context).split(prompt).length - 1, 1);
+				assert.ok(text(context).indexOf(CONTINUATION) < text(context).indexOf(prompt), "wake-up prose precedes the appended prompt");
+				return assistant(fixture, [{ type: "text", text: "prompt handled" }]);
+			},
+		});
+		try {
+			await fixture.session.prompt("PROMPT_RESET_OLD_SENTINEL");
+			await fixture.session.prompt(`/${mode === "clear-memory" ? "clear-memory" : "cm"}   ${prompt}  `);
+			await fixture.session.waitForIdle();
+			assert.equal(fixture.requests.length, 3);
+			assert.equal(resetMarkers(fixture).length, 1);
+			const branch = fixture.sessionManager.getBranch();
+			const continuationIndex = branch.findIndex((entry) => entry.type === "custom_message" && entry.customType === CONTINUATION_TYPE);
+			const appended = branch[continuationIndex + 1];
+			assert.ok(appended?.type === "custom_message");
+			assert.equal(appended.customType, "pi-context/reset-prompt");
+			assert.equal(appended.content, prompt);
+			assert.equal(appended.display, true);
+			assert.ok(fixture.notices.some((notice) => notice.includes("memory cleared")));
+		} finally {
+			fixture.close();
+		}
+	}
+});
+
+test("real AgentSession: whitespace-only /cm clears and stops", { timeout: 20000 }, async () => {
+	let fixture!: Fixture;
+	fixture = await openFixture({
+		compactionEnabled: false,
+		script: (request) => {
+			assert.equal(request, 1, "bare alias never starts a fresh-window request");
+			return assistant(fixture, [{ type: "text", text: "notes complete" }]);
+		},
+	});
+	try {
+		await fixture.session.prompt("/cm   ");
+		await fixture.session.waitForIdle();
+		assert.equal(resetMarkers(fixture).length, 1);
+		assert.equal(fixture.sessionManager.getBranch().some((entry) => entry.type === "custom_message" && entry.customType === "pi-context/reset-prompt"), false);
+	} finally { fixture.close(); }
+});
+
+test("real AgentSession: streaming clear prompt keeps the first request", { timeout: 20000 }, async () => {
+	let fixture!: Fixture;
+	let started!: () => void;
+	let release!: () => void;
+	const ready = new Promise<void>((resolve) => { started = resolve; });
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	fixture = await openFixture({
+		compactionEnabled: false,
+		script: async (request, context) => {
+			if (request === 1) { started(); await gate; }
+			if (request <= 2) assert.equal(text(context).includes("FIRST_RESET_PROMPT"), false);
+			if (request === 3) {
+				assert.ok(text(context).includes("FIRST_RESET_PROMPT"));
+				assert.equal(text(context).includes("IGNORED_RESET_PROMPT"), false);
+			}
+			assert.ok(request <= 3);
+			return assistant(fixture, [{ type: "text", text: "done" }]);
+		},
+	});
+	try {
+		const running = fixture.session.prompt("streaming old work");
+		await ready;
+		await fixture.session.prompt("/cm FIRST_RESET_PROMPT", { streamingBehavior: "steer" });
+		await fixture.session.prompt("/clear-memory IGNORED_RESET_PROMPT", { streamingBehavior: "steer" });
+		release();
+		await running;
+		await fixture.session.waitForIdle();
+		assert.equal(fixture.requests.length, 3);
+		assert.equal(resetMarkers(fixture).length, 1);
+		assert.ok(fixture.notices.some((notice) => notice.includes("already pending")));
+	} finally { release(); fixture.close(); }
+});
+
 test("real AgentSession: manual hard-reserve reset stops clean and mixed-tool turns without fresh provider work", { timeout: 20000 }, async () => {
 	for (const mixed of [false, true]) {
 		let fixture!: Fixture;
@@ -674,7 +766,7 @@ test("real AgentSession: user abort, synthetic aborted response, and generic err
 			},
 		});
 		try {
-			await fixture.session.prompt("/clear-memory");
+			await fixture.session.prompt("/cm SHOULD_NOT_RUN_AFTER_FAILURE");
 			await fixture.session.waitForIdle();
 			assert.equal(resetMarkers(fixture).length, 0, `${mode} does not force a reset`);
 			assert.equal(fixture.sessionManager.getBranch().filter((entry) => entry.type === "compaction").length, 0);
@@ -684,6 +776,7 @@ test("real AgentSession: user abort, synthetic aborted response, and generic err
 			await fixture.session.prompt("AFTER_UNSUCCESSFUL_CLOSEOUT");
 			await fixture.session.waitForIdle();
 			assert.equal(resetMarkers(fixture).length, 0, "no pending close-out leaks into a later prompt");
+			assert.equal(JSON.stringify(fixture.sessionManager.getBranch()).includes("SHOULD_NOT_RUN_AFTER_FAILURE"), false, "cancelled prompt is never appended");
 		} finally {
 			fixture.close();
 		}

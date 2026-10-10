@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext, SessionBoundaryDraft, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { BOOT_TYPE, CONTINUATION_TYPE, RESET_MARKER_TYPE } from "../entries.js";
+import { BOOT_TYPE, CONTINUATION_TYPE, RESET_MARKER_TYPE, RESET_PROMPT_TYPE } from "../entries.js";
 import { CONTINUATION } from "./text.js";
 import { currentWindowId, isWindowBootEntry, isWindowMarker, previousWindowId, type WindowMarker } from "../window.js";
 import { buildBootMessage, sendBoot, type IncompleteNotesNotifier } from "../boot.js";
@@ -22,13 +22,14 @@ export function sendContinuation(pi: ExtensionAPI): void {
 
 /**
  * The closed, ordered reset shape: retain-none native checkpoint, marker, matching boot,
- * continuation. The boot snapshot is acquired asynchronously after capturing this identity.
+ * continuation, then an optional command prompt. The boot snapshot is acquired asynchronously after capturing this identity.
  */
 export async function buildResetDrafts(
 	ctx: ExtensionContext,
 	notifyIncompleteNotes?: IncompleteNotesNotifier,
 	isCurrent: () => boolean = () => true,
-): Promise<[SessionBoundaryDraft, SessionBoundaryDraft, SessionBoundaryDraft, SessionBoundaryDraft]> {
+	prompt?: string,
+): Promise<SessionBoundaryDraft[]> {
 	const sessionId = ctx.sessionManager.getSessionId();
 	const previousId = currentWindowId(ctx);
 	const sessionPrefix = sessionId.slice(0, 8);
@@ -45,6 +46,7 @@ export async function buildResetDrafts(
 		{ type: "custom", customType: RESET_MARKER_TYPE, data: { windowId } },
 		{ type: "custom_message", customType: BOOT_TYPE, content: boot.content, display: false, details: { windowId } },
 		{ type: "custom_message", customType: CONTINUATION_TYPE, content: CONTINUATION, display: false },
+		...(prompt ? [{ type: "custom_message" as const, customType: RESET_PROMPT_TYPE, content: prompt, display: true }] : []),
 	];
 }
 

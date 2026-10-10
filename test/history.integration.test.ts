@@ -75,7 +75,7 @@ test("history schemas expose seq and anchor paging, while notes use snapshot lim
 		const schema = captured.tools.get(toolName)!.parameters as TSchema;
 		const base = toolName === "history_search" ? { query: "needle" } : {};
 		assert.equal(Check(schema, { ...base, roles: ["tool"] }), true);
-		for (const invalid of [{ roles: ["tool_call"] }, { roles: ["system"] }, { tool_name: "bash" }, { roles: [] }, { before: 0 }, { after: 0 }]) {
+		for (const invalid of [{ roles: ["tool_call"] }, { roles: ["system"] }, { tool_name: "bash" }, { roles: [] }]) {
 			assert.equal(Check(schema, { ...base, ...invalid }), false, `${toolName}: ${JSON.stringify(invalid)}`);
 		}
 	}
@@ -187,8 +187,8 @@ test("anchor paging is chronological, stable under appends, and supports ranges"
 	assert.equal(rangeLast.newer_after, null);
 	assert.equal("has_older" in rangeLast, false);
 	assert.equal("has_newer" in rangeLast, false);
-	assert.equal((captured.tools.get("history_list")?.parameters as { properties?: Record<string, { minimum?: number }> }).properties?.before?.minimum, 1);
-	assert.equal((captured.tools.get("history_list")?.parameters as { properties?: Record<string, { minimum?: number }> }).properties?.after?.minimum, 1);
+	assert.equal((captured.tools.get("history_list")?.parameters as { properties?: Record<string, { minimum?: number }> }).properties?.before?.minimum, undefined, "bounds take any integer; the implementation treats out-of-range values as empty/open");
+	assert.equal((captured.tools.get("history_list")?.parameters as { properties?: Record<string, { minimum?: number }> }).properties?.after?.minimum, undefined);
 });
 
 test("a one-row page budget admits the newest candidate first", () => {
@@ -404,6 +404,43 @@ test("standalone bash execution retains command, output, and truncation path", a
 	const read = resultRead<{ seq: number }>(await call(captured, "history_read", { seq: 1, offset_chars: query.items[0]!.offset_chars as number }, ctx));
 	assert.equal(read.content, "needle output");
 	assert.equal(read.seq, 1);
+});
+
+test("list renders paging and fold recipes, read renders a neighborhood call, and @previous resolves", async () => {
+	const session = manager();
+	const captured = makeExtension(session);
+	const ctx = context(session);
+	for (let i = 0; i < 30; i++) appendText(session, "user", `older window ${i}`);
+	session.appendCustomEntry("pi-context/reset-marker", { windowId: "pcw:test:w2" });
+	appendText(session, "user", "current window");
+
+	const listed = await call(captured, "history_list", {}, ctx);
+	assert.match(rendered(listed), /→ older: \{"before":\d+\}/, "the footer prints the exact call to page older");
+
+	const windows = resultData<{ windows: Array<{ window_id: string }> }>(await call(captured, "history_windows", {}, ctx));
+	assert.equal(windows.windows.length, 2);
+	const previous = page(await call(captured, "history_list", { window_id: "@previous" }, ctx));
+	assert.ok(previous.items.length > 0 && previous.items.every((item) => item.window_id === windows.windows[0]!.window_id), "@previous names the window before the current one");
+	const previousSearch = page(await call(captured, "history_search", { query: "older window", window_id: "@previous" }, ctx));
+	assert.ok(previousSearch.items.length > 0, "search resolves the alias too");
+
+	toolCall(session, "t1", "bash", { command: "ls" });
+	toolResult(session, "t1", "bash", "done");
+	appendText(session, "user", "after tools");
+	const folded = await call(captured, "history_list", {}, ctx);
+	assert.match(rendered(folded), /→ expand: \{"after":\d+,"before":\d+,"roles":\["tool","context"\]\}/, "a folded row prints its own expand recipe");
+
+	appendText(session, "user", "needle read target");
+	const hits = page(await call(captured, "history_search", { query: "needle read target" }, ctx));
+	const read = await call(captured, "history_read", { seq: hits.items[0]!.seq }, ctx);
+	assert.match(rendered(read), /neighborhood → history_list\(\{"after":\d+,"before":\d+\}\)/, "a read prints the call for surrounding events");
+
+	const solo = manager();
+	const soloCaptured = makeExtension(solo);
+	appendText(solo, "user", "only window");
+	const noPrevious = resultError(await call(soloCaptured, "history_list", { window_id: "@previous" }, context(solo)));
+	assert.equal(noPrevious.code, "unknown_window_id");
+	assert.match(noPrevious.message, /@previous/);
 });
 
 test("compaction summary becomes context and is folded in the default list", async () => {
